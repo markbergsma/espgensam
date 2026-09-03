@@ -1,0 +1,22 @@
+# ESPHome build directory & storage
+.esphome/
+build/
+
+# Local credentials
+secrets.yaml
+
+# Compiled firmware binaries & maps
+*.bin
+*.elf
+*.map
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS system files
+.DS_Store
+
+# Local packet captures for debugging
+captures/

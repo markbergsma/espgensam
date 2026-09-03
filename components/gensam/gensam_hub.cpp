@@ -1,0 +1,669 @@
+/// @file gensam_hub.cpp
+/// @brief ESPHome hub component for native Genelec SAM RS-485 communication.
+/// See gensam_hub.h for architectural design rationale and complete API documentation.
+
+#include "gensam_hub.h"
+#include "esphome/core/log.h"
+#include "driver/gpio.h"
+
+static const char *const TAG = "gensam";
+
+namespace esphome {
+namespace gensam {
+
+void GenSAMHub::setup() {
+  ESP_LOGI(TAG, "Initializing GenSAM Hub on RS485 bus...");
+  boot_time_ = millis();
+
+  if (tx_pin_ < 0 || rx_pin_ < 0) {
+    ESP_LOGE(TAG, "Invalid TX (%d) or RX (%d) pin configuration", tx_pin_, rx_pin_);
+    this->mark_failed();
+    return;
+  }
+
+  // 1. Assert RS485 DC-DC Power Enable (T-CAN485: GPIO16 = 1 powers 5V boost converter)
+  if (power_pin_ >= 0) {
+    gpio_config_t pwr_cfg = {};
+    pwr_cfg.pin_bit_mask = (1ULL << power_pin_);
+    pwr_cfg.mode = GPIO_MODE_OUTPUT;
+    pwr_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+    pwr_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    pwr_cfg.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&pwr_cfg);
+    gpio_set_level(static_cast<gpio_num_t>(power_pin_), 1);  // High = 5V ON
+    ESP_LOGI(TAG, "RS485 5V Power Enable pin (GPIO%d) asserted HIGH (5V Booster ON)", power_pin_);
+    delay(50);  // Allow 5V DC-DC booster to stabilize
+  }
+
+  // 2. Assert Transceiver Enable (T-CAN485: GPIO19 = 1 turns ON NPN shifter to enable MAX13487)
+  if (se_pin_ >= 0) {
+    gpio_config_t se_cfg = {};
+    se_cfg.pin_bit_mask = (1ULL << se_pin_);
+    se_cfg.mode = GPIO_MODE_OUTPUT;
+    se_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+    se_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    se_cfg.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&se_cfg);
+    gpio_set_level(static_cast<gpio_num_t>(se_pin_), 1);  // High = NPN ON -> Transceiver ENABLED
+    ESP_LOGI(TAG, "RS485 Transceiver Enable pin (GPIO%d) asserted HIGH", se_pin_);
+  }
+
+  // 3. Assert Receiver Enable / AutoDirection (T-CAN485: GPIO17 = 1 turns ON NPN shifter -> Receiver & AutoDirection ON)
+  if (re_pin_ >= 0) {
+    gpio_config_t re_cfg = {};
+    re_cfg.pin_bit_mask = (1ULL << re_pin_);
+    re_cfg.mode = GPIO_MODE_OUTPUT;
+    re_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+    re_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    re_cfg.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&re_cfg);
+    gpio_set_level(static_cast<gpio_num_t>(re_pin_), 1);  // High = NPN ON -> RX & AutoDirection ON
+    ESP_LOGI(TAG, "RS485 Receiver Enable pin (GPIO%d) asserted HIGH", re_pin_);
+  }
+
+  // 4. Initialize 9-bit driver (RMT RX + RMT TX continuous zero-gap bitstream)
+  if (listen_only_) {
+    // In listen-only mode, drive TX pin HIGH (DE deasserted on RS-485 transceiver)
+    // and do not initialize the RMT TX transmitter channel.
+    gpio_config_t tx_cfg = {};
+    tx_cfg.pin_bit_mask = (1ULL << tx_pin_);
+    tx_cfg.mode = GPIO_MODE_OUTPUT;
+    tx_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    tx_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    tx_cfg.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&tx_cfg);
+    gpio_set_level(static_cast<gpio_num_t>(tx_pin_), 1);
+    uart9_.setup(1, -1, rx_pin_, de_pin_, baud_rate_, rx_buffer_size_);
+  } else {
+    uart9_.setup(1, tx_pin_, rx_pin_, de_pin_, baud_rate_, rx_buffer_size_);
+  }
+  if (!uart9_.is_initialized()) {
+    ESP_LOGE(TAG, "Failed to initialize 9-bit UART/RMT driver");
+    this->mark_failed();
+    return;
+  }
+
+  ESP_LOGI(TAG, "GenSAM Hub initialized successfully (baud=%lu, TX=%s, RX=GPIO%d, yield_to_glm=%s, cooldown=%u ms)",
+           (unsigned long)baud_rate_, listen_only_ ? "DISABLED (listen_only)" : ("GPIO" + std::to_string(tx_pin_)).c_str(),
+           rx_pin_, YESNO(yield_to_glm_), (unsigned)glm_inactivity_cooldown_ms_);
+}
+
+void GenSAMHub::dump_config() {
+  ESP_LOGCONFIG(TAG, "GenSAM Hub:");
+  ESP_LOGCONFIG(TAG, "  TX Pin: GPIO%d", tx_pin_);
+  ESP_LOGCONFIG(TAG, "  RX Pin: GPIO%d", rx_pin_);
+  if (de_pin_ >= 0) {
+    ESP_LOGCONFIG(TAG, "  Hardware DE (Direction) Pin: GPIO%d", de_pin_);
+  }
+  if (re_pin_ >= 0) {
+    ESP_LOGCONFIG(TAG, "  Receiver Enable Pin: GPIO%d", re_pin_);
+  }
+  if (power_pin_ >= 0) {
+    ESP_LOGCONFIG(TAG, "  5V Power Pin: GPIO%d", power_pin_);
+  }
+  if (se_pin_ >= 0) {
+    ESP_LOGCONFIG(TAG, "  Transceiver Pin: GPIO%d", se_pin_);
+  }
+  ESP_LOGCONFIG(TAG, "  Baud Rate: %lu bps (fixed GLM standard)", (unsigned long)baud_rate_);
+  ESP_LOGCONFIG(TAG, "  RX Buffer Size: %u characters", (unsigned)rx_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Listen Only: %s", YESNO(listen_only_));
+  ESP_LOGCONFIG(TAG, "  Yield to GLM: %s", YESNO(yield_to_glm_));
+  ESP_LOGCONFIG(TAG, "  GLM Inactivity Cooldown: %u ms", (unsigned)glm_inactivity_cooldown_ms_);
+  ESP_LOGCONFIG(TAG, "  Discovered Monitors: %u", (unsigned)monitors_.size());
+  for (const auto &kv : monitors_) {
+    ESP_LOGCONFIG(TAG, "    - %s", kv.second.to_string().c_str());
+  }
+}
+
+bool GenSAMHub::can_transmit() const {
+  if (listen_only_) {
+    return false;
+  }
+  if (yield_to_glm_ && glm_active_) {
+    return false;
+  }
+  return uart9_.is_initialized();
+}
+
+void GenSAMHub::send_raw_frame(const std::vector<Uart9BitChar> &raw_chars) {
+  if (!can_transmit() || raw_chars.empty()) {
+    return;
+  }
+  last_our_tx_time_ = millis();
+  uart9_.write(raw_chars.data(), raw_chars.size());
+}
+
+bool GenSAMHub::send_frame(const Frame &frame) {
+  if (!uart9_.is_initialized()) {
+    ESP_LOGW(TAG, "Cannot send frame: UART9 driver not initialized");
+    return false;
+  }
+
+  if (listen_only_) {
+    ESP_LOGW(TAG, "Cannot send frame: listen_only mode is enabled");
+    return false;
+  }
+
+  if (yield_to_glm_ && glm_active_) {
+    uint32_t now = millis();
+    if (now - last_tx_blocked_warning_ > 5000) {
+      last_tx_blocked_warning_ = now;
+      uint32_t elapsed = now - last_glm_activity_;
+      uint32_t remaining = (elapsed < glm_inactivity_cooldown_ms_) ? (glm_inactivity_cooldown_ms_ - elapsed) : 0;
+      ESP_LOGW(TAG, "Cannot send frame: External GLM master/adapter is active on bus (cooldown: %u s remaining)",
+               (unsigned)(remaining / 1000));
+    }
+    return false;
+  }
+
+  std::vector<Uart9BitChar> wire_chars = frame.to_9bit();
+  ESP_LOGD(TAG, "TX -> %s", frame.to_string().c_str());
+
+  last_our_tx_time_ = millis();
+  uart9_.write(wire_chars.data(), wire_chars.size());
+  parser_.clear();
+  return true;
+}
+
+GenSAMMonitor *GenSAMHub::get_monitor(uint8_t address) {
+  auto it = monitors_.find(address);
+  if (it != monitors_.end()) {
+    return &it->second;
+  }
+  return nullptr;
+}
+
+const GenSAMMonitor *GenSAMHub::get_monitor(uint8_t address) const {
+  auto it = monitors_.find(address);
+  if (it != monitors_.end()) {
+    return &it->second;
+  }
+  return nullptr;
+}
+
+void GenSAMHub::send_wakeup() {
+  if (!can_transmit()) {
+    return;
+  }
+  ESP_LOGI(TAG, "Sending GLM wakeup broadcast sequence to monitors...");
+
+  for (int i = 0; i < 3; i++) {
+    Frame w1;
+    w1.address = BROADCAST_ADDRESS;
+    w1.command = CMD_WAKEUP;  // 0x3A
+    w1.payload = {0x03, 0x7F};
+    this->send_frame(w1);
+    delay(5);
+
+    Frame w2;
+    w2.address = BROADCAST_ADDRESS;
+    w2.command = CMD_WAKEUP;  // 0x3A
+    w2.payload = {0x03, 0x01};
+    this->send_frame(w2);
+    delay(10);
+  }
+}
+
+void GenSAMHub::start_race_discovery() {
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot start RACE discovery: Hub is not in transmitting state");
+    return;
+  }
+
+  if (race_state_ == RaceState::RACE_PING_SENT || race_state_ == RaceState::RACE_SET_RID_SENT) {
+    return;
+  }
+
+  initial_discovery_done_ = true;
+  ESP_LOGI(TAG, "Starting GLM RACE monitor discovery...");
+  race_state_ = RaceState::RACE_PING_SENT;
+  next_assign_addr_ = MONITOR_START_ADDR;
+  current_racing_serial_.clear();
+  race_step_time_ = millis();
+
+  // Broadcast initial RACE discovery ping (0xFF 0xFE)
+  Frame ping;
+  ping.address = BROADCAST_ADDRESS;
+  ping.command = CMD_DISCOVERY;
+  this->send_frame(ping);
+}
+
+void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
+  uint32_t now = millis();
+
+  // 1. ACTIVE MASTER STATE MACHINE
+  if (!glm_active_ && !listen_only_) {
+    if (race_state_ == RaceState::RACE_PING_SENT) {
+      // Expecting winning unassigned monitor response with 3-byte serial
+      if (frame.payload.size() == 3) {
+        current_racing_serial_ = frame.payload;
+        race_state_ = RaceState::RACE_SET_RID_SENT;
+        race_step_time_ = now;
+
+        // Allow 300us transceiver turnaround before transmitting CMD_SET_RID
+        delayMicroseconds(300);
+
+        // Assign address to this monitor via CMD_SET_RID to multicast (0xF0)
+        Frame set_rid;
+        set_rid.address = MULTICAST_ADDRESS;
+        set_rid.command = CMD_SET_RID;
+        set_rid.payload = current_racing_serial_;
+        set_rid.payload.push_back(next_assign_addr_);
+        this->send_frame(set_rid);
+        return;
+      }
+    } else if (race_state_ == RaceState::RACE_SET_RID_SENT) {
+      // Expecting ACK confirming address assignment
+      bool is_ack = false;
+      if (frame.payload.size() == 1 && frame.payload[0] == next_assign_addr_) {
+        is_ack = true;
+      } else if (frame.command == CMD_ACK || frame.command == CMD_REPORT_STATUS || frame.command == 0x05) {
+        if (frame.payload.empty() || frame.payload[0] == next_assign_addr_) {
+          is_ack = true;
+        }
+      }
+
+      if (is_ack) {
+        GenSAMMonitor &mon = monitors_[next_assign_addr_];
+        mon.address = next_assign_addr_;
+        mon.unique_id = current_racing_serial_;
+        mon.online = true;
+        mon.last_seen_ms = now;
+
+        ESP_LOGI(TAG, "Assigned monitor at address 0x%02X (Hardware ID: %s)",
+                 next_assign_addr_, mon.unique_id_hex().c_str());
+
+        next_assign_addr_++;
+        current_racing_serial_.clear();
+
+        // Allow 300us turnaround before next ping
+        delayMicroseconds(300);
+
+        // Send next RACE ping
+        Frame ping;
+        ping.address = BROADCAST_ADDRESS;
+        ping.command = CMD_DISCOVERY;
+        this->send_frame(ping);
+        race_state_ = RaceState::RACE_PING_SENT;
+        race_step_time_ = now;
+        return;
+      }
+    } else if (race_state_ == RaceState::QUERYING_DEVICES) {
+      if (current_query_addr_ != 0 && frame.address == HOST_ADDRESS && !frame.payload.empty() &&
+          (frame.command == CMD_REPORT_STATUS || frame.command == CMD_HARDWARE_QUERY ||
+           frame.command == CMD_SOFTWARE_QUERY || frame.command == CMD_BAR_CODE)) {
+        GenSAMMonitor &mon = monitors_[current_query_addr_];
+        if (current_query_cmd_ == CMD_BAR_CODE) {
+          parse_barcode(frame.payload.data(), frame.payload.size(), mon);
+          ESP_LOGI(TAG, "Discovered serial for 0x%02X: %s", current_query_addr_, mon.serial_number.c_str());
+        } else {
+          parse_device_info(frame.payload.data(), frame.payload.size(), mon);
+          ESP_LOGI(TAG, "Discovered: %s", mon.to_string().c_str());
+        }
+        mon.online = true;
+        mon.last_seen_ms = now;
+        current_query_addr_ = 0;
+        current_query_cmd_ = 0;
+        query_retries_ = 0;
+        race_step_time_ = now;
+        return;
+      }
+    } else if (race_state_ == RaceState::POLLING_MONITORS) {
+      if (current_query_addr_ != 0 && frame.address == HOST_ADDRESS &&
+          (frame.command == CMD_REPORT_STATUS || frame.command == CMD_QUERY_STATUS)) {
+        GenSAMMonitor &mon = monitors_[current_query_addr_];
+        parse_telemetry(frame.payload.data(), frame.payload.size(), mon);
+        mon.online = true;
+        mon.last_seen_ms = now;
+        ESP_LOGI(TAG, "[0x%02X %s] Telemetry: Temp=%d°C In=%d dBFS Out=%d dBFS Clip=%s",
+                 current_query_addr_, mon.model.c_str(),
+                 (int)mon.temperature, (int)mon.input_db, (int)mon.output_db,
+                 YESNO(mon.clip));
+        current_query_addr_ = 0;
+        return;
+      }
+    }
+  }
+
+  // 2. PASSIVE SNOOPING (Listen-Only or External GLM Master Active)
+  // Track commands sent on bus
+  if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
+    last_queried_addr_ = frame.address;
+    last_queried_cmd_ = frame.command;
+  } else if ((frame.address == MULTICAST_ADDRESS || frame.address == 0xF0) &&
+             frame.command == CMD_SET_RID && frame.payload.size() == 4) {
+    uint8_t addr = frame.payload[3];
+    GenSAMMonitor &mon = monitors_[addr];
+    mon.address = addr;
+    mon.unique_id = {frame.payload[0], frame.payload[1], frame.payload[2]};
+    mon.online = true;
+    mon.last_seen_ms = now;
+    ESP_LOGI(TAG, "[Sniffed] Assigned monitor 0x%02X (ID: %s)", addr, mon.unique_id_hex().c_str());
+  }
+
+  // Track replies sent to host
+  if (frame.address == HOST_ADDRESS && frame.command == CMD_REPORT_STATUS) {
+    if (last_queried_cmd_ == CMD_SOFTWARE_QUERY && last_queried_addr_ != 0) {
+      GenSAMMonitor &mon = monitors_[last_queried_addr_];
+      mon.address = last_queried_addr_;
+      parse_device_info(frame.payload.data(), frame.payload.size(), mon);
+      mon.online = true;
+      mon.last_seen_ms = now;
+      ESP_LOGI(TAG, "[Sniffed] Discovered: %s", mon.to_string().c_str());
+      last_queried_cmd_ = 0;
+    } else if (last_queried_cmd_ == CMD_BAR_CODE && last_queried_addr_ != 0) {
+      GenSAMMonitor &mon = monitors_[last_queried_addr_];
+      mon.address = last_queried_addr_;
+      parse_barcode(frame.payload.data(), frame.payload.size(), mon);
+      mon.online = true;
+      mon.last_seen_ms = now;
+      ESP_LOGI(TAG, "[Sniffed] Serial for 0x%02X: %s", last_queried_addr_, mon.serial_number.c_str());
+      last_queried_cmd_ = 0;
+    } else if (last_queried_cmd_ == CMD_QUERY_STATUS && last_queried_addr_ != 0) {
+      GenSAMMonitor &mon = monitors_[last_queried_addr_];
+      mon.address = last_queried_addr_;
+      parse_telemetry(frame.payload.data(), frame.payload.size(), mon);
+      mon.online = true;
+      mon.last_seen_ms = now;
+      last_queried_cmd_ = 0;
+    }
+  }
+}
+
+void GenSAMHub::update_race_state_machine_() {
+  if (!can_transmit()) {
+    return;
+  }
+
+  uint32_t now = millis();
+
+  // Wait 10 seconds after boot for WiFi association to settle before active bus probing
+  if (now - boot_time_ < 10000) {
+    return;
+  }
+
+  // Trigger initial wakeup + discovery cycle
+  if (!initial_discovery_done_) {
+    this->send_wakeup();
+    race_state_ = RaceState::WAKEUP_SENT;
+    race_step_time_ = now;
+    initial_discovery_done_ = true;
+    return;
+  }
+
+  switch (race_state_) {
+    case RaceState::WAKEUP_SENT: {
+      // Wait 300ms after wakeup before beginning RACE
+      if (now - race_step_time_ >= 300) {
+        this->start_race_discovery();
+      }
+      break;
+    }
+
+    case RaceState::RACE_PING_SENT: {
+      // Timeout waiting for unassigned monitors -> RACE discovery complete
+      if (now - race_step_time_ > 350) {
+        if (monitors_.empty()) {
+          ESP_LOGI(TAG, "RACE discovery complete: No monitors responded (will retry in 10s)");
+          race_state_ = RaceState::IDLE;
+          last_discovery_retry_time_ = now;
+        } else {
+          ESP_LOGI(TAG, "RACE discovery complete. Total monitors found: %u", (unsigned)monitors_.size());
+
+          // Transition all monitors from discovery to online mode
+          Frame stay_online;
+          stay_online.address = BROADCAST_ADDRESS;
+          stay_online.command = CMD_STAY_ONLINE;
+          this->send_frame(stay_online);
+
+          race_state_ = RaceState::QUERYING_DEVICES;
+          race_step_time_ = now;
+          current_query_addr_ = 0;
+          query_retries_ = 0;
+        }
+      }
+      break;
+    }
+
+    case RaceState::RACE_SET_RID_SENT: {
+      // Timeout waiting for RID ACK -> retry ping
+      if (now - race_step_time_ > 500) {
+        ESP_LOGW(TAG, "Timeout waiting for RID ACK for address 0x%02X. Retrying discovery...", next_assign_addr_);
+        Frame ping;
+        ping.address = BROADCAST_ADDRESS;
+        ping.command = CMD_DISCOVERY;
+        this->send_frame(ping);
+        race_state_ = RaceState::RACE_PING_SENT;
+        race_step_time_ = now;
+      }
+      break;
+    }
+
+    case RaceState::QUERYING_DEVICES: {
+      if (current_query_addr_ != 0 && now - race_step_time_ > 350) {
+        query_retries_++;
+        if (query_retries_ >= 2) {
+          if (current_query_cmd_ == CMD_BAR_CODE) {
+            ESP_LOGW(TAG, "Device 0x%02X did not respond to barcode query", current_query_addr_);
+            monitors_[current_query_addr_].serial_number = "(none)";
+          } else {
+            ESP_LOGW(TAG, "Device 0x%02X did not respond to info query; assigning default model", current_query_addr_);
+            char def_model[32];
+            snprintf(def_model, sizeof(def_model), "SAM-%02X", current_query_addr_);
+            monitors_[current_query_addr_].model = def_model;
+          }
+          current_query_addr_ = 0;
+          current_query_cmd_ = 0;
+          query_retries_ = 0;
+        } else {
+          race_step_time_ = now;
+          Frame q;
+          q.address = current_query_addr_;
+          q.command = current_query_cmd_;
+          if (current_query_cmd_ == CMD_BAR_CODE) {
+            q.payload = {0x01};
+          }
+          this->send_frame(q);
+          return;
+        }
+      }
+
+      if (current_query_addr_ == 0) {
+        // Find next monitor with missing model metadata or serial number
+        for (auto &kv : monitors_) {
+          if (kv.second.model.empty()) {
+            current_query_addr_ = kv.first;
+            current_query_cmd_ = CMD_SOFTWARE_QUERY;
+            query_retries_ = 0;
+            race_step_time_ = now;
+            Frame q;
+            q.address = current_query_addr_;
+            q.command = CMD_SOFTWARE_QUERY;
+            this->send_frame(q);
+            return;
+          }
+          if (kv.second.serial_number.empty()) {
+            current_query_addr_ = kv.first;
+            current_query_cmd_ = CMD_BAR_CODE;
+            query_retries_ = 0;
+            race_step_time_ = now;
+            Frame q;
+            q.address = current_query_addr_;
+            q.command = CMD_BAR_CODE;
+            q.payload = {0x01};
+            this->send_frame(q);
+            return;
+          }
+        }
+        // All monitors queried or timed out! Advance to polling
+        ESP_LOGI(TAG, "All discovered monitors registered. Entering live telemetry polling loop.");
+
+        // Broadcast stay_online heartbeat to keep all monitors active
+        Frame stay_online;
+        stay_online.address = BROADCAST_ADDRESS;
+        stay_online.command = CMD_STAY_ONLINE;
+        this->send_frame(stay_online);
+
+        race_state_ = RaceState::POLLING_MONITORS;
+        last_poll_cycle_time_ = now - poll_interval_ms_;  // Start polling immediately
+        current_poll_index_ = 0;
+        current_query_addr_ = 0;
+        current_query_cmd_ = 0;
+      }
+      break;
+    }
+
+    case RaceState::POLLING_MONITORS: {
+      if (monitors_.empty()) {
+        race_state_ = RaceState::IDLE;
+        return;
+      }
+
+      if (current_query_addr_ != 0 && now - race_step_time_ > 300) {
+        current_query_addr_ = 0;
+      }
+
+      if (current_query_addr_ == 0 && now - last_poll_cycle_time_ >= poll_interval_ms_) {
+        // At the start of each polling cycle, broadcast stay_online heartbeat
+        if (current_poll_index_ == 0) {
+          Frame stay_online;
+          stay_online.address = BROADCAST_ADDRESS;
+          stay_online.command = CMD_STAY_ONLINE;
+          this->send_frame(stay_online);
+          delayMicroseconds(300);
+        }
+
+        // Refresh address cache only if monitor registry size changed
+        if (poll_addrs_.size() != monitors_.size()) {
+          poll_addrs_.clear();
+          poll_addrs_.reserve(monitors_.size());
+          for (const auto &kv : monitors_) {
+            poll_addrs_.push_back(kv.first);
+          }
+        }
+
+        if (current_poll_index_ < poll_addrs_.size()) {
+          current_query_addr_ = poll_addrs_[current_poll_index_++];
+          race_step_time_ = now;
+          Frame poll_frame;
+          poll_frame.address = current_query_addr_;
+          poll_frame.command = CMD_QUERY_STATUS;
+          this->send_frame(poll_frame);
+        } else {
+          current_poll_index_ = 0;
+          last_poll_cycle_time_ = now;
+        }
+      }
+      break;
+    }
+
+    case RaceState::IDLE: {
+      // Periodically retry discovery if no monitors are registered
+      if (monitors_.empty() && now - last_discovery_retry_time_ >= 10000) {
+        last_discovery_retry_time_ = now;
+        this->start_race_discovery();
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
+void GenSAMHub::process_rx_() {
+  constexpr size_t BATCH_SIZE = 64;
+  Uart9BitChar rx_chars[BATCH_SIZE];
+
+  size_t count = uart9_.read(rx_chars, BATCH_SIZE, 0);
+  if (count == 0) {
+    return;
+  }
+
+  char raw_hex[256];
+  size_t hpos = 0;
+  for (size_t i = 0; i < count && hpos + 6 < sizeof(raw_hex); i++) {
+    hpos += snprintf(raw_hex + hpos, sizeof(raw_hex) - hpos, "%02X%s ",
+                     rx_chars[i].data, rx_chars[i].ninth_bit ? "'" : "");
+  }
+  ESP_LOGD(TAG, "RAW RX (%u chars): %s", (unsigned)count, raw_hex);
+
+  // Feed characters to incremental stream parser
+  parser_.feed(rx_chars, count);
+
+  // Dispatch all decoded frames
+  Frame frame;
+  while (parser_.pop_frame(frame)) {
+    uint32_t now = millis();
+    ESP_LOGD(TAG, "RX <- %s", frame.to_string().c_str());
+
+    // Bus arbitration: Detect any external GLM master/adapter activity
+    bool external_master_frame = false;
+    if (frame.address != HOST_ADDRESS) {
+      if (now - last_our_tx_time_ > 50) {
+        external_master_frame = true;
+      }
+    } else {
+      if (now - last_our_tx_time_ > 200) {
+        external_master_frame = true;
+      }
+    }
+
+    if (external_master_frame) {
+      last_glm_activity_ = now;
+      if (!glm_active_) {
+        glm_active_ = true;
+        ESP_LOGW(TAG, "External GLM master/adapter detected on bus (%s). Yielding bus control (listen-only mode)...",
+                 frame.to_string().c_str());
+      }
+    }
+
+    // Process frame through monitor discovery / telemetry state machine
+    handle_incoming_frame_(frame);
+
+    for (auto &cb : callbacks_) {
+      cb(frame);
+    }
+  }
+}
+
+void GenSAMHub::check_glm_cooldown_() {
+  if (!glm_active_) {
+    return;
+  }
+
+  uint32_t now = millis();
+  if (now - last_glm_activity_ >= glm_inactivity_cooldown_ms_) {
+    glm_active_ = false;
+    ESP_LOGI(TAG, "No GLM master/adapter traffic observed for %u seconds. Resuming active bus control.",
+             (unsigned)(glm_inactivity_cooldown_ms_ / 1000));
+    // Trigger fresh wakeup and discovery when resuming active master control
+    this->send_wakeup();
+    race_state_ = RaceState::WAKEUP_SENT;
+    race_step_time_ = now;
+  }
+}
+
+void GenSAMHub::loop() {
+  process_rx_();
+
+  check_glm_cooldown_();
+  update_race_state_machine_();
+
+  uint32_t now_stat = millis();
+  if (now_stat - last_stat_log_ > 15000) {
+    last_stat_log_ = now_stat;
+    if (uart9_.rx_char_count() > 0) {
+      ESP_LOGD(TAG, "Stats: %lu chars (%lu addr, %lu data), %lu bursts, %lu framing errs, %lu invalid, %lu crc errs%s [Monitors: %u]",
+               (unsigned long)uart9_.rx_char_count(), (unsigned long)uart9_.rx_addr_count(),
+               (unsigned long)uart9_.rx_data_count(), (unsigned long)uart9_.rx_burst_count(),
+               (unsigned long)uart9_.rx_framing_err_count(),
+               (unsigned long)parser_.invalid_count(), (unsigned long)parser_.crc_mismatch_count(),
+               glm_active_ ? " [GLM ACTIVE - YIELDING]" : "",
+               (unsigned)monitors_.size());
+    }
+  }
+}
+
+}  // namespace gensam
+}  // namespace esphome
