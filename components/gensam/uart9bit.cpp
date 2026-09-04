@@ -602,8 +602,9 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
   }
 
   // Blast out full frame continuously via hardware RMT.
-  // Set echo skip window to total frame duration plus 2 bit times (~7 µs) post-TX settling margin.
-  tx_echo_ticks_ = (bit_cursor_q16 >> 16) + (2 * (bit_ticks_q16 >> 16));
+  // Set echo skip window to the exact duration of the transmitted frame (end of Stop Bit 2).
+  // This suppresses the loopback echo of our own transmission without cutting into monitor replies.
+  tx_echo_ticks_ = bit_cursor_q16 >> 16;
   rmt_transmit_config_t tx_config = {};
   tx_config.loop_count = 0;
   tx_config.flags.eot_level = 1;  // End-of-transmission level: 1 (Idle HIGH / Mark)
