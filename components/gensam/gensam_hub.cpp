@@ -1077,7 +1077,31 @@ void GenSAMHub::identify_monitor_by_address(uint8_t address, uint32_t duration_m
 }
 
 void GenSAMHub::rediscover_monitors() {
-  ESP_LOGI(TAG, "Manual rediscovery requested. Resetting state machine...");
+  ESP_LOGI(TAG, "Manual rediscovery requested. Clearing %u cached monitors and restarting discovery...",
+           (unsigned)monitors_.size());
+
+  // Mark all currently known monitors offline before clearing cache so HA state does not remain stale.
+  for (auto &kv : monitors_) {
+    kv.second.online = false;
+    kv.second.last_seen_ms = 0;
+    if (kv.second.binding != nullptr && kv.second.binding->online_sensor != nullptr) {
+      kv.second.binding->online_sensor->publish_state(false);
+    }
+  }
+
+  monitors_.clear();
+  poll_addrs_.clear();
+  current_poll_index_ = 0;
+  current_query_addr_ = 0;
+  current_query_cmd_ = 0;
+  current_racing_bytes_.clear();
+  current_racing_id_ = 0;
+  rid_retries_ = 0;
+  last_queried_addr_ = 0;
+  last_queried_cmd_ = 0;
+  next_assign_addr_ = MONITOR_START_ADDR;
+  race_state_ = RaceState::IDLE;
+
   this->start_race_discovery();
 }
 
