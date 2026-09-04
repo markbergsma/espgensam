@@ -71,6 +71,25 @@ void unescape_bytes(const uint8_t *in, size_t len, std::vector<uint8_t> &out);
 /// @param[out] out Output vector containing unescaped raw bytes.
 void unescape_bytes(const Uart9BitChar *in, size_t len, std::vector<uint8_t> &out);
 
+/// @brief Check whether an address byte matches a valid Genelec GLM protocol destination.
+///
+/// Valid network addresses comprise:
+/// - Host controller: 0x01 (HOST_ADDRESS)
+/// - Unicast monitors: 0x02 to 0x20 (MONITOR_START_ADDR up to 32 devices)
+/// - Multicast group: 0xF0 (MULTICAST_ADDRESS)
+/// - Broadcast group: 0xFF (BROADCAST_ADDRESS)
+/// @param addr The 8-bit address candidate to validate.
+/// @return True if @p addr is a valid GLM network address.
+inline bool is_valid_glm_address(uint8_t addr, bool host_only = false) {
+  if (host_only) {
+    return addr == HOST_ADDRESS;
+  }
+  return addr == HOST_ADDRESS ||
+         (addr >= MONITOR_START_ADDR && addr <= 0x20) ||
+         addr == MULTICAST_ADDRESS ||
+         addr == BROADCAST_ADDRESS;
+}
+
 /// @brief A single decoded 9-bit GLM bus frame.
 struct Frame {
   uint8_t address{0};            ///< Destination or source address byte (from 9th-bit word).
@@ -139,6 +158,16 @@ class FrameParser {
   /// @brief Reset internal state machine, discarding any partial frame and queued frames.
   void clear();
 
+  /// @brief Set whether parser only accepts frames addressed to HOST_ADDRESS (0x01).
+  ///
+  /// When active master on the bus, all incoming monitor responses are addressed to HOST_ADDRESS.
+  /// Enabling host_only prevents loopback echoes or noise with broadcast/multicast addresses
+  /// from being parsed.
+  void set_host_only(bool host_only) { host_only_ = host_only; }
+
+  /// @brief Whether host_only filtering is enabled.
+  bool host_only() const { return host_only_; }
+
  private:
   /// Process an accumulated frame candidate upon encountering the 0x7E delimiter.
   void process_candidate_();
@@ -154,6 +183,7 @@ class FrameParser {
 
   uint32_t invalid_count_{0};
   uint32_t crc_mismatch_count_{0};
+  bool host_only_{false};
 };
 
 }  // namespace gensam

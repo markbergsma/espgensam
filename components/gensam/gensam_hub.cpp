@@ -3,6 +3,7 @@
 /// See gensam_hub.h for architectural design rationale and complete API documentation.
 
 #include "gensam_hub.h"
+#include "crc.h"
 #include "esphome/core/log.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/sensor/sensor.h"
@@ -86,6 +87,8 @@ void GenSAMHub::setup() {
     this->mark_failed();
     return;
   }
+
+  parser_.set_host_only(!listen_only_);
 
   if (glm_usb_adapter_active_sensor_ != nullptr) {
     glm_usb_adapter_active_sensor_->publish_state(false);
@@ -235,6 +238,7 @@ void GenSAMHub::start_race_discovery() {
   next_assign_addr_ = MONITOR_START_ADDR;
   current_racing_bytes_.clear();
   current_racing_id_ = 0;
+  rid_retries_ = 0;
   race_step_time_ = millis();
 
   // Broadcast initial RACE discovery ping (0xFF 0xFE)
@@ -242,6 +246,35 @@ void GenSAMHub::start_race_discovery() {
   ping.address = BROADCAST_ADDRESS;
   ping.command = CMD_DISCOVERY;
   this->send_frame(ping);
+}
+
+void GenSAMHub::complete_rid_assignment_(uint8_t address) {
+  uint32_t now = millis();
+  GenSAMMonitor &mon = monitors_[address];
+  mon.address = address;
+  mon.unique_id = current_racing_id_;
+  mon.online = true;
+  mon.last_seen_ms = now;
+
+  ESP_LOGI(TAG, "Assigned monitor at address 0x%02X (ID: %u)",
+           address, (unsigned)mon.unique_id);
+  this->bind_monitor_if_matched_(mon);
+
+  next_assign_addr_++;
+  current_racing_bytes_.clear();
+  current_racing_id_ = 0;
+  rid_retries_ = 0;
+
+  // Allow 300us turnaround before next ping
+  delayMicroseconds(300);
+
+  // Send next RACE ping
+  Frame ping;
+  ping.address = BROADCAST_ADDRESS;
+  ping.command = CMD_DISCOVERY;
+  this->send_frame(ping);
+  race_state_ = RaceState::RACE_PING_SENT;
+  race_step_time_ = now;
 }
 
 void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
@@ -258,6 +291,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
                              static_cast<uint32_t>(frame.payload[2]);
         race_state_ = RaceState::RACE_SET_RID_SENT;
         race_step_time_ = now;
+        rid_retries_ = 0;
 
         // Allow 300us transceiver turnaround before transmitting CMD_SET_RID
         delayMicroseconds(300);
@@ -276,37 +310,15 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       bool is_ack = false;
       if (frame.payload.size() == 1 && frame.payload[0] == next_assign_addr_) {
         is_ack = true;
-      } else if (frame.command == CMD_ACK || frame.command == CMD_REPORT_STATUS || frame.command == 0x05) {
+      } else if (frame.command == CMD_ACK || frame.command == CMD_REPORT_STATUS || frame.command == 0x05 ||
+                 frame.command == 0x09) {
         if (frame.payload.empty() || frame.payload[0] == next_assign_addr_) {
           is_ack = true;
         }
       }
 
       if (is_ack) {
-        GenSAMMonitor &mon = monitors_[next_assign_addr_];
-        mon.address = next_assign_addr_;
-        mon.unique_id = current_racing_id_;
-        mon.online = true;
-        mon.last_seen_ms = now;
-
-        ESP_LOGI(TAG, "Assigned monitor at address 0x%02X (ID: %u)",
-                 next_assign_addr_, (unsigned)mon.unique_id);
-        this->bind_monitor_if_matched_(mon);
-
-        next_assign_addr_++;
-        current_racing_bytes_.clear();
-        current_racing_id_ = 0;
-
-        // Allow 300us turnaround before next ping
-        delayMicroseconds(300);
-
-        // Send next RACE ping
-        Frame ping;
-        ping.address = BROADCAST_ADDRESS;
-        ping.command = CMD_DISCOVERY;
-        this->send_frame(ping);
-        race_state_ = RaceState::RACE_PING_SENT;
-        race_step_time_ = now;
+        this->complete_rid_assignment_(next_assign_addr_);
         return;
       }
     } else if (race_state_ == RaceState::QUERYING_DEVICES) {
@@ -345,6 +357,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
                  (int)mon.temperature, (int)mon.input_db, (int)mon.output_db,
                  YESNO(mon.clip));
         current_query_addr_ = 0;
+        last_poll_step_time_ = now;
         return;
       }
     }
@@ -526,15 +539,27 @@ void GenSAMHub::update_race_state_machine_() {
     }
 
     case RaceState::RACE_SET_RID_SENT: {
-      // Timeout waiting for RID ACK -> retry ping
-      if (now - race_step_time_ > 500) {
-        ESP_LOGW(TAG, "Timeout waiting for RID ACK for address 0x%02X. Retrying discovery...", next_assign_addr_);
-        Frame ping;
-        ping.address = BROADCAST_ADDRESS;
-        ping.command = CMD_DISCOVERY;
-        this->send_frame(ping);
-        race_state_ = RaceState::RACE_PING_SENT;
-        race_step_time_ = now;
+      // Timeout waiting for RID ACK -> retry CMD_SET_RID up to 3 times
+      if (now - race_step_time_ > 300) {
+        rid_retries_++;
+        if (rid_retries_ <= 3) {
+          ESP_LOGW(TAG, "Timeout waiting for RID ACK for address 0x%02X (attempt %u/3). Retrying CMD_SET_RID...",
+                   next_assign_addr_, (unsigned)rid_retries_);
+          // Re-send CMD_SET_RID
+          Frame set_rid;
+          set_rid.address = MULTICAST_ADDRESS;
+          set_rid.command = CMD_SET_RID;
+          set_rid.payload = current_racing_bytes_;
+          set_rid.payload.push_back(next_assign_addr_);
+          this->send_frame(set_rid);
+          race_step_time_ = now;
+        } else {
+          // Retries exhausted. Monitor may have adopted the address despite lost ACK.
+          // Register monitor and probe device during query phase rather than abandoning it.
+          ESP_LOGW(TAG, "Retries exhausted for RID ACK at address 0x%02X. Registering monitor and resuming discovery...",
+                   next_assign_addr_);
+          this->complete_rid_assignment_(next_assign_addr_);
+        }
       }
       break;
     }
@@ -616,6 +641,7 @@ void GenSAMHub::update_race_state_machine_() {
 
         race_state_ = RaceState::POLLING_MONITORS;
         last_poll_cycle_time_ = now - poll_interval_ms_;  // Start polling immediately
+        last_poll_step_time_ = now - 20;
         current_poll_index_ = 0;
         current_query_addr_ = 0;
         current_query_cmd_ = 0;
@@ -631,9 +657,11 @@ void GenSAMHub::update_race_state_machine_() {
 
       if (current_query_addr_ != 0 && now - race_step_time_ > 300) {
         current_query_addr_ = 0;
+        last_poll_step_time_ = now;
       }
 
-      if (current_query_addr_ == 0 && now - last_poll_cycle_time_ >= poll_interval_ms_) {
+      if (current_query_addr_ == 0 && (now - last_poll_step_time_ >= 20) &&
+          (now - last_poll_cycle_time_ >= poll_interval_ms_)) {
         // At the start of each polling cycle, broadcast active volume and stay_online heartbeat
         if (current_poll_index_ == 0) {
           uint32_t int24 = volume_db_to_int24(current_volume_db_);
@@ -665,6 +693,7 @@ void GenSAMHub::update_race_state_machine_() {
         if (current_poll_index_ < poll_addrs_.size()) {
           current_query_addr_ = poll_addrs_[current_poll_index_++];
           race_step_time_ = now;
+          last_poll_step_time_ = now;
           Frame poll_frame;
           poll_frame.address = current_query_addr_;
           poll_frame.command = CMD_QUERY_STATUS;
@@ -672,6 +701,7 @@ void GenSAMHub::update_race_state_machine_() {
         } else {
           current_poll_index_ = 0;
           last_poll_cycle_time_ = now;
+          last_poll_step_time_ = now;
         }
       }
       break;
@@ -708,6 +738,30 @@ void GenSAMHub::process_rx_() {
   }
   ESP_LOGD(TAG, "RAW RX (%u chars): %s", (unsigned)count, raw_hex);
 
+  // While in RACE_SET_RID_SENT, check for clipped ACK in raw stream (0x09 followed by assigned address)
+  if (race_state_ == RaceState::RACE_SET_RID_SENT) {
+    for (size_t i = 0; i + 1 < count; i++) {
+      if (rx_chars[i].data == 0x09 && rx_chars[i + 1].data == next_assign_addr_) {
+        bool crc_checked = false;
+        bool crc_matches = false;
+        if (i + 3 < count) {
+          crc_checked = true;
+          uint16_t wire_crc = (static_cast<uint16_t>(rx_chars[i + 2].data) << 8) |
+                              static_cast<uint16_t>(rx_chars[i + 3].data);
+          uint8_t check_bytes[3] = {HOST_ADDRESS, 0x09, next_assign_addr_};
+          crc_matches = (calculate_crc(check_bytes, 3) == wire_crc);
+        }
+        if (!crc_checked || crc_matches) {
+          ESP_LOGI(TAG, "Detected RID ACK in raw stream for address 0x%02X%s",
+                   next_assign_addr_, crc_matches ? " (verified CRC)" : "");
+          this->complete_rid_assignment_(next_assign_addr_);
+          parser_.clear();
+          return;
+        }
+      }
+    }
+  }
+
   // Feed characters to incremental stream parser
   parser_.feed(rx_chars, count);
 
@@ -733,12 +787,16 @@ void GenSAMHub::process_rx_() {
       last_glm_activity_ = now;
       if (!glm_active_) {
         glm_active_ = true;
+        parser_.set_host_only(false);
         if (glm_usb_adapter_active_sensor_ != nullptr) {
           glm_usb_adapter_active_sensor_->publish_state(true);
         }
         ESP_LOGW(TAG, "External GLM master/adapter detected on bus (%s). Yielding bus control (listen-only mode)...",
                  frame.to_string().c_str());
       }
+    } else if (!glm_active_ && !listen_only_ && frame.address != HOST_ADDRESS) {
+      // Loopback echo of our own master transmission; ignore
+      continue;
     }
 
     // Process frame through monitor discovery / telemetry state machine
@@ -758,6 +816,7 @@ void GenSAMHub::check_glm_cooldown_() {
   uint32_t now = millis();
   if (now - last_glm_activity_ >= glm_inactivity_cooldown_ms_) {
     glm_active_ = false;
+    parser_.set_host_only(!listen_only_);
     if (glm_usb_adapter_active_sensor_ != nullptr) {
       glm_usb_adapter_active_sensor_->publish_state(false);
     }

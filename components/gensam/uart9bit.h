@@ -31,11 +31,13 @@
 /// - Receiver (RMT RX): Captures raw bus edge transitions into ping-pong symbol buffers
 ///   with hardware glitch filtering and a 50 µs idle threshold. An IRAM-resident ISR
 ///   scans symbols in a single O(N) sweep, confirms the Start bit center, center-samples
-///   data and 9th address bits, checks stop bits, and pushes decoded characters into a
-///   FreeRTOS ring buffer.
-/// - Echo suppression: Half-duplex transceivers loop back transmitted data into RX.
-///   The driver waits for the 50 µs RMT idle timeout to complete, then flushes the
-///   self-transmitted echo from the ring buffer before incoming monitor replies arrive.
+///   data and 9th address bits, checks stop bits (with fallback to Stop Bit 2 center to
+///   tolerate slow rise times on passive pull-up transceivers), and pushes decoded characters
+///   into a FreeRTOS ring buffer.
+/// - Half-Duplex Reception: Half-duplex transceivers loop back transmitted pulses into RX.
+///   Incoming characters are decoded continuously without blocking delay in write(), avoiding
+///   race conditions with fast monitor replies. Echo rejection and GLM address filtering are
+///   performed deterministically at the protocol stream layer.
 /// ===================================================================================
 
 #include <cstddef>
@@ -128,8 +130,11 @@ class Uart9Bit {
                                     void *user_ctx);
 
   /// Decodes RMT pulse symbols into 9-bit characters and pushes to ring buffer.
+  /// @param symbols Pointer to received RMT symbol words.
+  /// @param num_symbols Number of symbol words in the buffer.
+  /// @param skip_ticks Number of hardware ticks to skip at the start of the burst (self-transmitted echo).
   void decode_and_push_symbols_(const rmt_symbol_word_t *symbols,
-                                size_t num_symbols);
+                                size_t num_symbols, uint32_t skip_ticks = 0);
 
   rmt_channel_handle_t rmt_rx_chan_{nullptr};
   rmt_channel_handle_t rmt_tx_chan_{nullptr};
@@ -150,6 +155,7 @@ class Uart9Bit {
   rmt_symbol_word_t tx_symbols_[RMT_TX_MAX_SYMBOLS];
 
   uint32_t baud_rate_{281250};
+  volatile uint32_t tx_echo_ticks_{0};
 
   // Diagnostic counters (updated from ISR, read from main task).
   volatile uint32_t rx_char_count_{0};

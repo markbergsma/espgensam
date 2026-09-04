@@ -136,6 +136,12 @@ void FrameParser::feed(const Uart9BitChar *chars, size_t count) {
 
 void FrameParser::feed(const Uart9BitChar &c) {
   if (c.ninth_bit != 0) {
+    // Only accept bytes that represent valid GLM destination addresses.
+    // Transceiver loopback echo with distorted rise times often samples false 9th bits (e.g. BF', DF', AD', 7F').
+    if (!is_valid_glm_address(c.data, host_only_)) {
+      return;
+    }
+
     // Address character marks start of a new frame
     if (state_ == State::ACCUMULATING) {
       // Previous frame was incomplete / aborted on wire
@@ -175,6 +181,10 @@ void FrameParser::process_candidate_() {
 
   // buffer_[0] is address with 9th bit = 1
   uint8_t address = buffer_[0].data;
+  if (!is_valid_glm_address(address, host_only_)) {
+    invalid_count_++;
+    return;
+  }
 
   // Unescape buffer_[1..N-1] (escaped body and CRC bytes)
   std::vector<uint8_t> unescaped;

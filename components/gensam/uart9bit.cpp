@@ -324,9 +324,12 @@ bool IRAM_ATTR Uart9Bit::rmt_rx_done_callback_(
 
   self->rx_burst_count_++;
 
+  uint32_t skip_ticks = self->tx_echo_ticks_;
+  self->tx_echo_ticks_ = 0;
+
   // Decode symbols directly in ISR and push decoded 9-bit chars to ring buffer
   if (num_symbols > 0) {
-    self->decode_and_push_symbols_(received_buf, num_symbols);
+    self->decode_and_push_symbols_(received_buf, num_symbols, skip_ticks);
   }
 
   return false;
@@ -339,17 +342,26 @@ bool IRAM_ATTR Uart9Bit::rmt_rx_done_callback_(
 /// @brief IRAM-resident pulse decoder converting raw RMT symbols into decoded 9-bit characters.
 ///
 /// Performs an O(N) single-pass sweep over pulse durations using Q16 fixed-point math:
-/// 1. Finds falling edges and confirms the Start bit center level (LOW).
-/// 2. Center-samples 8 data bits (LSB-first).
-/// 3. Center-samples the 9th bit (1 = address, 0 = data).
-/// 4. Verifies Stop bit level (HIGH), tracking framing errors if violated.
-/// 5. Pushes valid characters into the FreeRTOS ring buffer via xRingbufferSendFromISR().
+/// 1. Fast-forwards past self-transmitted loopback echo pulses (if skip_ticks > 0).
+/// 2. Finds falling edges and confirms the Start bit center level (LOW).
+/// 3. Center-samples 8 data bits (LSB-first).
+/// 4. Center-samples the 9th bit (1 = address, 0 = data).
+/// 5. Verifies Stop bit level (HIGH), tracking framing errors if violated.
+/// 6. Pushes valid characters into the FreeRTOS ring buffer via xRingbufferSendFromISR().
 /// @param symbols Pointer to RMT symbol words.
 /// @param num_symbols Number of symbol words in the buffer.
+/// @param skip_ticks Number of hardware ticks to skip at the start of the burst (self-transmitted echo).
 void IRAM_ATTR Uart9Bit::decode_and_push_symbols_(
-    const rmt_symbol_word_t *symbols, size_t num_symbols) {
+    const rmt_symbol_word_t *symbols, size_t num_symbols, uint32_t skip_ticks) {
   RmtCursor cursor;
   cursor.init(symbols, num_symbols);
+
+  // Fast-forward cursor past self-transmitted loopback echo
+  if (skip_ticks > 0) {
+    while (cursor.dur > 0 && (cursor.curr_time + cursor.dur) <= skip_ticks) {
+      cursor.advance();
+    }
+  }
 
   // Q16 fixed-point arithmetic for 10 MHz tick rate (100 ns/tick)
   // At 281,250 baud: 10,000,000 / 281,250 = 35.5555... ticks/bit
@@ -393,6 +405,10 @@ void IRAM_ATTR Uart9Bit::decode_and_push_symbols_(
 
     // 4. Sample Stop Bit (must be HIGH = 1)
     uint8_t stop_bit = cursor.sample_at(t_bit_center_q16 >> 16);
+    if (stop_bit != 1) {
+      // Check Stop Bit 2 center in case slow passive pull-up delayed Stop Bit 1 rise
+      stop_bit = cursor.sample_at((t_bit_center_q16 + bit_ticks_q16) >> 16);
+    }
     if (stop_bit != 1) {
       rx_framing_err_count_++;
       // Resynchronize: advance past any continuing LOW pulse to ensure the next
@@ -483,8 +499,7 @@ size_t Uart9Bit::available() const {
 ///
 /// Converts each 9-bit character into Start bit, 8 data bits, 9th address bit, and 2 stop
 /// bits, emitting the entire frame with 0 ns inter-byte gap to maintain auto-direction
-/// transceiver engagement. Waits 80 µs after TX completes to purge self-transmitted
-/// loopback echo from the RX ring buffer.
+/// transceiver engagement. Deasserts hardware DE immediately upon transmission completion.
 /// @param chars Array of 9-bit characters to transmit.
 /// @param len Number of characters in @p chars.
 void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
@@ -559,7 +574,9 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
     sym_idx++;
   }
 
-  // Blast out full frame continuously via hardware RMT
+  // Blast out full frame continuously via hardware RMT.
+  // Set echo skip window to total frame duration plus 2 bit times (~7 µs) post-TX settling margin.
+  tx_echo_ticks_ = (bit_cursor_q16 >> 16) + (2 * (bit_ticks_q16 >> 16));
   rmt_transmit_config_t tx_config = {};
   tx_config.loop_count = 0;
   tx_config.flags.eot_level = 1;  // End-of-transmission level: 1 (Idle HIGH / Mark)
@@ -571,23 +588,11 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
   } else {
     rmt_tx_wait_all_done(rmt_tx_chan_, 100);
 
-    // Wait 80µs for RMT RX 50µs idle threshold to complete and fire ISR
-    esp_rom_delay_us(80);
-
-    // Flush any self-transmitted loopback echo from the RX ring buffer
-    if (rx_ringbuf_) {
-      size_t item_size = 0;
-      void *item = nullptr;
-      while ((item = xRingbufferReceive(rx_ringbuf_, &item_size, 0)) != nullptr) {
-        vRingbufferReturnItem(rx_ringbuf_, item);
-      }
+    // Return to Receive (RX Mode) immediately after transmission completes
+    if (de_pin_ >= 0) {
+      esp_rom_delay_us(5);
+      gpio_set_level(static_cast<gpio_num_t>(de_pin_), 0);
     }
-  }
-
-  // Return to Receive (RX Mode) after transmission completes
-  if (de_pin_ >= 0) {
-    esp_rom_delay_us(10);
-    gpio_set_level(static_cast<gpio_num_t>(de_pin_), 0);
   }
 }
 

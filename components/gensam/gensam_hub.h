@@ -259,6 +259,10 @@ class GenSAMHub : public Component {
   /// @brief Publish monitor metadata (model, serial, firmware revision, ID) to linked text sensors.
   void publish_monitor_metadata_(const GenSAMMonitor &mon);
 
+  /// @brief Complete address assignment for a monitor after receiving RID ACK.
+  /// @param address The assigned logical address.
+  void complete_rid_assignment_(uint8_t address);
+
   int tx_pin_{-1};
   int rx_pin_{-1};
   int de_pin_{-1};
@@ -292,10 +296,12 @@ class GenSAMHub : public Component {
   std::vector<uint8_t> current_racing_bytes_;
   uint32_t current_racing_id_{0};
   uint32_t race_step_time_{0};
+  uint8_t rid_retries_{0};
   uint8_t current_query_addr_{0};
   uint8_t current_query_cmd_{0};
   uint8_t query_retries_{0};
   uint32_t last_poll_cycle_time_{0};
+  uint32_t last_poll_step_time_{0};
   uint32_t last_discovery_retry_time_{0};
   size_t current_poll_index_{0};
   std::vector<uint8_t> poll_addrs_;
