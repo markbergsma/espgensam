@@ -6,6 +6,7 @@
 #include "esphome/core/log.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/sensor/sensor.h"
+#include "esphome/components/switch/switch.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "driver/gpio.h"
 
@@ -364,6 +365,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     mon.online = true;
     mon.last_seen_ms = now;
     ESP_LOGI(TAG, "[Sniffed] Assigned monitor 0x%02X (ID: %u)", addr, (unsigned)mon.unique_id);
+    bind_monitor_if_matched_(mon);
   }
 
   // Sniff volume and wakeup broadcast/multicast commands
@@ -389,6 +391,9 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     auto it = monitors_.find(frame.address);
     if (it != monitors_.end()) {
       it->second.mute = is_muted;
+      if (it->second.binding != nullptr && it->second.binding->mute_switch != nullptr) {
+        it->second.binding->mute_switch->publish_state(is_muted);
+      }
       ESP_LOGD(TAG, "[Sniffed] Monitor 0x%02X mute updated to %s (raw 0x%02X)", frame.address, YESNO(is_muted), frame.payload[0]);
     } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
       GenSAMMonitor &mon = monitors_[frame.address];
@@ -396,10 +401,17 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       mon.mute = is_muted;
       mon.online = true;
       mon.last_seen_ms = now;
+      bind_monitor_if_matched_(mon);
+      if (mon.binding != nullptr && mon.binding->mute_switch != nullptr) {
+        mon.binding->mute_switch->publish_state(is_muted);
+      }
       ESP_LOGD(TAG, "[Sniffed] Discovered monitor 0x%02X mute set to %s (raw 0x%02X)", frame.address, YESNO(is_muted), frame.payload[0]);
     } else if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
       for (auto &kv : monitors_) {
         kv.second.mute = is_muted;
+        if (kv.second.binding != nullptr && kv.second.binding->mute_switch != nullptr) {
+          kv.second.binding->mute_switch->publish_state(is_muted);
+        }
       }
     }
 
@@ -834,12 +846,15 @@ void GenSAMHub::set_group_mute(bool mute) {
   current_mute_ = mute;
   for (auto &kv : monitors_) {
     kv.second.mute = mute;
+    if (kv.second.binding != nullptr && kv.second.binding->mute_switch != nullptr) {
+      kv.second.binding->mute_switch->publish_state(mute);
+    }
   }
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot send mute command: Bus is not available for TX");
     return;
   }
-  uint8_t val = (mute ? BYPASS_MUTE_MASK : 0x00) | (LED_GREEN << 1);
+  uint8_t val = mute ? (BYPASS_MUTE_MASK | (LED_RED << 1)) : (LED_OFF << 1);
 
   // 1. Unicast CMD_BYPASS to each discovered monitor individually (as per GLM protocol)
   for (const auto &kv : monitors_) {
@@ -860,6 +875,60 @@ void GenSAMHub::set_group_mute(bool mute) {
 
   ESP_LOGI(TAG, "Set system mute: %s across %zu monitors", YESNO(mute), monitors_.size());
   this->notify_state_callbacks_();
+}
+
+void GenSAMHub::set_monitor_mute(uint8_t address, bool mute) {
+  auto it = monitors_.find(address);
+  if (it == monitors_.end()) {
+    ESP_LOGW(TAG, "Cannot mute monitor 0x%02X: not found in registry", address);
+    return;
+  }
+  it->second.mute = mute;
+  if (it->second.binding != nullptr && it->second.binding->mute_switch != nullptr) {
+    it->second.binding->mute_switch->publish_state(mute);
+  }
+
+  // Evaluate whether all online monitors are now muted
+  bool all_muted = true;
+  for (const auto &kv : monitors_) {
+    if (kv.second.online && !kv.second.mute) {
+      all_muted = false;
+      break;
+    }
+  }
+  if (current_mute_ != all_muted) {
+    current_mute_ = all_muted;
+    ESP_LOGI(TAG, "System mute updated to %s based on individual monitor states", YESNO(current_mute_));
+    this->notify_state_callbacks_();
+  }
+
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot send mute command to 0x%02X: bus not available for TX", address);
+    return;
+  }
+
+  uint8_t val = mute ? (BYPASS_MUTE_MASK | (LED_RED << 1)) : (LED_OFF << 1);
+  Frame f;
+  f.address = address;
+  f.command = CMD_BYPASS;
+  f.payload = {val};
+  this->send_frame(f);
+  delayMicroseconds(250);
+  this->send_frame(f);
+
+  ESP_LOGI(TAG, "Set monitor 0x%02X mute: %s", address, YESNO(mute));
+}
+
+void GenSAMHub::set_monitor_mute_by_serial(const std::string &serial_or_id, bool mute) {
+  for (auto &kv : monitors_) {
+    GenSAMMonitor &mon = kv.second;
+    if (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+        std::to_string(mon.unique_id) == serial_or_id) {
+      this->set_monitor_mute(mon.address, mute);
+      return;
+    }
+  }
+  ESP_LOGW(TAG, "Cannot mute speaker '%s': monitor not currently discovered on bus", serial_or_id.c_str());
 }
 
 void GenSAMHub::set_standby(bool standby) {

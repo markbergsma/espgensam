@@ -158,6 +158,16 @@ class GenSAMHub : public Component {
   /// @param mute True to mute all speakers via CMD_BYPASS, false to unmute.
   void set_group_mute(bool mute);
 
+  /// @brief Set mute state for an individual monitor by logical RS-485 bus address.
+  /// @param address Logical bus address (0x02..0x7F).
+  /// @param mute True to mute audio and set front LED red, false to unmute.
+  void set_monitor_mute(uint8_t address, bool mute);
+
+  /// @brief Set mute state for an individual monitor by serial number or unique ID string.
+  /// @param serial_or_id Serial number string (e.g. "7350APM88123456") or decimal unique ID string.
+  /// @param mute True to mute audio and set front LED red, false to unmute.
+  void set_monitor_mute_by_serial(const std::string &serial_or_id, bool mute);
+
   /// @brief Set system power / standby state.
   /// @param standby True to place monitors into amplifier standby (<0.5W), false to wake up.
   void set_standby(bool standby);

@@ -52,6 +52,10 @@ namespace text_sensor {
 class TextSensor;
 }  // namespace text_sensor
 
+namespace switch_ {
+class Switch;
+}  // namespace switch_
+
 namespace gensam {
 
 /// @brief Static binding between a configured speaker and its ESPHome sensor entities.
@@ -65,6 +69,7 @@ struct GenSAMMonitorBinding {
   sensor::Sensor *output_level_sensor{nullptr};        ///< Driver output level sensor (dBFS).
   binary_sensor::BinarySensor *clip_sensor{nullptr};   ///< Protection / limiter clip binary sensor.
   binary_sensor::BinarySensor *online_sensor{nullptr}; ///< Responsive online status binary sensor.
+  switch_::Switch *mute_switch{nullptr};               ///< Channel mute switch entity.
   text_sensor::TextSensor *model_sensor{nullptr};       ///< Discovered model text sensor (e.g. "7350A").
   text_sensor::TextSensor *serial_sensor{nullptr};      ///< Factory serial number text sensor (e.g. "7350APM88123456").
   text_sensor::TextSensor *firmware_sensor{nullptr};    ///< Firmware revision text sensor (e.g. "1.6.2.3733").

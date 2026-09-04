@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import sensor, binary_sensor, button, text_sensor
+from esphome.components import sensor, binary_sensor, button, text_sensor, switch
 from esphome.const import (
     CONF_ID,
     CONF_NAME,
@@ -19,7 +19,7 @@ from esphome.const import (
     ENTITY_CATEGORY_DIAGNOSTIC,
 )
 
-AUTO_LOAD = ["sensor", "binary_sensor", "button", "text_sensor"]
+AUTO_LOAD = ["sensor", "binary_sensor", "button", "text_sensor", "switch"]
 MULTI_CONF = True
 
 CONF_DE_PIN = "de_pin"
@@ -46,6 +46,7 @@ CONF_INPUT_LEVEL = "input_level"
 CONF_OUTPUT_LEVEL = "output_level"
 CONF_LIMITER = "limiter"
 CONF_ONLINE = "online"
+CONF_MUTE = "mute"
 CONF_IDENTIFY = "identify"
 
 CONF_MODEL = "model"
@@ -58,6 +59,7 @@ CONF_REDISCOVER_BUTTON = "rediscover_button"
 
 gensam_ns = cg.esphome_ns.namespace("gensam")
 GenSAMHub = gensam_ns.class_("GenSAMHub", cg.Component)
+GenSAMMuteSwitch = gensam_ns.class_("GenSAMMuteSwitch", switch.Switch)
 GenSAMIdentifyButton = gensam_ns.class_("GenSAMIdentifyButton", button.Button)
 GenSAMRediscoverButton = gensam_ns.class_("GenSAMRediscoverButton", button.Button)
 GenSAMMonitorBinding = gensam_ns.struct("GenSAMMonitorBinding")
@@ -117,6 +119,15 @@ def _validate_monitor(conf):
         conf[CONF_ONLINE] = binary_sensor.binary_sensor_schema(
             device_class=DEVICE_CLASS_CONNECTIVITY,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        )(c)
+
+    if CONF_MUTE not in conf:
+        c = {CONF_NAME: f"{name} Mute"}
+        if dev_id:
+            c[CONF_DEVICE_ID] = dev_id
+        conf[CONF_MUTE] = switch.switch_schema(
+            GenSAMMuteSwitch,
+            icon="mdi:volume-off",
         )(c)
 
     if CONF_IDENTIFY not in conf:
@@ -197,6 +208,10 @@ MONITOR_SCHEMA = cv.All(
             cv.Optional(CONF_ONLINE): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_CONNECTIVITY,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_MUTE): switch.switch_schema(
+                GenSAMMuteSwitch,
+                icon="mdi:volume-off",
             ),
             cv.Optional(CONF_IDENTIFY): button.button_schema(
                 GenSAMIdentifyButton,
@@ -340,22 +355,26 @@ async def to_code(config):
             # 5. Online status binary sensor
             online_sens = await binary_sensor.new_binary_sensor(mon_conf[CONF_ONLINE])
 
-            # 6. Identify button
+            # 6. Mute switch
+            mute_sw = await switch.new_switch(mon_conf[CONF_MUTE])
+            cg.add(mute_sw.set_hub(var))
+            target_id = serial if serial else str(unique_id)
+            cg.add(mute_sw.set_serial_or_id(target_id))
+
+            # 7. Identify button
             id_btn = await button.new_button(mon_conf[CONF_IDENTIFY])
             cg.add(id_btn.set_hub(var))
-            target_id = serial if serial else str(unique_id)
             cg.add(id_btn.set_serial_or_id(target_id))
 
-            # 7. Model text sensor
+            # 8. Model text sensor
             model_sens = await text_sensor.new_text_sensor(mon_conf[CONF_MODEL])
 
-            # 8. Serial number text sensor
+            # 9. Serial number text sensor
             serial_sens = await text_sensor.new_text_sensor(mon_conf[CONF_SERIAL_NUMBER_SENSOR])
 
-            # 9. Firmware version text sensor
+            # 10. Firmware version text sensor
             fw_sens = await text_sensor.new_text_sensor(mon_conf[CONF_FIRMWARE_VERSION])
 
-            # 10. Hardware ID text sensor
             hw_id_sens = await text_sensor.new_text_sensor(mon_conf[CONF_HARDWARE_ID])
 
             # Register binding in C++ hub
@@ -365,6 +384,7 @@ async def to_code(config):
                         f'gensam::GenSAMMonitorBinding{{"{name}", "{serial}", '
                         f"{unique_id}U, "
                         f"{temp_sens}, {in_sens}, {out_sens}, {clip_sens}, {online_sens}, "
+                        f"{mute_sw}, "
                         f"{model_sens}, {serial_sens}, {fw_sens}, {hw_id_sens}}}"
                     )
                 )
