@@ -263,6 +263,17 @@ class GenSAMHub : public Component {
   /// @param address The assigned logical address.
   void complete_rid_assignment_(uint8_t address);
 
+  /// @brief Mark a monitor as recently seen, updating last_seen_ms and transitioning its
+  /// online status if it was previously offline.
+  /// @param mon Reference to the active monitor.
+  void mark_monitor_seen_(GenSAMMonitor &mon);
+
+  /// @brief Check for monitors that have not responded within the stale timeout window and transition them offline.
+  void check_monitor_timeouts_();
+
+  /// @brief Re-evaluate whether all online monitors are muted and notify state callbacks if the state changed.
+  void evaluate_system_mute_();
+
   int tx_pin_{-1};
   int rx_pin_{-1};
   int de_pin_{-1};
@@ -301,6 +312,7 @@ class GenSAMHub : public Component {
   uint8_t current_query_cmd_{0};
   uint32_t last_poll_cycle_time_{0};
   uint32_t last_poll_step_time_{0};
+  uint32_t last_timeout_check_{0};
   uint32_t last_discovery_retry_time_{0};
   size_t current_poll_index_{0};
   std::vector<uint8_t> poll_addrs_;

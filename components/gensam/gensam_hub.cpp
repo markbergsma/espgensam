@@ -253,8 +253,7 @@ void GenSAMHub::complete_rid_assignment_(uint8_t address) {
   GenSAMMonitor &mon = monitors_[address];
   mon.address = address;
   mon.unique_id = current_racing_id_;
-  mon.online = true;
-  mon.last_seen_ms = now;
+  this->mark_monitor_seen_(mon);
 
   ESP_LOGI(TAG, "Assigned monitor at address 0x%02X (ID: %u)",
            address, (unsigned)mon.unique_id);
@@ -327,8 +326,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
           parse_device_info(frame.payload.data(), frame.payload.size(), mon);
           ESP_LOGI(TAG, "Discovered: %s", mon.to_string().c_str());
         }
-        mon.online = true;
-        mon.last_seen_ms = now;
+        this->mark_monitor_seen_(mon);
         bind_monitor_if_matched_(mon);
         publish_monitor_metadata_(mon);
 
@@ -348,8 +346,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
           (frame.command == CMD_REPORT_STATUS || frame.command == CMD_QUERY_STATUS)) {
         GenSAMMonitor &mon = monitors_[current_query_addr_];
         parse_telemetry(frame.payload.data(), frame.payload.size(), mon);
-        mon.online = true;
-        mon.last_seen_ms = now;
+        this->mark_monitor_seen_(mon);
         bind_monitor_if_matched_(mon);
         publish_monitor_telemetry_(mon);
         ESP_LOGI(TAG, "[0x%02X %s] Telemetry: Temp=%d°C In=%d dBFS Out=%d dBFS",
@@ -375,8 +372,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     mon.unique_id = (static_cast<uint32_t>(frame.payload[0]) << 16) |
                     (static_cast<uint32_t>(frame.payload[1]) << 8) |
                     static_cast<uint32_t>(frame.payload[2]);
-    mon.online = true;
-    mon.last_seen_ms = now;
+    this->mark_monitor_seen_(mon);
     ESP_LOGI(TAG, "[Sniffed] Assigned monitor 0x%02X (ID: %u)", addr, (unsigned)mon.unique_id);
     bind_monitor_if_matched_(mon);
   }
@@ -414,8 +410,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       GenSAMMonitor &mon = monitors_[frame.address];
       mon.address = frame.address;
       mon.mute = is_muted;
-      mon.online = true;
-      mon.last_seen_ms = now;
+      this->mark_monitor_seen_(mon);
       bind_monitor_if_matched_(mon);
       if (mon.binding != nullptr && mon.binding->mute_switch != nullptr) {
         mon.binding->mute_switch->publish_state(is_muted);
@@ -430,23 +425,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       }
     }
 
-    bool new_mute = is_muted;
-    if (!monitors_.empty()) {
-      bool all_muted = true;
-      for (const auto &kv : monitors_) {
-        if (kv.second.online && !kv.second.mute) {
-          all_muted = false;
-          break;
-        }
-      }
-      new_mute = all_muted;
-    }
-
-    if (current_mute_ != new_mute) {
-      current_mute_ = new_mute;
-      ESP_LOGI(TAG, "[Sniffed] System mute updated to %s", YESNO(current_mute_));
-      this->notify_state_callbacks_();
-    }
+    this->evaluate_system_mute_();
   }
 
   // Track replies sent to host
@@ -455,8 +434,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       GenSAMMonitor &mon = monitors_[last_queried_addr_];
       mon.address = last_queried_addr_;
       parse_device_info(frame.payload.data(), frame.payload.size(), mon);
-      mon.online = true;
-      mon.last_seen_ms = now;
+      this->mark_monitor_seen_(mon);
       bind_monitor_if_matched_(mon);
       ESP_LOGI(TAG, "[Sniffed] Discovered: %s", mon.to_string().c_str());
       last_queried_cmd_ = 0;
@@ -464,8 +442,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       GenSAMMonitor &mon = monitors_[last_queried_addr_];
       mon.address = last_queried_addr_;
       parse_barcode(frame.payload.data(), frame.payload.size(), mon);
-      mon.online = true;
-      mon.last_seen_ms = now;
+      this->mark_monitor_seen_(mon);
       bind_monitor_if_matched_(mon);
       ESP_LOGI(TAG, "[Sniffed] Serial for 0x%02X: %s", last_queried_addr_, mon.serial_number.c_str());
       last_queried_cmd_ = 0;
@@ -473,8 +450,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       GenSAMMonitor &mon = monitors_[last_queried_addr_];
       mon.address = last_queried_addr_;
       parse_telemetry(frame.payload.data(), frame.payload.size(), mon);
-      mon.online = true;
-      mon.last_seen_ms = now;
+      this->mark_monitor_seen_(mon);
       bind_monitor_if_matched_(mon);
       publish_monitor_telemetry_(mon);
       last_queried_cmd_ = 0;
@@ -801,6 +777,9 @@ void GenSAMHub::bind_monitor_if_matched_(GenSAMMonitor &mon) {
                mon.address, mon.model.empty() ? "(querying)" : mon.model.c_str(),
                mon.serial_number.c_str(), b.name.c_str());
       publish_monitor_metadata_(mon);
+      if (mon.binding->online_sensor != nullptr) {
+        mon.binding->online_sensor->publish_state(mon.online);
+      }
       break;
     }
   }
@@ -839,6 +818,76 @@ void GenSAMHub::publish_monitor_telemetry_(const GenSAMMonitor &mon) {
   }
   if (mon.binding->online_sensor != nullptr) {
     mon.binding->online_sensor->publish_state(mon.online);
+  }
+}
+
+void GenSAMHub::mark_monitor_seen_(GenSAMMonitor &mon) {
+  uint32_t now = millis();
+  mon.last_seen_ms = now;
+  if (!mon.online) {
+    mon.online = true;
+    if (mon.binding != nullptr && mon.binding->online_sensor != nullptr) {
+      mon.binding->online_sensor->publish_state(true);
+    }
+    ESP_LOGI(TAG, "[0x%02X %s] Monitor is online",
+             mon.address, mon.model.empty() ? "(querying)" : mon.model.c_str());
+    this->evaluate_system_mute_();
+  }
+}
+
+void GenSAMHub::check_monitor_timeouts_() {
+  uint32_t now = millis();
+  if (now - last_timeout_check_ < 500) {
+    return;
+  }
+  last_timeout_check_ = now;
+
+  uint32_t stale_timeout_ms = std::max<uint32_t>(5000, poll_interval_ms_ * 4);
+  if (listen_only_ || glm_active_) {
+    stale_timeout_ms = std::max<uint32_t>(stale_timeout_ms, 15000);
+  }
+
+  bool state_changed = false;
+  for (auto &kv : monitors_) {
+    GenSAMMonitor &mon = kv.second;
+    if (mon.online && (now - mon.last_seen_ms > stale_timeout_ms)) {
+      mon.online = false;
+      if (mon.binding != nullptr && mon.binding->online_sensor != nullptr) {
+        mon.binding->online_sensor->publish_state(false);
+      }
+      ESP_LOGW(TAG, "[0x%02X %s] Monitor went offline (no response for %u ms)",
+               mon.address, mon.model.empty() ? "(unknown)" : mon.model.c_str(),
+               (unsigned)(now - mon.last_seen_ms));
+      state_changed = true;
+    }
+  }
+
+  if (state_changed) {
+    this->evaluate_system_mute_();
+  }
+}
+
+void GenSAMHub::evaluate_system_mute_() {
+  if (monitors_.empty()) {
+    return;
+  }
+  bool any_online = false;
+  bool all_muted = true;
+  for (const auto &kv : monitors_) {
+    if (kv.second.online) {
+      any_online = true;
+      if (!kv.second.mute) {
+        all_muted = false;
+        break;
+      }
+    }
+  }
+
+  bool new_mute = any_online ? all_muted : false;
+  if (current_mute_ != new_mute) {
+    current_mute_ = new_mute;
+    ESP_LOGI(TAG, "System mute updated to %s", YESNO(current_mute_));
+    this->notify_state_callbacks_();
   }
 }
 
@@ -946,19 +995,7 @@ void GenSAMHub::set_monitor_mute(uint8_t address, bool mute) {
     it->second.binding->mute_switch->publish_state(mute);
   }
 
-  // Evaluate whether all online monitors are now muted
-  bool all_muted = true;
-  for (const auto &kv : monitors_) {
-    if (kv.second.online && !kv.second.mute) {
-      all_muted = false;
-      break;
-    }
-  }
-  if (current_mute_ != all_muted) {
-    current_mute_ = all_muted;
-    ESP_LOGI(TAG, "System mute updated to %s based on individual monitor states", YESNO(current_mute_));
-    this->notify_state_callbacks_();
-  }
+  this->evaluate_system_mute_();
 
   ESP_LOGI(TAG, "Set monitor 0x%02X mute: %s", address, YESNO(mute));
 }
@@ -1058,6 +1095,7 @@ void GenSAMHub::rediscover_monitors() {
       kv.second.binding->online_sensor->publish_state(false);
     }
   }
+  this->evaluate_system_mute_();
 
   monitors_.clear();
   poll_addrs_.clear();
@@ -1080,6 +1118,7 @@ void GenSAMHub::loop() {
 
   check_glm_cooldown_();
   update_race_state_machine_();
+  check_monitor_timeouts_();
 
   // Check if any monitor identify pulse timer has expired
   uint32_t now = millis();
