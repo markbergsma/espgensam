@@ -19,6 +19,7 @@ This document defines architectural standards, hardware constraints, and coding 
 
 ---
 
+
 ## 2. Hardware Constraints & Principles
 
 - **Off-The-Shelf (COTS) Preference**:
@@ -30,7 +31,10 @@ This document defines architectural standards, hardware constraints, and coding 
 
 ---
 
-## 3. Build & Verification Workflows
+## 3. Git, Build & Verification Workflows
+
+- **Git operations**
+  You NEVER make any git commits wihout explicit approval from the user. While you can make suggestions for commit messages, they should be reviewed or edited by the user. Add an "Assisted-by <model name>" header if you contributed to the change, e.g. "Assisted-by: Gemini 3.8".
 
 - **ESPHome Compilation**:
   Verify any C++ or YAML modifications by compiling with ESPHome:
