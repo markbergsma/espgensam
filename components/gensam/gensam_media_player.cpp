@@ -66,7 +66,6 @@ void GenSAMMediaPlayer::control(const media_player::MediaPlayerCall &call) {
     float db = volume_slider_to_db(slider, hub_->get_min_volume_db(), hub_->get_max_volume_db());
     ESP_LOGI(TAG, "Home Assistant set volume slider: %.2f (%.1f dB)", slider, db);
     hub_->set_volume_db(db);
-    this->volume = slider;
   }
 
   // 2. Power and mute commands
@@ -77,12 +76,10 @@ void GenSAMMediaPlayer::control(const media_player::MediaPlayerCall &call) {
     switch (cmd) {
       case media_player::MEDIA_PLAYER_COMMAND_MUTE:
         hub_->set_group_mute(true);
-        this->muted_ = true;
         break;
 
       case media_player::MEDIA_PLAYER_COMMAND_UNMUTE:
         hub_->set_group_mute(false);
-        this->muted_ = false;
         break;
 
       case media_player::MEDIA_PLAYER_COMMAND_VOLUME_UP: {
@@ -91,7 +88,6 @@ void GenSAMMediaPlayer::control(const media_player::MediaPlayerCall &call) {
         float db = volume_slider_to_db(new_vol, hub_->get_min_volume_db(), hub_->get_max_volume_db());
         ESP_LOGI(TAG, "Volume UP: %.2f -> %.2f (%.1f dB)", this->volume, new_vol, db);
         hub_->set_volume_db(db);
-        this->volume = new_vol;
         break;
       }
 
@@ -101,27 +97,22 @@ void GenSAMMediaPlayer::control(const media_player::MediaPlayerCall &call) {
         float db = volume_slider_to_db(new_vol, hub_->get_min_volume_db(), hub_->get_max_volume_db());
         ESP_LOGI(TAG, "Volume DOWN: %.2f -> %.2f (%.1f dB)", this->volume, new_vol, db);
         hub_->set_volume_db(db);
-        this->volume = new_vol;
         break;
       }
 
       case media_player::MEDIA_PLAYER_COMMAND_TURN_ON:
         hub_->set_standby(false);
-        this->state = media_player::MEDIA_PLAYER_STATE_ON;
         break;
 
       case media_player::MEDIA_PLAYER_COMMAND_TURN_OFF:
         hub_->set_standby(true);
-        this->state = media_player::MEDIA_PLAYER_STATE_OFF;
         break;
 
       case media_player::MEDIA_PLAYER_COMMAND_TOGGLE:
         if (this->state == media_player::MEDIA_PLAYER_STATE_OFF) {
           hub_->set_standby(false);
-          this->state = media_player::MEDIA_PLAYER_STATE_ON;
         } else {
           hub_->set_standby(true);
-          this->state = media_player::MEDIA_PLAYER_STATE_OFF;
         }
         break;
 
@@ -130,7 +121,6 @@ void GenSAMMediaPlayer::control(const media_player::MediaPlayerCall &call) {
     }
   }
 
-  this->publish_state();
 }
 
 }  // namespace gensam

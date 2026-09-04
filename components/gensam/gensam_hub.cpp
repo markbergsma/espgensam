@@ -873,12 +873,12 @@ void GenSAMHub::publish_monitor_telemetry_(const GenSAMMonitor &mon) {
 }
 
 void GenSAMHub::set_volume_db(float db) {
-  current_volume_db_ = std::clamp(db, min_volume_db_, max_volume_db_);
+  float target_db = std::clamp(db, min_volume_db_, max_volume_db_);
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot send volume command: Bus is not available for TX");
     return;
   }
-  uint32_t int24 = volume_db_to_int24(current_volume_db_);
+  uint32_t int24 = volume_db_to_int24(target_db);
   uint8_t pld[3];
   encode_int24(int24, pld);
 
@@ -887,25 +887,24 @@ void GenSAMHub::set_volume_db(float db) {
   f.address = BROADCAST_ADDRESS;
   f.command = CMD_VOLUME;
   f.payload = {pld[0], pld[1], pld[2]};
-  this->send_frame(f);
+  if (!this->send_frame(f)) {
+    ESP_LOGW(TAG, "Volume command was not transmitted; keeping previous state");
+    return;
+  }
+
+  current_volume_db_ = target_db;
 
   ESP_LOGI(TAG, "Set system volume: %.1f dB (int24=%u)", current_volume_db_, (unsigned)int24);
   this->notify_state_callbacks_();
 }
 
 void GenSAMHub::set_group_mute(bool mute) {
-  current_mute_ = mute;
-  for (auto &kv : monitors_) {
-    kv.second.mute = mute;
-    if (kv.second.binding != nullptr && kv.second.binding->mute_switch != nullptr) {
-      kv.second.binding->mute_switch->publish_state(mute);
-    }
-  }
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot send mute command: Bus is not available for TX");
     return;
   }
   uint8_t val = mute ? (BYPASS_MUTE_MASK | (LED_RED << 1)) : (LED_OFF << 1);
+  bool transmitted = false;
 
   // 1. Unicast CMD_BYPASS to each discovered monitor individually (as per GLM protocol)
   for (const auto &kv : monitors_) {
@@ -913,8 +912,11 @@ void GenSAMHub::set_group_mute(bool mute) {
     f.address = kv.first;
     f.command = CMD_BYPASS;
     f.payload = {val};
-    this->send_frame(f);
-    delayMicroseconds(250);
+    bool sent = this->send_frame(f);
+    transmitted = transmitted || sent;
+    if (sent) {
+      delayMicroseconds(250);
+    }
   }
 
   // 2. Also send to BROADCAST_ADDRESS (0xFF)
@@ -922,7 +924,20 @@ void GenSAMHub::set_group_mute(bool mute) {
   fb.address = BROADCAST_ADDRESS;
   fb.command = CMD_BYPASS;
   fb.payload = {val};
-  this->send_frame(fb);
+  transmitted = this->send_frame(fb) || transmitted;
+
+  if (!transmitted) {
+    ESP_LOGW(TAG, "Mute command was not transmitted; keeping previous state");
+    return;
+  }
+
+  current_mute_ = mute;
+  for (auto &kv : monitors_) {
+    kv.second.mute = mute;
+    if (kv.second.binding != nullptr && kv.second.binding->mute_switch != nullptr) {
+      kv.second.binding->mute_switch->publish_state(mute);
+    }
+  }
 
   ESP_LOGI(TAG, "Set system mute: %s across %zu monitors", YESNO(mute), monitors_.size());
   this->notify_state_callbacks_();
@@ -934,6 +949,28 @@ void GenSAMHub::set_monitor_mute(uint8_t address, bool mute) {
     ESP_LOGW(TAG, "Cannot mute monitor 0x%02X: not found in registry", address);
     return;
   }
+
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot send mute command to 0x%02X: bus not available for TX", address);
+    return;
+  }
+
+  uint8_t val = mute ? (BYPASS_MUTE_MASK | (LED_RED << 1)) : (LED_OFF << 1);
+  Frame f;
+  f.address = address;
+  f.command = CMD_BYPASS;
+  f.payload = {val};
+  bool sent = this->send_frame(f);
+  if (sent) {
+    delayMicroseconds(250);
+  }
+  sent = this->send_frame(f) || sent;
+
+  if (!sent) {
+    ESP_LOGW(TAG, "Mute command to 0x%02X was not transmitted; keeping previous state", address);
+    return;
+  }
+
   it->second.mute = mute;
   if (it->second.binding != nullptr && it->second.binding->mute_switch != nullptr) {
     it->second.binding->mute_switch->publish_state(mute);
@@ -952,20 +989,6 @@ void GenSAMHub::set_monitor_mute(uint8_t address, bool mute) {
     ESP_LOGI(TAG, "System mute updated to %s based on individual monitor states", YESNO(current_mute_));
     this->notify_state_callbacks_();
   }
-
-  if (!can_transmit()) {
-    ESP_LOGW(TAG, "Cannot send mute command to 0x%02X: bus not available for TX", address);
-    return;
-  }
-
-  uint8_t val = mute ? (BYPASS_MUTE_MASK | (LED_RED << 1)) : (LED_OFF << 1);
-  Frame f;
-  f.address = address;
-  f.command = CMD_BYPASS;
-  f.payload = {val};
-  this->send_frame(f);
-  delayMicroseconds(250);
-  this->send_frame(f);
 
   ESP_LOGI(TAG, "Set monitor 0x%02X mute: %s", address, YESNO(mute));
 }
@@ -989,7 +1012,6 @@ void GenSAMHub::set_monitor_mute_by_serial(const std::string &serial_or_id, bool
 }
 
 void GenSAMHub::set_standby(bool standby) {
-  current_standby_ = standby;
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot send standby command: Bus is not available for TX");
     return;
@@ -998,9 +1020,17 @@ void GenSAMHub::set_standby(bool standby) {
   f.address = BROADCAST_ADDRESS;
   f.command = CMD_WAKEUP;
   f.payload = {WAKEUP_OP_POWER, standby ? WAKEUP_VAL_STANDBY : WAKEUP_VAL_ON};
-  this->send_frame(f);
-  delay(15);
-  this->send_frame(f);
+  bool sent = this->send_frame(f);
+  if (sent) {
+    delay(15);
+  }
+  sent = this->send_frame(f) || sent;
+  if (!sent) {
+    ESP_LOGW(TAG, "Standby command was not transmitted; keeping previous state");
+    return;
+  }
+
+  current_standby_ = standby;
   ESP_LOGI(TAG, "Set system power: %s", standby ? "STANDBY" : "WAKEUP/ON");
   this->notify_state_callbacks_();
 }
