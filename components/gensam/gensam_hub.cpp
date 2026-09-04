@@ -291,6 +291,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
 
         ESP_LOGI(TAG, "Assigned monitor at address 0x%02X (ID: %u)",
                  next_assign_addr_, (unsigned)mon.unique_id);
+        this->bind_monitor_if_matched_(mon);
 
         next_assign_addr_++;
         current_racing_bytes_.clear();
@@ -776,6 +777,12 @@ void GenSAMHub::bind_monitor_if_matched_(GenSAMMonitor &mon) {
   for (auto &b : bindings_) {
     if (mon.matches(b)) {
       mon.binding = &b;
+      if ((mon.serial_number.empty() || mon.serial_number == "(none)") && !b.serial_number.empty()) {
+        mon.serial_number = b.serial_number;
+      }
+      if ((mon.model.empty() || mon.model.rfind("SAM-", 0) == 0) && !b.name.empty()) {
+        mon.model = b.name;
+      }
       ESP_LOGI(TAG, "Bound monitor 0x%02X (%s, SN:%s) to HA entity '%s'",
                mon.address, mon.model.c_str(), mon.serial_number.c_str(), b.name.c_str());
       publish_monitor_metadata_(mon);
@@ -924,8 +931,14 @@ void GenSAMHub::set_monitor_mute(uint8_t address, bool mute) {
 void GenSAMHub::set_monitor_mute_by_serial(const std::string &serial_or_id, bool mute) {
   for (auto &kv : monitors_) {
     GenSAMMonitor &mon = kv.second;
-    if (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-        std::to_string(mon.unique_id) == serial_or_id) {
+    bool matches = (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+                    std::to_string(mon.unique_id) == serial_or_id);
+    if (!matches && mon.binding != nullptr) {
+      matches = (strcasecmp(mon.binding->serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+                 std::to_string(mon.binding->unique_id) == serial_or_id ||
+                 strcasecmp(mon.binding->name.c_str(), serial_or_id.c_str()) == 0);
+    }
+    if (matches) {
       this->set_monitor_mute(mon.address, mute);
       return;
     }
@@ -953,8 +966,14 @@ void GenSAMHub::set_standby(bool standby) {
 void GenSAMHub::identify_monitor_by_serial(const std::string &serial_or_id, uint32_t duration_ms) {
   for (auto &kv : monitors_) {
     GenSAMMonitor &mon = kv.second;
-    if (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-        std::to_string(mon.unique_id) == serial_or_id) {
+    bool matches = (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+                    std::to_string(mon.unique_id) == serial_or_id);
+    if (!matches && mon.binding != nullptr) {
+      matches = (strcasecmp(mon.binding->serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+                 std::to_string(mon.binding->unique_id) == serial_or_id ||
+                 strcasecmp(mon.binding->name.c_str(), serial_or_id.c_str()) == 0);
+    }
+    if (matches) {
       this->identify_monitor_by_address(mon.address, duration_ms);
       return;
     }
@@ -973,13 +992,16 @@ void GenSAMHub::identify_monitor_by_address(uint8_t address, uint32_t duration_m
     return;
   }
   it->second.identify_end_ms = millis() + duration_ms;
-  uint8_t val = (current_mute_ ? BYPASS_MUTE_MASK : 0x00) | (LED_GREEN << 1) | BYPASS_LED_PULSING_MASK;
+  uint8_t val = (it->second.mute ? BYPASS_MUTE_MASK : 0x00) | (LED_OFF << 1) | BYPASS_LED_PULSING_MASK;
   Frame f;
   f.address = address;
   f.command = CMD_BYPASS;
   f.payload = {val};
   this->send_frame(f);
-  ESP_LOGI(TAG, "Identify activated on monitor 0x%02X (%s) for %u ms", address, it->second.model.c_str(), (unsigned)duration_ms);
+  delayMicroseconds(250);
+  this->send_frame(f);
+  ESP_LOGI(TAG, "Identify activated on monitor 0x%02X (%s) for %u ms (val 0x%02X)",
+           address, it->second.model.c_str(), (unsigned)duration_ms, val);
 }
 
 void GenSAMHub::rediscover_monitors() {
@@ -999,13 +1021,16 @@ void GenSAMHub::loop() {
     if (kv.second.identify_end_ms != 0 && now >= kv.second.identify_end_ms) {
       kv.second.identify_end_ms = 0;
       if (can_transmit()) {
-        uint8_t val = (current_mute_ ? BYPASS_MUTE_MASK : 0x00) | (LED_GREEN << 1);
+        uint8_t val = kv.second.mute ? (BYPASS_MUTE_MASK | (LED_RED << 1)) : (LED_OFF << 1);
         Frame f;
         f.address = kv.first;
         f.command = CMD_BYPASS;
         f.payload = {val};
         this->send_frame(f);
-        ESP_LOGI(TAG, "Identify completed on monitor 0x%02X (%s); restored steady LED", kv.first, kv.second.model.c_str());
+        delayMicroseconds(250);
+        this->send_frame(f);
+        ESP_LOGI(TAG, "Identify completed on monitor 0x%02X (%s); restored steady LED (val 0x%02X)",
+                 kv.first, kv.second.model.c_str(), val);
       }
     }
   }
