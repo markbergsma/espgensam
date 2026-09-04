@@ -306,18 +306,12 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
         return;
       }
     } else if (race_state_ == RaceState::RACE_SET_RID_SENT) {
-      // Expecting ACK confirming address assignment
-      bool is_ack = false;
-      if (frame.payload.size() == 1 && frame.payload[0] == next_assign_addr_) {
-        is_ack = true;
-      } else if (frame.command == CMD_ACK || frame.command == CMD_REPORT_STATUS || frame.command == 0x05 ||
-                 frame.command == 0x09) {
-        if (frame.payload.empty() || frame.payload[0] == next_assign_addr_) {
-          is_ack = true;
-        }
-      }
-
-      if (is_ack) {
+      // Expecting ACK confirming address assignment:
+      // Frame addressed to HOST_ADDRESS (0x01) with CMD_REPORT_STATUS (0x09) or CMD_ACK (0x01),
+      // containing exactly 1 payload byte matching the assigned address.
+      if (frame.address == HOST_ADDRESS &&
+          (frame.command == CMD_REPORT_STATUS || frame.command == CMD_ACK) &&
+          frame.payload.size() == 1 && frame.payload[0] == next_assign_addr_) {
         this->complete_rid_assignment_(next_assign_addr_);
         return;
       }
@@ -720,30 +714,6 @@ void GenSAMHub::process_rx_() {
                      rx_chars[i].data, rx_chars[i].ninth_bit ? "'" : "");
   }
   ESP_LOGD(TAG, "RAW RX (%u chars): %s", (unsigned)count, raw_hex);
-
-  // While in RACE_SET_RID_SENT, check for clipped ACK in raw stream (0x09 followed by assigned address)
-  if (race_state_ == RaceState::RACE_SET_RID_SENT) {
-    for (size_t i = 0; i + 1 < count; i++) {
-      if (rx_chars[i].data == 0x09 && rx_chars[i + 1].data == next_assign_addr_) {
-        bool crc_checked = false;
-        bool crc_matches = false;
-        if (i + 3 < count) {
-          crc_checked = true;
-          uint16_t wire_crc = (static_cast<uint16_t>(rx_chars[i + 2].data) << 8) |
-                              static_cast<uint16_t>(rx_chars[i + 3].data);
-          uint8_t check_bytes[3] = {HOST_ADDRESS, 0x09, next_assign_addr_};
-          crc_matches = (calculate_crc(check_bytes, 3) == wire_crc);
-        }
-        if (!crc_checked || crc_matches) {
-          ESP_LOGI(TAG, "Detected RID ACK in raw stream for address 0x%02X%s",
-                   next_assign_addr_, crc_matches ? " (verified CRC)" : "");
-          this->complete_rid_assignment_(next_assign_addr_);
-          parser_.clear();
-          return;
-        }
-      }
-    }
-  }
 
   // Feed characters to incremental stream parser
   parser_.feed(rx_chars, count);
