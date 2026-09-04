@@ -395,7 +395,11 @@ void IRAM_ATTR Uart9Bit::decode_and_push_symbols_(
     uint8_t stop_bit = cursor.sample_at(t_bit_center_q16 >> 16);
     if (stop_bit != 1) {
       rx_framing_err_count_++;
-      cursor.advance();
+      // Resynchronize: advance past any continuing LOW pulse to ensure the next
+      // Start bit hunt begins from a confirmed HIGH (idle) state
+      while (cursor.dur > 0 && cursor.lvl == 0) {
+        cursor.advance();
+      }
       continue;
     }
 
