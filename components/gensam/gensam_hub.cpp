@@ -337,9 +337,15 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
         mon.last_seen_ms = now;
         bind_monitor_if_matched_(mon);
         publish_monitor_metadata_(mon);
+
+        // Advance to next query (info -> barcode -> next monitor)
+        if (current_query_cmd_ == CMD_SOFTWARE_QUERY) {
+          current_query_cmd_ = CMD_BAR_CODE;
+        } else {
+          current_query_cmd_ = CMD_SOFTWARE_QUERY;
+          current_poll_index_++;
+        }
         current_query_addr_ = 0;
-        current_query_cmd_ = 0;
-        query_retries_ = 0;
         race_step_time_ = now;
         return;
       }
@@ -529,10 +535,18 @@ void GenSAMHub::update_race_state_machine_() {
           stay_online.command = CMD_STAY_ONLINE;
           this->send_frame(stay_online);
 
+          // Populate poll_addrs_ with discovered monitor addresses
+          poll_addrs_.clear();
+          poll_addrs_.reserve(monitors_.size());
+          for (const auto &kv : monitors_) {
+            poll_addrs_.push_back(kv.first);
+          }
+
           race_state_ = RaceState::QUERYING_DEVICES;
           race_step_time_ = now;
+          current_poll_index_ = 0;
           current_query_addr_ = 0;
-          query_retries_ = 0;
+          current_query_cmd_ = CMD_SOFTWARE_QUERY;
         }
       }
       break;
@@ -565,22 +579,20 @@ void GenSAMHub::update_race_state_machine_() {
     }
 
     case RaceState::QUERYING_DEVICES: {
-      if (current_query_addr_ != 0 && now - race_step_time_ > 350) {
-        query_retries_++;
-        if (query_retries_ >= 2) {
-          if (current_query_cmd_ == CMD_BAR_CODE) {
-            ESP_LOGW(TAG, "Device 0x%02X did not respond to barcode query", current_query_addr_);
-            monitors_[current_query_addr_].serial_number = "(none)";
-          } else {
-            ESP_LOGW(TAG, "Device 0x%02X did not respond to info query; assigning default model", current_query_addr_);
-            char def_model[32];
-            snprintf(def_model, sizeof(def_model), "SAM-%02X", current_query_addr_);
-            monitors_[current_query_addr_].model = def_model;
-          }
-          current_query_addr_ = 0;
-          current_query_cmd_ = 0;
-          query_retries_ = 0;
+      if (current_query_addr_ != 0 && now - race_step_time_ > 250) {
+        // Query timed out; advance to next query (info -> barcode -> next monitor)
+        if (current_query_cmd_ == CMD_SOFTWARE_QUERY) {
+          current_query_cmd_ = CMD_BAR_CODE;
         } else {
+          current_query_cmd_ = CMD_SOFTWARE_QUERY;
+          current_poll_index_++;
+        }
+        current_query_addr_ = 0;
+      }
+
+      if (current_query_addr_ == 0) {
+        if (current_poll_index_ < poll_addrs_.size()) {
+          current_query_addr_ = poll_addrs_[current_poll_index_];
           race_step_time_ = now;
           Frame q;
           q.address = current_query_addr_;
@@ -591,37 +603,9 @@ void GenSAMHub::update_race_state_machine_() {
           this->send_frame(q);
           return;
         }
-      }
 
-      if (current_query_addr_ == 0) {
-        // Find next monitor with missing model metadata or serial number
-        for (auto &kv : monitors_) {
-          if (kv.second.model.empty()) {
-            current_query_addr_ = kv.first;
-            current_query_cmd_ = CMD_SOFTWARE_QUERY;
-            query_retries_ = 0;
-            race_step_time_ = now;
-            Frame q;
-            q.address = current_query_addr_;
-            q.command = CMD_SOFTWARE_QUERY;
-            this->send_frame(q);
-            return;
-          }
-          if (kv.second.serial_number.empty()) {
-            current_query_addr_ = kv.first;
-            current_query_cmd_ = CMD_BAR_CODE;
-            query_retries_ = 0;
-            race_step_time_ = now;
-            Frame q;
-            q.address = current_query_addr_;
-            q.command = CMD_BAR_CODE;
-            q.payload = {0x01};
-            this->send_frame(q);
-            return;
-          }
-        }
-        // All monitors queried or timed out! Advance to polling
-        ESP_LOGI(TAG, "All discovered monitors registered. Entering live telemetry polling loop.");
+        // All monitors queried! Advance to polling
+        ESP_LOGI(TAG, "All discovered monitors queried. Entering live telemetry polling loop.");
 
         // Broadcast active volume and stay_online heartbeat to establish monitor gain
         uint32_t int24 = volume_db_to_int24(current_volume_db_);
@@ -839,11 +823,9 @@ void GenSAMHub::bind_monitor_if_matched_(GenSAMMonitor &mon) {
       if ((mon.serial_number.empty() || mon.serial_number == "(none)") && !b.serial_number.empty()) {
         mon.serial_number = b.serial_number;
       }
-      if ((mon.model.empty() || mon.model.rfind("SAM-", 0) == 0) && !b.name.empty()) {
-        mon.model = b.name;
-      }
       ESP_LOGI(TAG, "Bound monitor 0x%02X (%s, SN:%s) to HA entity '%s'",
-               mon.address, mon.model.c_str(), mon.serial_number.c_str(), b.name.c_str());
+               mon.address, mon.model.empty() ? "(querying)" : mon.model.c_str(),
+               mon.serial_number.c_str(), b.name.c_str());
       publish_monitor_metadata_(mon);
       break;
     }
