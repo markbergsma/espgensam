@@ -31,6 +31,8 @@ wifi:
     ssid: "${name}-fallback"
     password: !secret ap_password
 
+captive_portal:
+
 logger:
   level: DEBUG
 
