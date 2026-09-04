@@ -754,6 +754,11 @@ void GenSAMHub::process_rx_() {
     uint32_t now = millis();
     ESP_LOGD(TAG, "RX <- %s", frame.to_string().c_str());
 
+    if (!frame.crc_valid) {
+      ESP_LOGW(TAG, "Dropping frame with invalid CRC: %s", frame.to_string().c_str());
+      continue;
+    }
+
     // Bus arbitration: Detect any external GLM master/adapter activity
     bool external_master_frame = false;
     if (frame.address != HOST_ADDRESS) {
