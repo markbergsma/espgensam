@@ -368,19 +368,21 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     bind_monitor_if_matched_(mon);
   }
 
-  // Sniff volume and wakeup broadcast/multicast commands
-  if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
-    if (frame.command == CMD_VOLUME && frame.payload.size() >= 3) {
-      uint32_t int24 = decode_int24(frame.payload.data());
-      current_volume_db_ = volume_int24_to_db(int24);
-      ESP_LOGI(TAG, "[Sniffed] System volume updated to %.1f dB", current_volume_db_);
+  // Sniff volume broadcast (GLM broadcasts master volume to 0xFF; 0xF0 carries auxiliary pot data)
+  if (frame.address == BROADCAST_ADDRESS && frame.command == CMD_VOLUME && frame.payload.size() >= 3) {
+    uint32_t int24 = decode_int24(frame.payload.data());
+    current_volume_db_ = volume_int24_to_db(int24);
+    ESP_LOGI(TAG, "[Sniffed] System volume updated to %.1f dB", current_volume_db_);
+    this->notify_state_callbacks_();
+  }
+
+  // Sniff wakeup / standby broadcast or multicast commands
+  if ((frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) &&
+      frame.command == CMD_WAKEUP && frame.payload.size() >= 2) {
+    if (frame.payload[0] == WAKEUP_OP_POWER) {
+      current_standby_ = (frame.payload[1] == WAKEUP_VAL_STANDBY);
+      ESP_LOGI(TAG, "[Sniffed] System power state updated to %s", current_standby_ ? "STANDBY" : "ON");
       this->notify_state_callbacks_();
-    } else if (frame.command == CMD_WAKEUP && frame.payload.size() >= 2) {
-      if (frame.payload[0] == WAKEUP_OP_POWER) {
-        current_standby_ = (frame.payload[1] == WAKEUP_VAL_STANDBY);
-        ESP_LOGI(TAG, "[Sniffed] System power state updated to %s", current_standby_ ? "STANDBY" : "ON");
-        this->notify_state_callbacks_();
-      }
     }
   }
 
