@@ -507,6 +507,20 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
     return;
   }
 
+  constexpr size_t BITS_PER_CHAR = 12;  // 1 start + 8 data + 1 ninth + 2 stop
+  if (len > (SIZE_MAX / BITS_PER_CHAR)) {
+    ESP_LOGE(TAG, "TX frame length overflow (%u chars). Dropping frame.", (unsigned) len);
+    return;
+  }
+
+  const size_t total_bits = len * BITS_PER_CHAR;
+  const size_t required_symbols = (total_bits + 1) / 2;
+  if (required_symbols > RMT_TX_MAX_SYMBOLS) {
+    ESP_LOGE(TAG, "TX frame too large: %u chars need %u symbols (max %u). Dropping frame.",
+             (unsigned) len, (unsigned) required_symbols, (unsigned) RMT_TX_MAX_SYMBOLS);
+    return;
+  }
+
   // Assert Direction Enable (TX Mode) if hardware DE pin configured
   if (de_pin_ >= 0) {
     gpio_set_level(static_cast<gpio_num_t>(de_pin_), 1);
@@ -521,9 +535,13 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
   uint32_t bit_cursor_q16 = 0;
   size_t sym_idx = 0;
   int half = 0;
+  bool overflow = false;
 
   auto emit_bit = [&](uint8_t lvl) {
-    if (sym_idx >= RMT_TX_MAX_SYMBOLS) return;
+    if (sym_idx >= RMT_TX_MAX_SYMBOLS) {
+      overflow = true;
+      return;
+    }
 
     uint32_t next_cursor_q16 = bit_cursor_q16 + bit_ticks_q16;
     uint16_t dur = static_cast<uint16_t>((next_cursor_q16 >> 16) - (bit_cursor_q16 >> 16));
@@ -562,6 +580,15 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
     // 4. 2 Stop Bits (HIGH = 1)
     emit_bit(1);
     emit_bit(1);
+  }
+
+  if (overflow) {
+    ESP_LOGE(TAG, "Internal TX symbol overflow while encoding frame (%u chars). Dropping frame.",
+             (unsigned) len);
+    if (de_pin_ >= 0) {
+      gpio_set_level(static_cast<gpio_num_t>(de_pin_), 0);
+    }
+    return;
   }
 
   // If frame ends on an odd half-symbol, pad the second half with idle HIGH
