@@ -147,11 +147,15 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
   // Check for Tagged TLV format (modern GLMv3-v5 monitors report ASCII-tagged records)
   // Tags:
   //   'A' (0x41): Amp/DSP Temperature (°C)
-  //   'B' (0x42): Input Signal Level
-  //   'C' (0x43): Overload / Clip / Protection Status
-  //   'E' (0x45): Driver Output Level (Woofer / Tweeter)
-  //   'F' (0x46): Driver Output Level (Subwoofer)
+  //   'B' (0x42): Input Signal Level (signed int8 dBFS)
+  //   'C' (0x43): Woofer (LF) Driver Output Level (signed int8 dBFS)
+  //   'D' (0x44): Midrange (MF) Driver Output Level (signed int8 dBFS, 3-way monitors)
+  //   'E' (0x45): Tweeter (HF) Driver Output Level (signed int8 dBFS)
+  //   'F' (0x46): Subwoofer Driver Output Level (signed int8 dBFS)
+  //   'G' (0x47): Power State (0x01 = Active, 0x02 = Standby / ISS)
   bool found_tag = false;
+  bool found_output = false;
+  int8_t max_output_db = -128;
   for (size_t i = 0; i < len; i++) {
     uint8_t tag = data[i];
     if (tag == 0x41 && i + 1 < len) {  // 'A' = Temperature
@@ -162,21 +166,27 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
       monitor.input_db = static_cast<int8_t>(data[i + 1]);
       found_tag = true;
       i++;
-    } else if (tag == 0x43 && i + 1 < len) {  // 'C' = Limiter / Clip gain reduction
-      // Idle floor is <= -100 dBFS (0x80 = -128 dBFS, 0x8C = -116 dBFS).
-      // Limiter/clip is only active when gain reduction rises significantly towards 0 dBFS.
-      int8_t clip_db = static_cast<int8_t>(data[i + 1]);
-      monitor.clip = (clip_db > -20);
+    } else if ((tag == 0x43 || tag == 0x44 || tag == 0x45 || tag == 0x46) && i + 1 < len) {
+      // 'C' = Woofer, 'D' = Midrange, 'E' = Tweeter, 'F' = Subwoofer driver level.
+      // Overall monitor output level tracks the peak across all active driver channels.
+      int8_t level = static_cast<int8_t>(data[i + 1]);
+      if (!found_output || level > max_output_db) {
+        max_output_db = level;
+      }
+      found_output = true;
       found_tag = true;
       i++;
-    } else if ((tag == 0x45 || tag == 0x46) && i + 1 < len) {  // 'E'/'F' = Output level
-      monitor.output_db = static_cast<int8_t>(data[i + 1]);
+    } else if (tag == 0x47 && i + 1 < len) {  // 'G' = Power state (0x01 = Active, 0x02 = Standby)
       found_tag = true;
       i++;
     } else if ((tag & 0xF0) == 0x80 && i + 2 < len) {
       // Multi-byte extended record (e.g. 0x81, 0x83, 0x84 followed by 2 payload bytes)
       i += 2;
     }
+  }
+
+  if (found_output) {
+    monitor.output_db = max_output_db;
   }
 
   if (found_tag) {

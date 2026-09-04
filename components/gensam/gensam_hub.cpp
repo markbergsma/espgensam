@@ -358,10 +358,9 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
         mon.last_seen_ms = now;
         bind_monitor_if_matched_(mon);
         publish_monitor_telemetry_(mon);
-        ESP_LOGI(TAG, "[0x%02X %s] Telemetry: Temp=%d°C In=%d dBFS Out=%d dBFS Clip=%s",
+        ESP_LOGI(TAG, "[0x%02X %s] Telemetry: Temp=%d°C In=%d dBFS Out=%d dBFS",
                  current_query_addr_, mon.model.c_str(),
-                 (int)mon.temperature, (int)mon.input_db, (int)mon.output_db,
-                 YESNO(mon.clip));
+                 (int)mon.temperature, (int)mon.input_db, (int)mon.output_db);
         current_query_addr_ = 0;
         last_poll_step_time_ = now;
         return;
@@ -862,9 +861,6 @@ void GenSAMHub::publish_monitor_telemetry_(const GenSAMMonitor &mon) {
   }
   if (mon.binding->output_level_sensor != nullptr) {
     mon.binding->output_level_sensor->publish_state(mon.output_db);
-  }
-  if (mon.binding->clip_sensor != nullptr) {
-    mon.binding->clip_sensor->publish_state(mon.clip);
   }
   if (mon.binding->online_sensor != nullptr) {
     mon.binding->online_sensor->publish_state(mon.online);

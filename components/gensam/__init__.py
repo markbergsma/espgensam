@@ -44,7 +44,6 @@ CONF_UNIQUE_ID = "unique_id"
 CONF_TEMPERATURE = "temperature"
 CONF_INPUT_LEVEL = "input_level"
 CONF_OUTPUT_LEVEL = "output_level"
-CONF_LIMITER = "limiter"
 CONF_ONLINE = "online"
 CONF_MUTE = "mute"
 CONF_IDENTIFY = "identify"
@@ -100,15 +99,6 @@ def _validate_monitor(conf):
             unit_of_measurement="dBFS",
             accuracy_decimals=0,
             state_class=STATE_CLASS_MEASUREMENT,
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        )(c)
-
-    if CONF_LIMITER not in conf:
-        c = {CONF_NAME: f"{name} Limiter Active"}
-        if dev_id:
-            c[CONF_DEVICE_ID] = dev_id
-        conf[CONF_LIMITER] = binary_sensor.binary_sensor_schema(
-            device_class=DEVICE_CLASS_PROBLEM,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         )(c)
 
@@ -199,10 +189,6 @@ MONITOR_SCHEMA = cv.All(
                 unit_of_measurement="dBFS",
                 accuracy_decimals=0,
                 state_class=STATE_CLASS_MEASUREMENT,
-                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            ),
-            cv.Optional(CONF_LIMITER): binary_sensor.binary_sensor_schema(
-                device_class=DEVICE_CLASS_PROBLEM,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
             cv.Optional(CONF_ONLINE): binary_sensor.binary_sensor_schema(
@@ -349,30 +335,27 @@ async def to_code(config):
             # 3. Output level sensor
             out_sens = await sensor.new_sensor(mon_conf[CONF_OUTPUT_LEVEL])
 
-            # 4. Limiter / Clip active binary sensor
-            clip_sens = await binary_sensor.new_binary_sensor(mon_conf[CONF_LIMITER])
-
-            # 5. Online status binary sensor
+            # 4. Online status binary sensor
             online_sens = await binary_sensor.new_binary_sensor(mon_conf[CONF_ONLINE])
 
-            # 6. Mute switch
+            # 5. Mute switch
             mute_sw = await switch.new_switch(mon_conf[CONF_MUTE])
             cg.add(mute_sw.set_hub(var))
             target_id = serial if serial else str(unique_id)
             cg.add(mute_sw.set_serial_or_id(target_id))
 
-            # 7. Identify button
+            # 6. Identify button
             id_btn = await button.new_button(mon_conf[CONF_IDENTIFY])
             cg.add(id_btn.set_hub(var))
             cg.add(id_btn.set_serial_or_id(target_id))
 
-            # 8. Model text sensor
+            # 7. Model text sensor
             model_sens = await text_sensor.new_text_sensor(mon_conf[CONF_MODEL])
 
-            # 9. Serial number text sensor
+            # 8. Serial number text sensor
             serial_sens = await text_sensor.new_text_sensor(mon_conf[CONF_SERIAL_NUMBER_SENSOR])
 
-            # 10. Firmware version text sensor
+            # 9. Firmware version text sensor
             fw_sens = await text_sensor.new_text_sensor(mon_conf[CONF_FIRMWARE_VERSION])
 
             hw_id_sens = await text_sensor.new_text_sensor(mon_conf[CONF_HARDWARE_ID])
@@ -383,7 +366,7 @@ async def to_code(config):
                     cg.RawExpression(
                         f'gensam::GenSAMMonitorBinding{{"{name}", "{serial}", '
                         f"{unique_id}U, "
-                        f"{temp_sens}, {in_sens}, {out_sens}, {clip_sens}, {online_sens}, "
+                        f"{temp_sens}, {in_sens}, {out_sens}, {online_sens}, "
                         f"{mute_sw}, "
                         f"{model_sens}, {serial_sens}, {fw_sens}, {hw_id_sens}}}"
                     )

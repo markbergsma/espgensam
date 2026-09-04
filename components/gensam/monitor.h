@@ -29,8 +29,7 @@
 ///    CMD_REPORT_STATUS 0x09). The binary telemetry payload encodes:
 ///    - Internal amplifier / DSP temperature (degrees Celsius).
 ///    - Analog/Digital Input level (dBFS, negative signed integer).
-///    - Driver Output level (dBFS, negative signed integer).
-///    - Fault, clip, and protection states.
+///    - Driver Output level (dBFS, negative signed integer across active driver channels).
 ///    The parser handles both fixed-offset payloads (standard RACE) and tagged TLV records.
 /// ===================================================================================
 
@@ -67,7 +66,6 @@ struct GenSAMMonitorBinding {
   sensor::Sensor *temperature_sensor{nullptr};         ///< DSP/Amp temperature sensor.
   sensor::Sensor *input_level_sensor{nullptr};         ///< Input signal level sensor (dBFS).
   sensor::Sensor *output_level_sensor{nullptr};        ///< Driver output level sensor (dBFS).
-  binary_sensor::BinarySensor *clip_sensor{nullptr};   ///< Protection / limiter clip binary sensor.
   binary_sensor::BinarySensor *online_sensor{nullptr}; ///< Responsive online status binary sensor.
   switch_::Switch *mute_switch{nullptr};               ///< Channel mute switch entity.
   text_sensor::TextSensor *model_sensor{nullptr};       ///< Discovered model text sensor (e.g. "7350A").
@@ -89,7 +87,6 @@ struct GenSAMMonitor {
   int8_t temperature{0};            ///< Current internal DSP/amplifier temperature in °C.
   int8_t input_db{0};               ///< Input signal level in dBFS.
   int8_t output_db{0};              ///< Driver output level in dBFS.
-  bool clip{false};                 ///< Limiter or overload protection state.
   bool mute{false};                 ///< Channel mute state (CMD_BYPASS bit 0).
   bool online{false};               ///< Whether the monitor is currently responsive to bus traffic.
   uint32_t last_seen_ms{0};         ///< Timestamp (millis) of last valid frame received from this monitor.
@@ -128,11 +125,11 @@ bool parse_barcode(const uint8_t *data, size_t len, GenSAMMonitor &monitor);
 
 /// @brief Parse status telemetry payload from CMD_REPORT_STATUS (0x09) or CMD_QUERY_STATUS (0x08).
 ///
-/// Supports modern tagged TLV streams ('A' temp, 'B' input, 'C' clip, 'E'/'F' output)
+/// Supports modern tagged TLV streams ('A' temp, 'B' input, 'C'/'D'/'E'/'F' driver outputs, 'G' power state)
 /// as well as legacy fixed-offset RACE payloads.
 /// @param data Pointer to raw unescaped payload buffer.
 /// @param len Payload length in bytes.
-/// @param[out] monitor Target monitor struct to update with temperature, signal levels, and clip state.
+/// @param[out] monitor Target monitor struct to update with temperature and signal levels.
 /// @return True if telemetry was successfully parsed, false if buffer is null/empty.
 bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor);
 
