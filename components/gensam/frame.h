@@ -36,7 +36,9 @@
 ///
 /// 4. Stream Parser (FrameParser):
 ///    - Discards leading noise characters (9th bit = 0 while IDLE).
-///    - Immediately resynchronizes on any 9th-bit address byte.
+///    - Immediately resynchronizes on any valid 9th-bit address byte.
+///    - In host_only mode, accommodates 1-bit RS-485 transceiver turnaround lag (where HOST_ADDRESS
+///      0x01' is sampled as 0xC0' by fast-replying monitors) under strict 16-bit CRC validation.
 ///    - Accumulates body bytes up to MAX_FRAME_LENGTH (256) safety bound.
 ///    - Unescapes body and CRC on delimiter (0x7E) and verifies CRC checksum.
 /// ===================================================================================

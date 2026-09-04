@@ -136,9 +136,34 @@ void FrameParser::feed(const Uart9BitChar *chars, size_t count) {
 
 void FrameParser::feed(const Uart9BitChar &c) {
   if (c.ninth_bit != 0) {
+    uint8_t addr = c.data;
+
+    // Hardware Turnaround Workaround:
+    // On half-duplex RS-485 modules with auto-direction circuitry (such as the M5Stack Atomic
+    // RS-485 Base), fast-replying monitors (e.g. 7350A subwoofer or 8330A replying within ~5-10 µs)
+    // begin transmitting before the transceiver's receiver circuit has completely settled.
+    //
+    // The UART wire encoding for HOST_ADDRESS (0x01, LSB-first) is:
+    //   [Start=0] [D0=1] [D1=0] [D2=0] [D3=0] [D4=0] [D5=0] [D6=0] [D7=0] [9th=1] [Stop1=1] [Stop2=1]
+    // If transceiver release delays detection of the initial falling edge, the receiver misses
+    // the Start bit (0). Since D0 is HIGH (1) like the idle line, the first falling edge seen by the
+    // RMT digitizer is the D0 -> D1 transition. The decoder locks onto that edge as the "Start bit",
+    // mathematically shifting the sampled bits by 1 bit time:
+    //   Decoded bits: D1..D7 + 9th + Stop1 = [0, 0, 0, 0, 0, 0, 1, 1] = 0xC0 (with 9th bit = 1).
+    // The rest of the frame (command, payload, CRC, delimiter) arrives completely uncorrupted.
+    //
+    // In host_only mode (active master), all monitor replies must be addressed to HOST_ADDRESS (0x01).
+    // We map 0xC0' back to HOST_ADDRESS. Full integrity is strictly protected by the 16-bit CRC check
+    // in process_candidate_(); any corrupted noise frame will fail CRC and be dropped.
+    // NOTE: If hardware with faster active-drive direction switching (e.g. discrete DE line control)
+    // is used in the future and eliminates turnaround lag, this alias can be removed.
+    if (host_only_ && addr == 0xC0) {
+      addr = HOST_ADDRESS;
+    }
+
     // Only accept bytes that represent valid GLM destination addresses.
     // Transceiver loopback echo with distorted rise times often samples false 9th bits (e.g. BF', DF', AD', 7F').
-    if (!is_valid_glm_address(c.data, host_only_)) {
+    if (!is_valid_glm_address(addr, host_only_)) {
       return;
     }
 
@@ -148,7 +173,7 @@ void FrameParser::feed(const Uart9BitChar &c) {
       invalid_count_++;
     }
     buffer_.clear();
-    buffer_.push_back(c);
+    buffer_.push_back({addr, c.ninth_bit});
     state_ = State::ACCUMULATING;
   } else {
     // Data / CRC / Delimiter character
