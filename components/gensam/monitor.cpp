@@ -6,35 +6,50 @@
 #include <cstdio>
 #include <sstream>
 #include <iomanip>
+#include <strings.h>
 
 namespace esphome {
 namespace gensam {
 
-std::string GenSAMMonitor::unique_id_hex() const {
-  if (unique_id.empty()) {
+std::string GenSAMMonitor::unique_id_str() const {
+  if (unique_id == 0) {
     return "(none)";
   }
-  std::ostringstream oss;
-  for (size_t i = 0; i < unique_id.size(); i++) {
-    if (i > 0) oss << " ";
-    oss << std::hex << std::uppercase << std::setfill('0') << std::setw(2)
-        << static_cast<int>(unique_id[i]);
+  return std::to_string(unique_id);
+}
+
+bool GenSAMMonitor::matches(const GenSAMMonitorBinding &b) const {
+  if (!b.serial_number.empty() && !serial_number.empty()) {
+    if (strcasecmp(b.serial_number.c_str(), serial_number.c_str()) == 0) {
+      return true;
+    }
+    // Substring match: handles minor prefix differences such as optional 'M' (e.g. 7350APM88123456 vs 7350AP88123456)
+    // or matching against purely the numeric serial digits (e.g. 88123456)
+    if (serial_number.find(b.serial_number) != std::string::npos ||
+        b.serial_number.find(serial_number) != std::string::npos) {
+      return true;
+    }
   }
-  return oss.str();
+  if (b.unique_id != 0 && unique_id != 0) {
+    if (b.unique_id == unique_id) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::string GenSAMMonitor::to_string() const {
   char buf[160];
   if (!serial_number.empty()) {
-    snprintf(buf, sizeof(buf), "Monitor 0x%02X [%s, SN:%s] Model=%s FW=%s Temp=%d C %s",
-             address, unique_id_hex().c_str(), serial_number.c_str(),
+    snprintf(buf, sizeof(buf), "Monitor 0x%02X [ID:%u, SN:%s] Model=%s FW=%s Temp=%d C %s",
+             address, static_cast<unsigned>(unique_id), serial_number.c_str(),
              model.empty() ? "?" : model.c_str(),
              firmware_version.empty() ? "?" : firmware_version.c_str(),
              static_cast<int>(temperature),
              online ? "ONLINE" : "OFFLINE");
   } else {
-    snprintf(buf, sizeof(buf), "Monitor 0x%02X [%s] Model=%s FW=%s Temp=%d C %s",
-             address, unique_id_hex().c_str(),
+    snprintf(buf, sizeof(buf), "Monitor 0x%02X [ID:%u] Model=%s FW=%s Temp=%d C %s",
+             address, static_cast<unsigned>(unique_id),
              model.empty() ? "?" : model.c_str(),
              firmware_version.empty() ? "?" : firmware_version.c_str(),
              static_cast<int>(temperature),

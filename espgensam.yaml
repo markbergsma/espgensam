@@ -5,6 +5,13 @@ substitutions:
 esphome:
   name: "${name}"
   friendly_name: "${friendly_name}"
+  devices:
+    - id: dev_subwoofer
+      name: "Subwoofer"
+    - id: dev_left_monitor
+      name: "Left Monitor"
+    - id: dev_right_monitor
+      name: "Right Monitor"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -42,3 +49,32 @@ gensam:
   rx_buffer_size: 512
   listen_only: false
   glm_inactivity_cooldown: 30s
+  poll_interval: 1s
+  telemetry_averaging_period: 60s
+  min_volume_db: -80.0
+  max_volume_db: -30.0
+  startup_volume_db: -50.0
+
+  glm_adapter_active:
+    name: "GLM USB Adapter Active"
+
+  rediscover_button:
+    name: "Rediscover Monitors"
+
+  monitors:
+    - serial_number: "7350APM88123456"
+      unique_id: 1842915
+      name: "Subwoofer"
+      device_id: dev_subwoofer
+    - serial_number: "8330AP99234567"
+      unique_id: 1654321
+      name: "Left Monitor"
+      device_id: dev_left_monitor
+    - serial_number: "8330AP77345678"
+      unique_id: 1987654
+      name: "Right Monitor"
+      device_id: dev_right_monitor
+
+media_player:
+  - platform: gensam
+    name: "Genelec SAM System"

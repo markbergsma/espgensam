@@ -48,12 +48,17 @@
 #include "frame.h"
 #include "monitor.h"
 #include "uart9bit.h"
+#include "util.h"
 
 #include <vector>
 #include <map>
 #include <functional>
 
 namespace esphome {
+namespace binary_sensor {
+class BinarySensor;
+}  // namespace binary_sensor
+
 namespace gensam {
 
 /// @brief Phases of the active RACE monitor discovery and telemetry state machine.
@@ -102,6 +107,73 @@ class GenSAMHub : public Component {
 
   /// @brief Telemetry round-robin polling interval in milliseconds.
   void set_poll_interval(uint32_t interval_ms) { poll_interval_ms_ = interval_ms; }
+
+  /// @brief Set minimum volume in decibels corresponding to slider 0.0 (e.g. -80.0 dB).
+  void set_min_volume_db(float db) { min_volume_db_ = db; }
+
+  /// @brief Set maximum volume in decibels corresponding to slider 1.0 (e.g. 0.0 dB).
+  void set_max_volume_db(float db) { max_volume_db_ = db; }
+
+  /// @brief Set initial volume in decibels at startup/boot (e.g. -30.0 dB).
+  void set_startup_volume_db(float db) { startup_volume_db_ = db; current_volume_db_ = db; }
+
+  /// @brief Register a configured monitor binding to match discovered hardware.
+  void add_monitor_binding(const GenSAMMonitorBinding &binding) { bindings_.push_back(binding); }
+
+  /// @brief Set optional binary sensor reflecting external GLM USB adapter bus occupancy.
+  void set_glm_usb_adapter_active_sensor(binary_sensor::BinarySensor *sensor) {
+    glm_usb_adapter_active_sensor_ = sensor;
+  }
+
+  /// @brief Register a callback for when volume, mute, or power changes (from commands or passive snooping).
+  void add_state_callback(std::function<void(float, bool, bool)> cb) {
+    state_callbacks_.push_back(std::move(cb));
+  }
+
+  /// @brief Legacy setter for volume state callback.
+  void set_volume_state_callback(std::function<void(float, bool, bool)> cb) {
+    add_state_callback(std::move(cb));
+  }
+
+  /// @brief Minimum volume in dB corresponding to slider 0.0.
+  float get_min_volume_db() const { return min_volume_db_; }
+
+  /// @brief Maximum volume in dB corresponding to slider 1.0.
+  float get_max_volume_db() const { return max_volume_db_; }
+
+  /// @brief Current system volume in dB.
+  float get_current_volume_db() const { return current_volume_db_; }
+
+  /// @brief Current system mute state.
+  bool is_muted() const { return current_mute_; }
+
+  /// @brief Current system standby state.
+  bool is_standby() const { return current_standby_; }
+
+  /// @brief Set master speaker group volume in decibels.
+  /// @param db Target volume level in dB (clamped between min_volume_db_ and max_volume_db_).
+  void set_volume_db(float db);
+
+  /// @brief Set master speaker group mute state.
+  /// @param mute True to mute all speakers via CMD_BYPASS, false to unmute.
+  void set_group_mute(bool mute);
+
+  /// @brief Set system power / standby state.
+  /// @param standby True to place monitors into amplifier standby (<0.5W), false to wake up.
+  void set_standby(bool standby);
+
+  /// @brief Pulse a monitor's front LED for a set duration to identify its physical position.
+  /// @param serial_or_id Serial number string or space-separated hex unique ID.
+  /// @param duration_ms Pulse duration in milliseconds (default 5000 ms).
+  void identify_monitor_by_serial(const std::string &serial_or_id, uint32_t duration_ms = 5000);
+
+  /// @brief Pulse a monitor's front LED by its current logical address.
+  /// @param address Logical bus address (0x02..0x7F).
+  /// @param duration_ms Pulse duration in milliseconds (default 5000 ms).
+  void identify_monitor_by_address(uint8_t address, uint32_t duration_ms = 5000);
+
+  /// @brief Manually trigger a fresh active RACE discovery cycle.
+  void rediscover_monitors();
 
   /// @brief Initialize hardware pins, power rails, and the 9-bit RMT transceiver.
   void setup() override;
@@ -168,6 +240,15 @@ class GenSAMHub : public Component {
   /// @param frame The decoded frame to handle.
   void handle_incoming_frame_(const Frame &frame);
 
+  /// @brief Match discovered monitor against configured bindings.
+  void bind_monitor_if_matched_(GenSAMMonitor &mon);
+
+  /// @brief Publish parsed monitor telemetry to linked Home Assistant sensor entities.
+  void publish_monitor_telemetry_(const GenSAMMonitor &mon);
+
+  /// @brief Publish monitor metadata (model, serial, firmware revision, ID) to linked text sensors.
+  void publish_monitor_metadata_(const GenSAMMonitor &mon);
+
   int tx_pin_{-1};
   int rx_pin_{-1};
   int de_pin_{-1};
@@ -198,7 +279,8 @@ class GenSAMHub : public Component {
   // Active RACE & query state machine
   RaceState race_state_{RaceState::IDLE};
   uint8_t next_assign_addr_{MONITOR_START_ADDR};
-  std::vector<uint8_t> current_racing_serial_;
+  std::vector<uint8_t> current_racing_bytes_;
+  uint32_t current_racing_id_{0};
   uint32_t race_step_time_{0};
   uint8_t current_query_addr_{0};
   uint8_t current_query_cmd_{0};
@@ -213,6 +295,23 @@ class GenSAMHub : public Component {
   // Passive snooping tracker
   uint8_t last_queried_addr_{0};
   uint8_t last_queried_cmd_{0};
+
+  // Volume, mute, standby, and binding state
+  float min_volume_db_{-80.0f};
+  float max_volume_db_{0.0f};
+  float startup_volume_db_{-30.0f};
+  float current_volume_db_{-30.0f};
+  bool current_mute_{false};
+  bool current_standby_{false};
+  void notify_state_callbacks_() {
+    for (auto &cb : state_callbacks_) {
+      cb(current_volume_db_, current_mute_, current_standby_);
+    }
+  }
+
+  std::vector<GenSAMMonitorBinding> bindings_;
+  binary_sensor::BinarySensor *glm_usb_adapter_active_sensor_{nullptr};
+  std::vector<std::function<void(float, bool, bool)>> state_callbacks_;
 };
 
 }  // namespace gensam

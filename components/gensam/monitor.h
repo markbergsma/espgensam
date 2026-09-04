@@ -40,14 +40,43 @@
 #include <map>
 
 namespace esphome {
+namespace sensor {
+class Sensor;
+}  // namespace sensor
+
+namespace binary_sensor {
+class BinarySensor;
+}  // namespace binary_sensor
+
+namespace text_sensor {
+class TextSensor;
+}  // namespace text_sensor
+
 namespace gensam {
+
+/// @brief Static binding between a configured speaker and its ESPHome sensor entities.
+struct GenSAMMonitorBinding {
+  std::string name;                                    ///< Friendly speaker name (e.g. "Subwoofer", "Left Monitor").
+  std::string serial_number;                           ///< Matching factory serial number (e.g. "7350AP88123456").
+  uint32_t unique_id{0};                               ///< Optional matching decimal GLM hardware ID (e.g. 1842915).
+
+  sensor::Sensor *temperature_sensor{nullptr};         ///< DSP/Amp temperature sensor.
+  sensor::Sensor *input_level_sensor{nullptr};         ///< Input signal level sensor (dBFS).
+  sensor::Sensor *output_level_sensor{nullptr};        ///< Driver output level sensor (dBFS).
+  binary_sensor::BinarySensor *clip_sensor{nullptr};   ///< Protection / limiter clip binary sensor.
+  binary_sensor::BinarySensor *online_sensor{nullptr}; ///< Responsive online status binary sensor.
+  text_sensor::TextSensor *model_sensor{nullptr};       ///< Discovered model text sensor (e.g. "7350A").
+  text_sensor::TextSensor *serial_sensor{nullptr};      ///< Factory serial number text sensor (e.g. "7350APM88123456").
+  text_sensor::TextSensor *firmware_sensor{nullptr};    ///< Firmware revision text sensor (e.g. "1.6.2.3733").
+  text_sensor::TextSensor *hardware_id_sensor{nullptr}; ///< Decimal GLM hardware ID text sensor (e.g. "1842915").
+};
 
 /// @brief Represents a single Genelec SAM monitor or subwoofer discovered on the RS-485 bus.
 struct GenSAMMonitor {
   uint8_t address{0};                ///< Logical RS-485 bus address (e.g. 0x02, 0x03).
-  std::vector<uint8_t> unique_id;   ///< 3-byte hardware serial/MAC identifier from RACE discovery.
+  uint32_t unique_id{0};             ///< Decimal GLM hardware identifier from RACE discovery (e.g. 1842915).
   std::string model;                ///< Model designation (e.g. "7350A", "8330A", "8351B").
-  std::string serial_number;        ///< Factory printed serial number string (e.g. "8330AP61020259").
+  std::string serial_number;        ///< Factory printed serial number string (e.g. "8330AP99234567").
   std::string firmware_version;     ///< Firmware revision string (e.g. "1.6.3733").
   std::string hardware_version;     ///< Hardware revision string (e.g. "0.2.0").
   std::string raw_device_info;      ///< Full unparsed ASCII metadata string from hardware/software query.
@@ -60,9 +89,17 @@ struct GenSAMMonitor {
   uint32_t last_seen_ms{0};         ///< Timestamp (millis) of last valid frame received from this monitor.
   uint32_t last_poll_ms{0};         ///< Timestamp (millis) when the last query frame was sent to this monitor.
 
-  /// @brief Helper to format the 3-byte unique ID into a space-separated hex string (e.g. "11 3E 49").
-  /// @return Formatted hex string, or "(none)" if empty.
-  std::string unique_id_hex() const;
+  GenSAMMonitorBinding *binding{nullptr}; ///< Pointer to matched Home Assistant entity binding.
+  uint32_t identify_end_ms{0};            ///< If non-zero, timestamp (millis) when LED pulsing should revert.
+
+  /// @brief Check if this monitor matches a configured binding by serial number or unique ID.
+  /// @param b The candidate binding to test against.
+  /// @return True if serial number matches (case-insensitive) or decimal unique ID matches.
+  bool matches(const GenSAMMonitorBinding &b) const;
+
+  /// @brief Helper to format the decimal unique ID into a string (e.g. "1842915").
+  /// @return Formatted decimal string, or "(none)" if 0.
+  std::string unique_id_str() const;
 
   /// @brief Formatted summary string for logging and diagnostic dumps.
   /// @return Human-readable summary of monitor address, ID, serial number, model, firmware, and online status.

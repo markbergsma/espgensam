@@ -51,5 +51,16 @@ static constexpr uint8_t LED_RED = 1;
 static constexpr uint8_t LED_OFF = 2;
 static constexpr uint8_t LED_YELLOW = 3;
 
+// --- CMD_BYPASS (0x2B) control bit flags -----------------------------------
+static constexpr uint8_t BYPASS_MUTE_MASK = 0x01;          ///< Bit 0: Mute (1 = muted, 0 = unmuted)
+static constexpr uint8_t BYPASS_LED_COLOR_MASK = 0x06;     ///< Bits 1-2: LED Color ((color << 1) & 0x06)
+static constexpr uint8_t BYPASS_LED_PULSING_MASK = 0x08;   ///< Bit 3: LED Pulsing / Blink (1 = pulsing)
+static constexpr uint8_t BYPASS_INVERT_LED_MASK = 0x10;    ///< Bit 4: Invert LED enable
+
+// --- CMD_WAKEUP (0x3A) control parameters ---------------------------------
+static constexpr uint8_t WAKEUP_OP_POWER = 0x03;           ///< Power sub-command byte
+static constexpr uint8_t WAKEUP_VAL_ON = 0x7F;             ///< Power ON / Wakeup
+static constexpr uint8_t WAKEUP_VAL_STANDBY = 0x01;        ///< Standby / Sleep
+
 }  // namespace gensam
 }  // namespace esphome

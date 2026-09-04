@@ -4,6 +4,9 @@
 
 #include "gensam_hub.h"
 #include "esphome/core/log.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "driver/gpio.h"
 
 static const char *const TAG = "gensam";
@@ -83,6 +86,11 @@ void GenSAMHub::setup() {
     return;
   }
 
+  if (glm_usb_adapter_active_sensor_ != nullptr) {
+    glm_usb_adapter_active_sensor_->publish_state(false);
+  }
+  current_volume_db_ = startup_volume_db_;
+
   ESP_LOGI(TAG, "GenSAM Hub initialized successfully (baud=%lu, TX=%s, RX=GPIO%d, yield_to_glm=%s, cooldown=%u ms)",
            (unsigned long)baud_rate_, listen_only_ ? "DISABLED (listen_only)" : ("GPIO" + std::to_string(tx_pin_)).c_str(),
            rx_pin_, YESNO(yield_to_glm_), (unsigned)glm_inactivity_cooldown_ms_);
@@ -92,6 +100,12 @@ void GenSAMHub::dump_config() {
   ESP_LOGCONFIG(TAG, "GenSAM Hub:");
   ESP_LOGCONFIG(TAG, "  TX Pin: GPIO%d", tx_pin_);
   ESP_LOGCONFIG(TAG, "  RX Pin: GPIO%d", rx_pin_);
+  ESP_LOGCONFIG(TAG, "  Volume Bounds: [%.1f dB, %.1f dB] (Startup: %.1f dB)",
+                min_volume_db_, max_volume_db_, startup_volume_db_);
+  ESP_LOGCONFIG(TAG, "  Configured Monitor Bindings: %u", (unsigned)bindings_.size());
+  for (const auto &b : bindings_) {
+    ESP_LOGCONFIG(TAG, "    - Name: '%s' (SN: '%s')", b.name.c_str(), b.serial_number.c_str());
+  }
   if (de_pin_ >= 0) {
     ESP_LOGCONFIG(TAG, "  Hardware DE (Direction) Pin: GPIO%d", de_pin_);
   }
@@ -218,7 +232,8 @@ void GenSAMHub::start_race_discovery() {
   ESP_LOGI(TAG, "Starting GLM RACE monitor discovery...");
   race_state_ = RaceState::RACE_PING_SENT;
   next_assign_addr_ = MONITOR_START_ADDR;
-  current_racing_serial_.clear();
+  current_racing_bytes_.clear();
+  current_racing_id_ = 0;
   race_step_time_ = millis();
 
   // Broadcast initial RACE discovery ping (0xFF 0xFE)
@@ -236,7 +251,10 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     if (race_state_ == RaceState::RACE_PING_SENT) {
       // Expecting winning unassigned monitor response with 3-byte serial
       if (frame.payload.size() == 3) {
-        current_racing_serial_ = frame.payload;
+        current_racing_bytes_ = frame.payload;
+        current_racing_id_ = (static_cast<uint32_t>(frame.payload[0]) << 16) |
+                             (static_cast<uint32_t>(frame.payload[1]) << 8) |
+                             static_cast<uint32_t>(frame.payload[2]);
         race_state_ = RaceState::RACE_SET_RID_SENT;
         race_step_time_ = now;
 
@@ -247,7 +265,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
         Frame set_rid;
         set_rid.address = MULTICAST_ADDRESS;
         set_rid.command = CMD_SET_RID;
-        set_rid.payload = current_racing_serial_;
+        set_rid.payload = current_racing_bytes_;
         set_rid.payload.push_back(next_assign_addr_);
         this->send_frame(set_rid);
         return;
@@ -266,15 +284,16 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       if (is_ack) {
         GenSAMMonitor &mon = monitors_[next_assign_addr_];
         mon.address = next_assign_addr_;
-        mon.unique_id = current_racing_serial_;
+        mon.unique_id = current_racing_id_;
         mon.online = true;
         mon.last_seen_ms = now;
 
-        ESP_LOGI(TAG, "Assigned monitor at address 0x%02X (Hardware ID: %s)",
-                 next_assign_addr_, mon.unique_id_hex().c_str());
+        ESP_LOGI(TAG, "Assigned monitor at address 0x%02X (ID: %u)",
+                 next_assign_addr_, (unsigned)mon.unique_id);
 
         next_assign_addr_++;
-        current_racing_serial_.clear();
+        current_racing_bytes_.clear();
+        current_racing_id_ = 0;
 
         // Allow 300us turnaround before next ping
         delayMicroseconds(300);
@@ -302,6 +321,8 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
         }
         mon.online = true;
         mon.last_seen_ms = now;
+        bind_monitor_if_matched_(mon);
+        publish_monitor_metadata_(mon);
         current_query_addr_ = 0;
         current_query_cmd_ = 0;
         query_retries_ = 0;
@@ -315,6 +336,8 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
         parse_telemetry(frame.payload.data(), frame.payload.size(), mon);
         mon.online = true;
         mon.last_seen_ms = now;
+        bind_monitor_if_matched_(mon);
+        publish_monitor_telemetry_(mon);
         ESP_LOGI(TAG, "[0x%02X %s] Telemetry: Temp=%d°C In=%d dBFS Out=%d dBFS Clip=%s",
                  current_query_addr_, mon.model.c_str(),
                  (int)mon.temperature, (int)mon.input_db, (int)mon.output_db,
@@ -335,10 +358,32 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     uint8_t addr = frame.payload[3];
     GenSAMMonitor &mon = monitors_[addr];
     mon.address = addr;
-    mon.unique_id = {frame.payload[0], frame.payload[1], frame.payload[2]};
+    mon.unique_id = (static_cast<uint32_t>(frame.payload[0]) << 16) |
+                    (static_cast<uint32_t>(frame.payload[1]) << 8) |
+                    static_cast<uint32_t>(frame.payload[2]);
     mon.online = true;
     mon.last_seen_ms = now;
-    ESP_LOGI(TAG, "[Sniffed] Assigned monitor 0x%02X (ID: %s)", addr, mon.unique_id_hex().c_str());
+    ESP_LOGI(TAG, "[Sniffed] Assigned monitor 0x%02X (ID: %u)", addr, (unsigned)mon.unique_id);
+  }
+
+  // Sniff volume, bypass, and wakeup broadcast/multicast commands
+  if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
+    if (frame.command == CMD_VOLUME && frame.payload.size() >= 3) {
+      uint32_t int24 = decode_int24(frame.payload.data());
+      current_volume_db_ = volume_int24_to_db(int24);
+      ESP_LOGI(TAG, "[Sniffed] System volume updated to %.1f dB", current_volume_db_);
+      this->notify_state_callbacks_();
+    } else if (frame.command == CMD_BYPASS && !frame.payload.empty()) {
+      current_mute_ = (frame.payload[0] & BYPASS_MUTE_MASK) != 0;
+      ESP_LOGI(TAG, "[Sniffed] System mute updated to %s", YESNO(current_mute_));
+      this->notify_state_callbacks_();
+    } else if (frame.command == CMD_WAKEUP && frame.payload.size() >= 2) {
+      if (frame.payload[0] == WAKEUP_OP_POWER) {
+        current_standby_ = (frame.payload[1] == WAKEUP_VAL_STANDBY);
+        ESP_LOGI(TAG, "[Sniffed] System power state updated to %s", current_standby_ ? "STANDBY" : "ON");
+        this->notify_state_callbacks_();
+      }
+    }
   }
 
   // Track replies sent to host
@@ -349,6 +394,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       parse_device_info(frame.payload.data(), frame.payload.size(), mon);
       mon.online = true;
       mon.last_seen_ms = now;
+      bind_monitor_if_matched_(mon);
       ESP_LOGI(TAG, "[Sniffed] Discovered: %s", mon.to_string().c_str());
       last_queried_cmd_ = 0;
     } else if (last_queried_cmd_ == CMD_BAR_CODE && last_queried_addr_ != 0) {
@@ -357,6 +403,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       parse_barcode(frame.payload.data(), frame.payload.size(), mon);
       mon.online = true;
       mon.last_seen_ms = now;
+      bind_monitor_if_matched_(mon);
       ESP_LOGI(TAG, "[Sniffed] Serial for 0x%02X: %s", last_queried_addr_, mon.serial_number.c_str());
       last_queried_cmd_ = 0;
     } else if (last_queried_cmd_ == CMD_QUERY_STATUS && last_queried_addr_ != 0) {
@@ -365,6 +412,8 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       parse_telemetry(frame.payload.data(), frame.payload.size(), mon);
       mon.online = true;
       mon.last_seen_ms = now;
+      bind_monitor_if_matched_(mon);
+      publish_monitor_telemetry_(mon);
       last_queried_cmd_ = 0;
     }
   }
@@ -498,7 +547,17 @@ void GenSAMHub::update_race_state_machine_() {
         // All monitors queried or timed out! Advance to polling
         ESP_LOGI(TAG, "All discovered monitors registered. Entering live telemetry polling loop.");
 
-        // Broadcast stay_online heartbeat to keep all monitors active
+        // Broadcast active volume and stay_online heartbeat to establish monitor gain
+        uint32_t int24 = volume_db_to_int24(current_volume_db_);
+        uint8_t pld[3];
+        encode_int24(int24, pld);
+        Frame vol_frame;
+        vol_frame.address = BROADCAST_ADDRESS;
+        vol_frame.command = CMD_VOLUME;
+        vol_frame.payload = {pld[0], pld[1], pld[2]};
+        this->send_frame(vol_frame);
+        delayMicroseconds(250);
+
         Frame stay_online;
         stay_online.address = BROADCAST_ADDRESS;
         stay_online.command = CMD_STAY_ONLINE;
@@ -524,8 +583,18 @@ void GenSAMHub::update_race_state_machine_() {
       }
 
       if (current_query_addr_ == 0 && now - last_poll_cycle_time_ >= poll_interval_ms_) {
-        // At the start of each polling cycle, broadcast stay_online heartbeat
+        // At the start of each polling cycle, broadcast active volume and stay_online heartbeat
         if (current_poll_index_ == 0) {
+          uint32_t int24 = volume_db_to_int24(current_volume_db_);
+          uint8_t pld[3];
+          encode_int24(int24, pld);
+          Frame vf;
+          vf.address = BROADCAST_ADDRESS;
+          vf.command = CMD_VOLUME;
+          vf.payload = {pld[0], pld[1], pld[2]};
+          this->send_frame(vf);
+          delayMicroseconds(250);
+
           Frame stay_online;
           stay_online.address = BROADCAST_ADDRESS;
           stay_online.command = CMD_STAY_ONLINE;
@@ -613,6 +682,9 @@ void GenSAMHub::process_rx_() {
       last_glm_activity_ = now;
       if (!glm_active_) {
         glm_active_ = true;
+        if (glm_usb_adapter_active_sensor_ != nullptr) {
+          glm_usb_adapter_active_sensor_->publish_state(true);
+        }
         ESP_LOGW(TAG, "External GLM master/adapter detected on bus (%s). Yielding bus control (listen-only mode)...",
                  frame.to_string().c_str());
       }
@@ -635,6 +707,9 @@ void GenSAMHub::check_glm_cooldown_() {
   uint32_t now = millis();
   if (now - last_glm_activity_ >= glm_inactivity_cooldown_ms_) {
     glm_active_ = false;
+    if (glm_usb_adapter_active_sensor_ != nullptr) {
+      glm_usb_adapter_active_sensor_->publish_state(false);
+    }
     ESP_LOGI(TAG, "No GLM master/adapter traffic observed for %u seconds. Resuming active bus control.",
              (unsigned)(glm_inactivity_cooldown_ms_ / 1000));
     // Trigger fresh wakeup and discovery when resuming active master control
@@ -644,11 +719,186 @@ void GenSAMHub::check_glm_cooldown_() {
   }
 }
 
+void GenSAMHub::bind_monitor_if_matched_(GenSAMMonitor &mon) {
+  if (mon.binding != nullptr) {
+    return;
+  }
+  for (auto &b : bindings_) {
+    if (mon.matches(b)) {
+      mon.binding = &b;
+      ESP_LOGI(TAG, "Bound monitor 0x%02X (%s, SN:%s) to HA entity '%s'",
+               mon.address, mon.model.c_str(), mon.serial_number.c_str(), b.name.c_str());
+      publish_monitor_metadata_(mon);
+      break;
+    }
+  }
+}
+
+void GenSAMHub::publish_monitor_metadata_(const GenSAMMonitor &mon) {
+  if (mon.binding == nullptr) {
+    return;
+  }
+  if (mon.binding->model_sensor != nullptr && !mon.model.empty()) {
+    mon.binding->model_sensor->publish_state(mon.model);
+  }
+  if (mon.binding->serial_sensor != nullptr && !mon.serial_number.empty() && mon.serial_number != "(none)") {
+    mon.binding->serial_sensor->publish_state(mon.serial_number);
+  }
+  if (mon.binding->firmware_sensor != nullptr && !mon.firmware_version.empty() && mon.firmware_version != "?") {
+    mon.binding->firmware_sensor->publish_state(mon.firmware_version);
+  }
+  if (mon.binding->hardware_id_sensor != nullptr && mon.unique_id != 0) {
+    mon.binding->hardware_id_sensor->publish_state(std::to_string(mon.unique_id));
+  }
+}
+
+void GenSAMHub::publish_monitor_telemetry_(const GenSAMMonitor &mon) {
+  if (mon.binding == nullptr) {
+    return;
+  }
+  if (mon.binding->temperature_sensor != nullptr) {
+    mon.binding->temperature_sensor->publish_state(mon.temperature);
+  }
+  if (mon.binding->input_level_sensor != nullptr) {
+    mon.binding->input_level_sensor->publish_state(mon.input_db);
+  }
+  if (mon.binding->output_level_sensor != nullptr) {
+    mon.binding->output_level_sensor->publish_state(mon.output_db);
+  }
+  if (mon.binding->clip_sensor != nullptr) {
+    mon.binding->clip_sensor->publish_state(mon.clip);
+  }
+  if (mon.binding->online_sensor != nullptr) {
+    mon.binding->online_sensor->publish_state(mon.online);
+  }
+}
+
+void GenSAMHub::set_volume_db(float db) {
+  current_volume_db_ = std::clamp(db, min_volume_db_, max_volume_db_);
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot send volume command: Bus is not available for TX");
+    return;
+  }
+  uint32_t int24 = volume_db_to_int24(current_volume_db_);
+  uint8_t pld[3];
+  encode_int24(int24, pld);
+
+  // Broadcast master volume (0xFF) to all monitors on bus
+  Frame f;
+  f.address = BROADCAST_ADDRESS;
+  f.command = CMD_VOLUME;
+  f.payload = {pld[0], pld[1], pld[2]};
+  this->send_frame(f);
+
+  ESP_LOGI(TAG, "Set system volume: %.1f dB (int24=%u)", current_volume_db_, (unsigned)int24);
+  this->notify_state_callbacks_();
+}
+
+void GenSAMHub::set_group_mute(bool mute) {
+  current_mute_ = mute;
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot send mute command: Bus is not available for TX");
+    return;
+  }
+  uint8_t val = (mute ? BYPASS_MUTE_MASK : 0x00) | (LED_GREEN << 1);
+
+  // 1. Unicast CMD_BYPASS to each discovered monitor individually (as per GLM protocol)
+  for (const auto &kv : monitors_) {
+    Frame f;
+    f.address = kv.first;
+    f.command = CMD_BYPASS;
+    f.payload = {val};
+    this->send_frame(f);
+    delayMicroseconds(250);
+  }
+
+  // 2. Also send to BROADCAST_ADDRESS (0xFF)
+  Frame fb;
+  fb.address = BROADCAST_ADDRESS;
+  fb.command = CMD_BYPASS;
+  fb.payload = {val};
+  this->send_frame(fb);
+
+  ESP_LOGI(TAG, "Set system mute: %s across %zu monitors", YESNO(mute), monitors_.size());
+  this->notify_state_callbacks_();
+}
+
+void GenSAMHub::set_standby(bool standby) {
+  current_standby_ = standby;
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot send standby command: Bus is not available for TX");
+    return;
+  }
+  Frame f;
+  f.address = BROADCAST_ADDRESS;
+  f.command = CMD_WAKEUP;
+  f.payload = {WAKEUP_OP_POWER, standby ? WAKEUP_VAL_STANDBY : WAKEUP_VAL_ON};
+  this->send_frame(f);
+  delay(15);
+  this->send_frame(f);
+  ESP_LOGI(TAG, "Set system power: %s", standby ? "STANDBY" : "WAKEUP/ON");
+  this->notify_state_callbacks_();
+}
+
+void GenSAMHub::identify_monitor_by_serial(const std::string &serial_or_id, uint32_t duration_ms) {
+  for (auto &kv : monitors_) {
+    GenSAMMonitor &mon = kv.second;
+    if (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+        std::to_string(mon.unique_id) == serial_or_id) {
+      this->identify_monitor_by_address(mon.address, duration_ms);
+      return;
+    }
+  }
+  ESP_LOGW(TAG, "Cannot identify speaker '%s': monitor not currently discovered on bus", serial_or_id.c_str());
+}
+
+void GenSAMHub::identify_monitor_by_address(uint8_t address, uint32_t duration_ms) {
+  auto it = monitors_.find(address);
+  if (it == monitors_.end()) {
+    ESP_LOGW(TAG, "Cannot identify monitor 0x%02X: not in registry", address);
+    return;
+  }
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot identify monitor: bus not available for TX");
+    return;
+  }
+  it->second.identify_end_ms = millis() + duration_ms;
+  uint8_t val = (current_mute_ ? BYPASS_MUTE_MASK : 0x00) | (LED_GREEN << 1) | BYPASS_LED_PULSING_MASK;
+  Frame f;
+  f.address = address;
+  f.command = CMD_BYPASS;
+  f.payload = {val};
+  this->send_frame(f);
+  ESP_LOGI(TAG, "Identify activated on monitor 0x%02X (%s) for %u ms", address, it->second.model.c_str(), (unsigned)duration_ms);
+}
+
+void GenSAMHub::rediscover_monitors() {
+  ESP_LOGI(TAG, "Manual rediscovery requested. Resetting state machine...");
+  this->start_race_discovery();
+}
+
 void GenSAMHub::loop() {
   process_rx_();
 
   check_glm_cooldown_();
   update_race_state_machine_();
+
+  // Check if any monitor identify pulse timer has expired
+  uint32_t now = millis();
+  for (auto &kv : monitors_) {
+    if (kv.second.identify_end_ms != 0 && now >= kv.second.identify_end_ms) {
+      kv.second.identify_end_ms = 0;
+      if (can_transmit()) {
+        uint8_t val = (current_mute_ ? BYPASS_MUTE_MASK : 0x00) | (LED_GREEN << 1);
+        Frame f;
+        f.address = kv.first;
+        f.command = CMD_BYPASS;
+        f.payload = {val};
+        this->send_frame(f);
+        ESP_LOGI(TAG, "Identify completed on monitor 0x%02X (%s); restored steady LED", kv.first, kv.second.model.c_str());
+      }
+    }
+  }
 
   uint32_t now_stat = millis();
   if (now_stat - last_stat_log_ > 15000) {

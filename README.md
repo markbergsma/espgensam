@@ -19,22 +19,14 @@
 - **MCU**: ESP32-S3 dual-core
 - **RS485 TX**: `GPIO6`
 - **RS485 RX**: `GPIO5`
+- **Direction Control**: Automatic (Atomic RS-485 pulse-sensing circuit)
 - **Status RGB LED**: `GPIO35` (WS2812)
-
-### 2. LilyGO T-CAN485 (`espgensam-tcan485.yaml`)
-- **MCU**: ESP32 dual-core
-- **RS485 TX**: `GPIO22`
-- **RS485 RX**: `GPIO21`
-- **RS485 AutoDirection / RX**: `GPIO17`
-- **Transceiver Enable (SE)**: `GPIO19`
-- **Power Enable (5V Booster)**: `GPIO16`
-- **Status RGB LED**: `GPIO4` (WS2812)
 
 ---
 
 ## RJ45 "GLM" Cable Pinout
 
-Connect the RS485 transceiver terminal block to a standard CAT5/6 RJ45 patch cable (T568B):
+Connect the RS-485 transceiver terminal block to a standard CAT5/6 RJ45 patch cable wired to **T568B**:
 
 | RJ45 Pin (T568B) | Wire Color | GLM Bus Signal | RS485 Terminal |
 |---|---|---|---|
@@ -42,6 +34,78 @@ Connect the RS485 transceiver terminal block to a standard CAT5/6 RJ45 patch cab
 | **Pin 2** | Orange | **Data B (D-)** (inverting) | `B` |
 | **Pin 8** | Brown | **GND** (bus ground reference) | `GND` |
 | Pins 3–7 | — | *Unconnected* | — |
+
+---
+
+## Configuration Reference
+
+### 1. Declare Sub-Devices (`esphome: devices:`)
+In `espgensam.yaml`, list the discrete monitor devices you want Home Assistant to create:
+
+```yaml
+esphome:
+  name: "espgensam"
+  friendly_name: "Genelec SAM Controller"
+  devices:
+    - id: dev_subwoofer
+      name: "Subwoofer"
+    - id: dev_left_monitor
+      name: "Left Monitor"
+    - id: dev_right_monitor
+      name: "Right Monitor"
+```
+
+### 2. Hub & Monitor Configuration (`gensam:`)
+
+```yaml
+gensam:
+  id: gensam_hub
+  tx_pin: GPIO6
+  rx_pin: GPIO5
+  rx_buffer_size: 512
+
+  # Coexistence with official GLM USB adapter
+  yield_to_glm: true
+  glm_inactivity_cooldown: 30s
+
+  # Timing and filtering
+  poll_interval: 1s                   # RS-485 physical keep-alive sampling
+  telemetry_averaging_period: 60s     # In-memory averaging window for signal levels
+
+  # Master volume mapping boundaries
+  min_volume_db: -80.0                # Volume at slider = 0.0
+  max_volume_db: 0.0                  # Volume at slider = 1.0
+  startup_volume_db: -30.0            # Initial volume on boot
+
+  # Diagnostic hub entities
+  glm_adapter_active:
+    name: "GLM USB Adapter Active"
+
+  rediscover_button:
+    name: "Rediscover Monitors"
+
+  # Monitor bindings: associate physical speakers with Home Assistant devices
+  monitors:
+    - serial_number: "7350APM88123456"
+      unique_id: 1842915
+      name: "Subwoofer"
+      device_id: dev_subwoofer
+
+    - serial_number: "8330AP99234567"
+      unique_id: 1654321
+      name: "Left Monitor"
+      device_id: dev_left_monitor
+
+    - serial_number: "8330AP77345678"
+      unique_id: 1987654
+      name: "Right Monitor"
+      device_id: dev_right_monitor
+
+# Master group media player
+media_player:
+  - platform: gensam
+    name: "Genelec SAM System"
+```
 
 ---
 
@@ -65,3 +129,9 @@ For **LilyGO T-CAN485**:
 ```bash
 esphome run espgensam-tcan485.yaml
 ```
+
+---
+
+## License
+
+This project is licensed under the [GNU General Public License v3.0](LICENSE).

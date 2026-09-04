@@ -2,8 +2,9 @@
 .esphome/
 build/
 
-# Local credentials
+# Local credentials & custom local configs
 secrets.yaml
+*-local.yaml
 
 # Compiled firmware binaries & maps
 *.bin
