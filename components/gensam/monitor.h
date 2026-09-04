@@ -85,6 +85,7 @@ struct GenSAMMonitor {
   int8_t input_db{0};               ///< Input signal level in dBFS.
   int8_t output_db{0};              ///< Driver output level in dBFS.
   bool clip{false};                 ///< Limiter or overload protection state.
+  bool mute{false};                 ///< Channel mute state (CMD_BYPASS bit 0).
   bool online{false};               ///< Whether the monitor is currently responsive to bus traffic.
   uint32_t last_seen_ms{0};         ///< Timestamp (millis) of last valid frame received from this monitor.
   uint32_t last_poll_ms{0};         ///< Timestamp (millis) when the last query frame was sent to this monitor.

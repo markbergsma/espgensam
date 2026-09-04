@@ -366,16 +366,12 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     ESP_LOGI(TAG, "[Sniffed] Assigned monitor 0x%02X (ID: %u)", addr, (unsigned)mon.unique_id);
   }
 
-  // Sniff volume, bypass, and wakeup broadcast/multicast commands
+  // Sniff volume and wakeup broadcast/multicast commands
   if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
     if (frame.command == CMD_VOLUME && frame.payload.size() >= 3) {
       uint32_t int24 = decode_int24(frame.payload.data());
       current_volume_db_ = volume_int24_to_db(int24);
       ESP_LOGI(TAG, "[Sniffed] System volume updated to %.1f dB", current_volume_db_);
-      this->notify_state_callbacks_();
-    } else if (frame.command == CMD_BYPASS && !frame.payload.empty()) {
-      current_mute_ = (frame.payload[0] & BYPASS_MUTE_MASK) != 0;
-      ESP_LOGI(TAG, "[Sniffed] System mute updated to %s", YESNO(current_mute_));
       this->notify_state_callbacks_();
     } else if (frame.command == CMD_WAKEUP && frame.payload.size() >= 2) {
       if (frame.payload[0] == WAKEUP_OP_POWER) {
@@ -383,6 +379,46 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
         ESP_LOGI(TAG, "[Sniffed] System power state updated to %s", current_standby_ ? "STANDBY" : "ON");
         this->notify_state_callbacks_();
       }
+    }
+  }
+
+  // Sniff bypass / mute commands (broadcast, multicast, or unicast to individual monitors)
+  if (frame.command == CMD_BYPASS && !frame.payload.empty()) {
+    bool is_muted = (frame.payload[0] & BYPASS_MUTE_MASK) != 0;
+
+    auto it = monitors_.find(frame.address);
+    if (it != monitors_.end()) {
+      it->second.mute = is_muted;
+      ESP_LOGD(TAG, "[Sniffed] Monitor 0x%02X mute updated to %s (raw 0x%02X)", frame.address, YESNO(is_muted), frame.payload[0]);
+    } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
+      GenSAMMonitor &mon = monitors_[frame.address];
+      mon.address = frame.address;
+      mon.mute = is_muted;
+      mon.online = true;
+      mon.last_seen_ms = now;
+      ESP_LOGD(TAG, "[Sniffed] Discovered monitor 0x%02X mute set to %s (raw 0x%02X)", frame.address, YESNO(is_muted), frame.payload[0]);
+    } else if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
+      for (auto &kv : monitors_) {
+        kv.second.mute = is_muted;
+      }
+    }
+
+    bool new_mute = is_muted;
+    if (!monitors_.empty()) {
+      bool all_muted = true;
+      for (const auto &kv : monitors_) {
+        if (kv.second.online && !kv.second.mute) {
+          all_muted = false;
+          break;
+        }
+      }
+      new_mute = all_muted;
+    }
+
+    if (current_mute_ != new_mute) {
+      current_mute_ = new_mute;
+      ESP_LOGI(TAG, "[Sniffed] System mute updated to %s", YESNO(current_mute_));
+      this->notify_state_callbacks_();
     }
   }
 
@@ -796,6 +832,9 @@ void GenSAMHub::set_volume_db(float db) {
 
 void GenSAMHub::set_group_mute(bool mute) {
   current_mute_ = mute;
+  for (auto &kv : monitors_) {
+    kv.second.mute = mute;
+  }
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot send mute command: Bus is not available for TX");
     return;
