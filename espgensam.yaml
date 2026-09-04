@@ -80,3 +80,17 @@ gensam:
 media_player:
   - platform: gensam
     name: "Genelec SAM System"
+
+# Physical button on M5Stack AtomS3 Lite (GPIO41, active-low) triggers monitor rediscovery
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO41
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "Rediscover Button"
+    on_press:
+      then:
+        - lambda: id(gensam_hub).rediscover_monitors();
