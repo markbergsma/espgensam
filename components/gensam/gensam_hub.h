@@ -81,8 +81,9 @@ enum class RaceState : uint8_t {
   WAKEUP_SENT,        ///< Wakeup broadcast sequence sent; waiting for monitor power-on.
   RACE_PING_SENT,     ///< Discovery ping (0xFF 0xFE) broadcast; awaiting winning monitor serial.
   RACE_SET_RID_SENT,  ///< Address assignment (0xF0 0x02) sent; awaiting monitor ACK.
-  QUERYING_DEVICES,   ///< Querying model and firmware metadata for all discovered monitors.
-  POLLING_MONITORS,   ///< Periodic round-robin polling of monitor status and telemetry.
+  QUERYING_DEVICES,    ///< Querying model and firmware metadata for all discovered monitors.
+  CONFIGURING_DEVICES, ///< Transmitting device configuration (e.g. crossover frequency) to discovered monitors.
+  POLLING_MONITORS,    ///< Periodic round-robin polling of monitor status and telemetry.
 };
 
 /// @brief Hub component managing the 9-bit RS-485 physical bus, framing,
@@ -181,6 +182,16 @@ class GenSAMHub : public Component {
   /// @param serial_or_id Serial number string (e.g. "7350APM88123456") or decimal unique ID string.
   /// @param mute True to mute audio and set front LED red, false to unmute.
   void set_monitor_mute_by_serial(const std::string &serial_or_id, bool mute);
+
+  /// @brief Set bass management crossover frequency for an individual monitor by logical address.
+  /// @param address Logical bus address (0x02..0x7F).
+  /// @param freq_hz Crossover filter frequency in Hz (typically 50..120 Hz, step 5 Hz).
+  void set_monitor_crossover(uint8_t address, uint16_t freq_hz);
+
+  /// @brief Set bass management crossover frequency for an individual monitor by serial number or unique ID string.
+  /// @param serial_or_id Serial number string (e.g. "7350APM88123456") or decimal unique ID string.
+  /// @param freq_hz Crossover filter frequency in Hz (typically 50..120 Hz, step 5 Hz).
+  void set_monitor_crossover_by_serial(const std::string &serial_or_id, uint16_t freq_hz);
 
   /// @brief Set system power / standby state.
   /// @param standby True to place monitors into amplifier standby (<0.5W), false to wake up.

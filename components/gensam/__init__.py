@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import sensor, binary_sensor, button, text_sensor, switch
+from esphome.components import sensor, binary_sensor, button, text_sensor, switch, number
 from esphome.const import (
     CONF_ID,
     CONF_NAME,
@@ -17,9 +17,11 @@ from esphome.const import (
     DEVICE_CLASS_OCCUPANCY,
     STATE_CLASS_MEASUREMENT,
     ENTITY_CATEGORY_DIAGNOSTIC,
+    ENTITY_CATEGORY_CONFIG,
+    CONF_DISABLED_BY_DEFAULT,
 )
 
-AUTO_LOAD = ["sensor", "binary_sensor", "button", "text_sensor", "switch"]
+AUTO_LOAD = ["sensor", "binary_sensor", "button", "text_sensor", "switch", "number"]
 MULTI_CONF = True
 
 CONF_DE_PIN = "de_pin"
@@ -55,12 +57,14 @@ CONF_HARDWARE_ID = "hardware_id"
 
 CONF_GLM_ADAPTER_ACTIVE = "glm_adapter_active"
 CONF_REDISCOVER_BUTTON = "rediscover_button"
+CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY = "bass_management_crossover_frequency"
 
 gensam_ns = cg.esphome_ns.namespace("gensam")
 GenSAMHub = gensam_ns.class_("GenSAMHub", cg.Component)
 GenSAMMuteSwitch = gensam_ns.class_("GenSAMMuteSwitch", switch.Switch)
 GenSAMIdentifyButton = gensam_ns.class_("GenSAMIdentifyButton", button.Button)
 GenSAMRediscoverButton = gensam_ns.class_("GenSAMRediscoverButton", button.Button)
+GenSAMCrossoverNumber = gensam_ns.class_("GenSAMCrossoverNumber", number.Number)
 GenSAMMonitorBinding = gensam_ns.struct("GenSAMMonitorBinding")
 
 
@@ -162,6 +166,20 @@ def _validate_monitor(conf):
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC
         )(c)
 
+    if CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY not in conf:
+        c = {
+            CONF_NAME: f"{name} Bass Management Crossover Frequency",
+            CONF_DISABLED_BY_DEFAULT: True,
+        }
+        if dev_id:
+            c[CONF_DEVICE_ID] = dev_id
+        conf[CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY] = number.number_schema(
+            GenSAMCrossoverNumber,
+            icon="mdi:sine-wave",
+            unit_of_measurement="Hz",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        )(c)
+
     return conf
 
 
@@ -215,6 +233,12 @@ MONITOR_SCHEMA = cv.All(
             ),
             cv.Optional(CONF_HARDWARE_ID): text_sensor.text_sensor_schema(
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY): number.number_schema(
+                GenSAMCrossoverNumber,
+                icon="mdi:sine-wave",
+                unit_of_measurement="Hz",
+                entity_category=ENTITY_CATEGORY_CONFIG,
             ),
         }
     ),
@@ -360,6 +384,19 @@ async def to_code(config):
 
             hw_id_sens = await text_sensor.new_text_sensor(mon_conf[CONF_HARDWARE_ID])
 
+            # 10. Bass management crossover frequency number
+            xo_num = "nullptr"
+            if CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY in mon_conf:
+                xo_var = await number.new_number(
+                    mon_conf[CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY],
+                    min_value=50.0,
+                    max_value=120.0,
+                    step=5.0,
+                )
+                cg.add(xo_var.set_hub(var))
+                cg.add(xo_var.set_serial_or_id(target_id))
+                xo_num = f"{xo_var}"
+
             # Register binding in C++ hub
             cg.add(
                 var.add_monitor_binding(
@@ -368,7 +405,8 @@ async def to_code(config):
                         f"{unique_id}U, "
                         f"{temp_sens}, {in_sens}, {out_sens}, {online_sens}, "
                         f"{mute_sw}, "
-                        f"{model_sens}, {serial_sens}, {fw_sens}, {hw_id_sens}}}"
+                        f"{model_sens}, {serial_sens}, {fw_sens}, {hw_id_sens}, "
+                        f"{xo_num}, 85U, false}}"
                     )
                 )
             )

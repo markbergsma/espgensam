@@ -39,7 +39,14 @@ static constexpr uint8_t CMD_HARDWARE_QUERY = 0x22;   ///< Hardware ID query
 static constexpr uint8_t CMD_BYPASS = 0x2B;           ///< Bypass / Mute / LED control
 static constexpr uint8_t CMD_SOFTWARE_QUERY = 0x39;   ///< Firmware version query
 static constexpr uint8_t CMD_WAKEUP = 0x3A;           ///< Wakeup / standby control (0x3A)
+static constexpr uint8_t CMD_BASS_MANAGE_XO = 0x3B;   ///< Bass management crossover frequency configuration
 static constexpr uint8_t CMD_DISCOVERY = 0xFE;        ///< Monitor discovery ping
+
+// --- Bass management crossover parameters ----------------------------------
+static constexpr uint16_t DEFAULT_CROSSOVER_HZ = 85;  ///< Factory default bass management crossover frequency (Hz)
+static constexpr uint16_t MIN_CROSSOVER_HZ = 50;      ///< Minimum allowable crossover frequency (Hz)
+static constexpr uint16_t MAX_CROSSOVER_HZ = 120;     ///< Maximum allowable crossover frequency (Hz)
+static constexpr uint16_t CROSSOVER_STEP_HZ = 5;      ///< Supported Genelec crossover frequency step resolution (Hz)
 
 // --- ACK status values ----------------------------------------------------
 static constexpr uint8_t ACK_OK = 0x2D;               ///< Positive ACK

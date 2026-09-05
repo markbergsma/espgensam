@@ -33,6 +33,7 @@
 ///    The parser handles both fixed-offset payloads (standard RACE) and tagged TLV records.
 /// ===================================================================================
 
+#include "const.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -55,6 +56,10 @@ namespace switch_ {
 class Switch;
 }  // namespace switch_
 
+namespace number {
+class Number;
+}  // namespace number
+
 namespace gensam {
 
 /// @brief Static binding between a configured speaker and its ESPHome sensor entities.
@@ -72,6 +77,9 @@ struct GenSAMMonitorBinding {
   text_sensor::TextSensor *serial_sensor{nullptr};      ///< Factory serial number text sensor (e.g. "7350APM88123456").
   text_sensor::TextSensor *firmware_sensor{nullptr};    ///< Firmware revision text sensor (e.g. "1.6.2.3733").
   text_sensor::TextSensor *hardware_id_sensor{nullptr}; ///< Decimal GLM hardware ID text sensor (e.g. "1842915").
+  number::Number *crossover_number{nullptr};           ///< Bass management crossover frequency number entity (Hz).
+  uint16_t crossover_freq{DEFAULT_CROSSOVER_HZ};       ///< Configured / active crossover frequency in Hz (default: 85 Hz).
+  bool crossover_configured{false};                    ///< True if a custom crossover was set by user or sniffed from GLM.
 };
 
 /// @brief Represents a single Genelec SAM monitor or subwoofer discovered on the RS-485 bus.

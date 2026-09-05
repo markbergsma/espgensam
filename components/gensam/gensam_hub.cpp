@@ -6,6 +6,7 @@
 #include "crc.h"
 #include "esphome/core/log.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/number/number.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/text_sensor/text_sensor.h"
@@ -367,6 +368,15 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
         race_step_time_ = now;
         return;
       }
+    } else if (race_state_ == RaceState::CONFIGURING_DEVICES) {
+      if (current_query_addr_ != 0 && frame.address == HOST_ADDRESS &&
+          (frame.command == CMD_REPORT_STATUS || frame.command == CMD_ACK)) {
+        ESP_LOGD(TAG, "Monitor 0x%02X acknowledged configuration", current_query_addr_);
+        current_poll_index_++;
+        current_query_addr_ = 0;
+        race_step_time_ = now;
+        return;
+      }
     } else if (race_state_ == RaceState::POLLING_MONITORS) {
       if (current_query_addr_ != 0 && frame.address == HOST_ADDRESS &&
           (frame.command == CMD_REPORT_STATUS || frame.command == CMD_QUERY_STATUS)) {
@@ -464,6 +474,48 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     }
 
     this->evaluate_system_mute_();
+  }
+
+  // Sniff bass management crossover commands (broadcast, multicast, or unicast to individual monitors)
+  if (frame.command == CMD_BASS_MANAGE_XO && frame.payload.size() >= 2) {
+    uint16_t freq = (static_cast<uint16_t>(frame.payload[0]) << 8) | frame.payload[1];
+    if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
+      for (auto &kv : monitors_) {
+        if (kv.second.binding != nullptr) {
+          kv.second.binding->crossover_freq = freq;
+          kv.second.binding->crossover_configured = true;
+          if (kv.second.binding->crossover_number != nullptr) {
+            kv.second.binding->crossover_number->publish_state(freq);
+          }
+        }
+      }
+      ESP_LOGI(TAG, "[Sniffed] Global bass management crossover frequency set to %u Hz", freq);
+    } else {
+      auto it = monitors_.find(frame.address);
+      if (it != monitors_.end()) {
+        if (it->second.binding != nullptr) {
+          it->second.binding->crossover_freq = freq;
+          it->second.binding->crossover_configured = true;
+          if (it->second.binding->crossover_number != nullptr) {
+            it->second.binding->crossover_number->publish_state(freq);
+          }
+        }
+        ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X bass management crossover frequency set to %u Hz", frame.address, freq);
+      } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
+        GenSAMMonitor &mon = monitors_[frame.address];
+        mon.address = frame.address;
+        this->mark_monitor_seen_(mon);
+        bind_monitor_if_matched_(mon);
+        if (mon.binding != nullptr) {
+          mon.binding->crossover_freq = freq;
+          mon.binding->crossover_configured = true;
+          if (mon.binding->crossover_number != nullptr) {
+            mon.binding->crossover_number->publish_state(freq);
+          }
+        }
+        ESP_LOGI(TAG, "[Sniffed] Discovered monitor 0x%02X bass management crossover frequency set to %u Hz", frame.address, freq);
+      }
+    }
   }
 
   // Track replies sent to host
@@ -608,8 +660,46 @@ void GenSAMHub::update_race_state_machine_() {
           return;
         }
 
-        // All monitors queried! Advance to polling
-        ESP_LOGI(TAG, "All discovered monitors queried. Entering live telemetry polling loop.");
+        // All monitors queried! Advance to device configuration
+        ESP_LOGI(TAG, "All discovered monitors queried. Entering device configuration phase.");
+        race_state_ = RaceState::CONFIGURING_DEVICES;
+        race_step_time_ = now;
+        current_poll_index_ = 0;
+        current_query_addr_ = 0;
+      }
+      break;
+    }
+
+    case RaceState::CONFIGURING_DEVICES: {
+      if (current_query_addr_ != 0 && now - race_step_time_ > 200) {
+        // Configuration query timed out; advance to next monitor
+        current_poll_index_++;
+        current_query_addr_ = 0;
+      }
+
+      if (current_query_addr_ == 0) {
+        while (current_poll_index_ < poll_addrs_.size()) {
+          uint8_t addr = poll_addrs_[current_poll_index_];
+          auto it = monitors_.find(addr);
+          if (it != monitors_.end() && it->second.binding != nullptr &&
+              it->second.binding->crossover_number != nullptr &&
+              it->second.binding->crossover_configured) {
+            current_query_addr_ = addr;
+            race_step_time_ = now;
+            Frame xo_frame;
+            xo_frame.address = addr;
+            xo_frame.command = CMD_BASS_MANAGE_XO;
+            uint16_t freq = it->second.binding->crossover_freq;
+            xo_frame.payload = {static_cast<uint8_t>((freq >> 8) & 0xFF), static_cast<uint8_t>(freq & 0xFF)};
+            ESP_LOGI(TAG, "Configuring bass management crossover frequency for monitor 0x%02X: %u Hz", addr, freq);
+            this->send_frame(xo_frame);
+            return;
+          }
+          current_poll_index_++;
+        }
+
+        // All discovered monitors configured! Advance to polling
+        ESP_LOGI(TAG, "All discovered monitors configured. Entering live telemetry polling loop.");
 
         // Broadcast active volume and stay_online heartbeat to establish monitor gain
         uint32_t int24 = volume_db_to_int24(current_volume_db_);
@@ -815,6 +905,9 @@ void GenSAMHub::bind_monitor_if_matched_(GenSAMMonitor &mon) {
       publish_monitor_metadata_(mon);
       if (mon.binding->online_sensor != nullptr) {
         mon.binding->online_sensor->publish_state(mon.online);
+      }
+      if (mon.binding->crossover_number != nullptr && mon.binding->crossover_configured) {
+        mon.binding->crossover_number->publish_state(mon.binding->crossover_freq);
       }
       break;
     }
@@ -1057,6 +1150,74 @@ void GenSAMHub::set_monitor_mute_by_serial(const std::string &serial_or_id, bool
     }
   }
   ESP_LOGW(TAG, "Cannot mute speaker '%s': monitor not currently discovered on bus", serial_or_id.c_str());
+}
+
+void GenSAMHub::set_monitor_crossover(uint8_t address, uint16_t freq_hz) {
+  auto it = monitors_.find(address);
+  if (it == monitors_.end()) {
+    ESP_LOGW(TAG, "Cannot set crossover for unknown monitor 0x%02X", address);
+    return;
+  }
+
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot send crossover command to 0x%02X: bus not available for TX", address);
+    return;
+  }
+
+  Frame f;
+  f.address = address;
+  f.command = CMD_BASS_MANAGE_XO;
+  f.payload = {static_cast<uint8_t>((freq_hz >> 8) & 0xFF), static_cast<uint8_t>(freq_hz & 0xFF)};
+  bool sent = this->send_frame(f);
+  if (sent) {
+    delayMicroseconds(250);
+  }
+  sent = this->send_frame(f) || sent;
+
+  if (!sent) {
+    ESP_LOGW(TAG, "Crossover command to 0x%02X was not transmitted", address);
+    return;
+  }
+
+  if (it->second.binding != nullptr) {
+    it->second.binding->crossover_freq = freq_hz;
+    it->second.binding->crossover_configured = true;
+    if (it->second.binding->crossover_number != nullptr) {
+      it->second.binding->crossover_number->publish_state(freq_hz);
+    }
+  }
+
+  ESP_LOGI(TAG, "Set monitor 0x%02X crossover frequency: %u Hz", address, freq_hz);
+}
+
+void GenSAMHub::set_monitor_crossover_by_serial(const std::string &serial_or_id, uint16_t freq_hz) {
+  for (auto &b : bindings_) {
+    bool matches = (strcasecmp(b.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+                    std::to_string(b.unique_id) == serial_or_id ||
+                    strcasecmp(b.name.c_str(), serial_or_id.c_str()) == 0);
+    if (matches) {
+      b.crossover_freq = freq_hz;
+      b.crossover_configured = true;
+      break;
+    }
+  }
+
+  for (auto &kv : monitors_) {
+    GenSAMMonitor &mon = kv.second;
+    bool matches = (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+                    std::to_string(mon.unique_id) == serial_or_id);
+    if (!matches && mon.binding != nullptr) {
+      matches = (strcasecmp(mon.binding->serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+                 std::to_string(mon.binding->unique_id) == serial_or_id ||
+                 strcasecmp(mon.binding->name.c_str(), serial_or_id.c_str()) == 0);
+    }
+    if (matches) {
+      this->set_monitor_crossover(mon.address, freq_hz);
+      return;
+    }
+  }
+  ESP_LOGW(TAG, "Crossover set for '%s' to %u Hz (stored; monitor not currently discovered on bus)",
+           serial_or_id.c_str(), freq_hz);
 }
 
 void GenSAMHub::set_standby(bool standby) {
