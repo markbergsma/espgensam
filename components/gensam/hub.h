@@ -10,16 +10,11 @@
 /// over half-duplex 9-bit RS-485 at 281,250 baud.
 ///
 /// 1. Bus Arbitration & External Master Detection:
-///    The RS-485 bus supports only one master transmitting at any instant - normally that 
-///    would be the GLM USB adapter talking to the GLM application.
-///    - When GenSAM detects bus traffic from an external controller (frames addressed to
-///      or from addresses other than HOST_ADDRESS, or monitor replies arriving when GenSAM
-///      did not transmit), it immediately yields the bus (`glm_active_ = true`).
-///    - While yielded, GenSAM enters PASSIVE SNOOPING mode: it continues reading and parsing
-///      all wire frames, learning monitor addresses and updating telemetry from GLM's queries,
-///      without transmitting any pulses on the wire.
-///    - If no external GLM traffic is observed for `glm_inactivity_cooldown_ms` (default 30s),
-///      GenSAM automatically resumes active master control.
+///    The hub yields the bus whenever an external GLM controller is transmitting, and resumes
+///    active master control once that controller has been silent for `glm_inactivity_cooldown_ms`
+///    (default 30 s).  While yielded it keeps parsing all wire traffic (passive snooping) without
+///    transmitting.  The frame-origin classification rules and their timing windows live in
+///    BusArbiter; see arbiter.h.
 ///
 /// 2. RACE Discovery State Machine (Active Mode):
 ///    Genelec SAM monitors power up in unaddressed mode. The Hub assigns sequential logical
@@ -71,6 +66,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
+#include "arbiter.h"
 #include "const.h"
 #include "frame.h"
 #include "monitor.h"
@@ -299,7 +295,7 @@ class GenSAMHub : public Component {
   bool can_transmit() const;
 
   /// @brief Whether external GLM traffic is currently holding the bus.
-  bool is_glm_active() const { return glm_active_; }
+  bool is_glm_active() const { return arbiter_.is_active(); }
 
   /// @brief Send a high-level GenSAM Frame onto the bus.
   /// @param frame The frame to serialize and transmit.
@@ -398,10 +394,8 @@ class GenSAMHub : public Component {
   FrameParser parser_;
   std::vector<std::function<void(const Frame &)>> callbacks_;
 
-  // Bus arbitration state
-  bool glm_active_{false};
-  uint32_t last_glm_activity_{0};
-  uint32_t last_our_tx_time_{0};
+  // Bus arbitration state (external GLM master detection and yield decision)
+  BusArbiter arbiter_;
   uint32_t last_tx_blocked_warning_{0};
   uint32_t last_stat_log_{0};
 
