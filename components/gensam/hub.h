@@ -344,8 +344,26 @@ class GenSAMHub : public Component {
   const GenSAMMonitor *get_monitor(uint8_t address) const { return registry_.find(address); }
 
  protected:
+  /// @brief Configure a GPIO as a push-pull output and drive it HIGH.
+  /// @param pin GPIO number.
+  /// @param pull_up Whether to enable the internal pull-up (used for the idle TX line).
+  /// @param description Human-readable pin role, for the confirmation log line.
+  void drive_output_pin_(int pin, bool pull_up, const char *description);
+
+  /// @brief Power and enable the RS-485 transceiver, in the order the hardware requires.
+  void setup_transceiver_pins_();
+
+  /// @brief Bring up the 9-bit RMT transceiver, RX-only in listen-only mode.
+  void setup_uart_();
+
   /// @brief Drain RX ring buffer, log raw bytes, feed the parser, and dispatch decoded frames.
   void process_rx_();
+
+  /// @brief Restore the steady front LED on monitors whose identify pulse has expired.
+  void check_identify_timeouts_();
+
+  /// @brief Periodically emit the RX / framing statistics diagnostic line.
+  void log_stats_();
 
   /// @brief Check whether the external GLM master inactivity timer has expired to reclaim bus control.
   void check_glm_cooldown_();
@@ -465,6 +483,16 @@ class GenSAMHub : public Component {
 
   /// @brief Restore active listening volume across all monitors following input switching and settling.
   void restore_system_volume_();
+
+  /// @brief Run an input-switching operation between a transient silence and a volume restore.
+  ///
+  /// Prevents audible pops during analog multiplexer switching, AES3 PLL relock, and SRC
+  /// relock: audio is broadcast down to digital silence, @p switch_inputs transmits the source
+  /// selection frames, and the previous listening volume is restored once monitors have settled.
+  /// Silencing is skipped when the system is in standby or the bus is unavailable, since there
+  /// is then no listening signal to protect.  Blocks the main loop for the settling duration.
+  /// @param switch_inputs Operation transmitting the source selection frames.
+  void with_transient_silence_(const std::function<void()> &switch_inputs);
 
   int tx_pin_{-1};
   int rx_pin_{-1};
