@@ -150,7 +150,7 @@ bool GenSAMHub::can_transmit() const {
   if (listen_only_) {
     return false;
   }
-  if (yield_to_glm_ && glm_active_) {
+  if (yield_to_glm_ && arbiter_.is_active()) {
     return false;
   }
   return uart9_.is_initialized();
@@ -160,7 +160,7 @@ void GenSAMHub::send_raw_frame(const std::vector<Uart9BitChar> &raw_chars) {
   if (!can_transmit() || raw_chars.empty()) {
     return;
   }
-  last_our_tx_time_ = millis();
+  arbiter_.note_tx(millis());
   uart9_.write(raw_chars.data(), raw_chars.size());
 }
 
@@ -175,11 +175,11 @@ bool GenSAMHub::send_frame(const Frame &frame) {
     return false;
   }
 
-  if (yield_to_glm_ && glm_active_) {
+  if (yield_to_glm_ && arbiter_.is_active()) {
     uint32_t now = millis();
     if (now - last_tx_blocked_warning_ > 5000) {
       last_tx_blocked_warning_ = now;
-      uint32_t elapsed = now - last_glm_activity_;
+      uint32_t elapsed = now - arbiter_.last_activity();
       uint32_t remaining = (elapsed < glm_inactivity_cooldown_ms_) ? (glm_inactivity_cooldown_ms_ - elapsed) : 0;
       ESP_LOGW(TAG, "Cannot send frame: External GLM master/adapter is active on bus (cooldown: %u s remaining)",
                (unsigned)(remaining / 1000));
@@ -190,7 +190,7 @@ bool GenSAMHub::send_frame(const Frame &frame) {
   std::vector<Uart9BitChar> wire_chars = frame.to_9bit();
   ESP_LOGD(TAG, "TX -> %s", frame.to_string().c_str());
 
-  last_our_tx_time_ = millis();
+  arbiter_.note_tx(millis());
   uart9_.write(wire_chars.data(), wire_chars.size());
   parser_.clear();
   return true;
@@ -289,7 +289,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
   uint32_t now = millis();
 
   // 1. ACTIVE MASTER STATE MACHINE
-  if (!glm_active_ && !listen_only_) {
+  if (!arbiter_.is_active() && !listen_only_) {
     if (race_state_ == RaceState::RACE_PING_SENT) {
       // Expecting winning unassigned monitor response with 3-byte serial
       if (frame.payload.size() == 3) {
@@ -794,32 +794,17 @@ void GenSAMHub::process_rx_() {
       continue;
     }
 
-    // Bus arbitration: Detect any external GLM master/adapter activity
-    bool external_master_frame = false;
-    if (glm_active_) {
-      // While yielded, any observed traffic on the bus originates from the external GLM ecosystem
-      external_master_frame = true;
-    } else if (frame.address != HOST_ADDRESS) {
-      if (now - last_our_tx_time_ > 50) {
-        external_master_frame = true;
-      }
-    } else {
-      if (last_our_tx_time_ == 0 || now - last_our_tx_time_ > 300) {
-        external_master_frame = true;
-      }
-    }
-
-    if (external_master_frame) {
-      last_glm_activity_ = now;
-      if (!glm_active_) {
-        glm_active_ = true;
+    // Bus arbitration: attribute the frame, and yield the bus to any external GLM master
+    BusArbiter::Verdict verdict = arbiter_.classify(frame, now);
+    if (verdict == BusArbiter::Verdict::EXTERNAL_MASTER) {
+      if (arbiter_.note_external_activity(now)) {
         if (glm_usb_adapter_active_sensor_ != nullptr) {
           glm_usb_adapter_active_sensor_->publish_state(true);
         }
         ESP_LOGW(TAG, "External GLM master/adapter detected on bus (%s). Yielding bus control (listen-only mode)...",
                  frame.to_string().c_str());
       }
-    } else if (!glm_active_ && !listen_only_ && frame.address != HOST_ADDRESS) {
+    } else if (verdict == BusArbiter::Verdict::LOOPBACK_ECHO && !listen_only_) {
       // Loopback echo of our own master transmission; ignore
       continue;
     }
@@ -834,21 +819,17 @@ void GenSAMHub::process_rx_() {
 }
 
 void GenSAMHub::check_glm_cooldown_() {
-  if (!glm_active_) {
+  if (!arbiter_.check_cooldown(millis(), glm_inactivity_cooldown_ms_)) {
     return;
   }
 
-  uint32_t now = millis();
-  if (now - last_glm_activity_ >= glm_inactivity_cooldown_ms_) {
-    glm_active_ = false;
-    if (glm_usb_adapter_active_sensor_ != nullptr) {
-      glm_usb_adapter_active_sensor_->publish_state(false);
-    }
-    ESP_LOGI(TAG, "No GLM master/adapter traffic observed for %u seconds. Resuming active bus control.",
-             (unsigned)(glm_inactivity_cooldown_ms_ / 1000));
-    // Trigger fresh wakeup and discovery when resuming active master control
-    this->rediscover_monitors();
+  if (glm_usb_adapter_active_sensor_ != nullptr) {
+    glm_usb_adapter_active_sensor_->publish_state(false);
   }
+  ESP_LOGI(TAG, "No GLM master/adapter traffic observed for %u seconds. Resuming active bus control.",
+           (unsigned)(glm_inactivity_cooldown_ms_ / 1000));
+  // Trigger fresh wakeup and discovery when resuming active master control
+  this->rediscover_monitors();
 }
 
 void GenSAMHub::mark_monitor_seen_(GenSAMMonitor &mon) {
@@ -865,7 +846,7 @@ void GenSAMHub::check_monitor_timeouts_() {
   last_timeout_check_ = now;
 
   uint32_t stale_timeout_ms = std::max<uint32_t>(5000, poll_interval_ms_ * 4);
-  if (listen_only_ || glm_active_) {
+  if (listen_only_ || arbiter_.is_active()) {
     stale_timeout_ms = std::max<uint32_t>(stale_timeout_ms, 15000);
   }
 
@@ -1276,7 +1257,7 @@ void GenSAMHub::loop() {
                (unsigned long)uart9_.rx_data_count(), (unsigned long)uart9_.rx_burst_count(),
                (unsigned long)uart9_.rx_framing_err_count(),
                (unsigned long)parser_.invalid_count(), (unsigned long)parser_.crc_mismatch_count(),
-               glm_active_ ? " [GLM ACTIVE - YIELDING]" : "",
+               arbiter_.is_active() ? " [GLM ACTIVE - YIELDING]" : "",
                (unsigned)registry_.size());
     }
   }
