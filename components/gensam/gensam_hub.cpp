@@ -207,18 +207,46 @@ void GenSAMHub::send_wakeup() {
     Frame w1;
     w1.address = BROADCAST_ADDRESS;
     w1.command = CMD_WAKEUP;  // 0x3A
-    w1.payload = {0x03, 0x7F};
+    w1.payload = {WAKEUP_OP_POWER, WAKEUP_VAL_ON_1};  // {0x03, 0x7F}
     this->send_frame(w1);
     delay(5);
 
     Frame w2;
     w2.address = BROADCAST_ADDRESS;
     w2.command = CMD_WAKEUP;  // 0x3A
-    w2.payload = {0x03, 0x01};
+    w2.payload = {WAKEUP_OP_POWER, WAKEUP_VAL_ON_2};  // {0x03, 0x01}
     this->send_frame(w2);
     delay(10);
   }
 }
+
+void GenSAMHub::send_standby() {
+  if (!can_transmit()) {
+    return;
+  }
+  ESP_LOGI(TAG, "Sending GLM standby broadcast sequence to monitors...");
+
+  for (int i = 0; i < 2; i++) {
+    Frame s1;
+    s1.address = BROADCAST_ADDRESS;
+    s1.command = CMD_WAKEUP;  // 0x3A
+    s1.payload = {WAKEUP_OP_POWER, WAKEUP_VAL_STANDBY_1};  // {0x03, 0x02}
+    this->send_frame(s1);
+    delay(20);
+  }
+
+  delay(80);
+
+  for (int i = 0; i < 2; i++) {
+    Frame s2;
+    s2.address = BROADCAST_ADDRESS;
+    s2.command = CMD_WAKEUP;  // 0x3A
+    s2.payload = {WAKEUP_OP_POWER, WAKEUP_VAL_STANDBY_2};  // {0x03, 0x00}
+    this->send_frame(s2);
+    delay(20);
+  }
+}
+
 
 void GenSAMHub::start_race_discovery() {
   if (!can_transmit()) {
@@ -347,9 +375,13 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
         this->mark_monitor_seen_(mon);
         bind_monitor_if_matched_(mon);
         publish_monitor_telemetry_(mon);
-        ESP_LOGI(TAG, "[0x%02X %s] Telemetry: Temp=%d°C In=%d dBFS Out=%d dBFS",
-                 current_query_addr_, mon.model.c_str(),
-                 (int)mon.temperature, (int)mon.input_db, (int)mon.output_db);
+        if (frame.payload.size() == 1 && frame.payload[0] == STATUS_STANDBY) {
+          ESP_LOGD(TAG, "[0x%02X %s] Telemetry: Monitor in standby (0x%02X)", current_query_addr_, mon.model.c_str(), STATUS_STANDBY);
+        } else {
+          ESP_LOGI(TAG, "[0x%02X %s] Telemetry: Temp=%d°C In=%d dBFS Out=%d dBFS",
+                   current_query_addr_, mon.model.c_str(),
+                   (int)mon.temperature, (int)mon.input_db, (int)mon.output_db);
+        }
         current_query_addr_ = 0;
         last_poll_step_time_ = now;
         return;
@@ -387,9 +419,17 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
   if ((frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) &&
       frame.command == CMD_WAKEUP && frame.payload.size() >= 2) {
     if (frame.payload[0] == WAKEUP_OP_POWER) {
-      current_standby_ = (frame.payload[1] == WAKEUP_VAL_STANDBY);
-      ESP_LOGI(TAG, "[Sniffed] System power state updated to %s", current_standby_ ? "STANDBY" : "ON");
-      this->notify_state_callbacks_();
+      bool is_standby = (frame.payload[1] == WAKEUP_VAL_STANDBY_1 || frame.payload[1] == WAKEUP_VAL_STANDBY_2);
+      bool is_on = (frame.payload[1] == WAKEUP_VAL_ON_1 || frame.payload[1] == WAKEUP_VAL_ON_2);
+      if (is_standby && !current_standby_) {
+        current_standby_ = true;
+        ESP_LOGI(TAG, "[Sniffed] System power state updated to STANDBY (val 0x%02X)", frame.payload[1]);
+        this->notify_state_callbacks_();
+      } else if (is_on && current_standby_) {
+        current_standby_ = false;
+        ESP_LOGI(TAG, "[Sniffed] System power state updated to ON (val 0x%02X)", frame.payload[1]);
+        this->notify_state_callbacks_();
+      }
     }
   }
 
@@ -457,7 +497,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
 }
 
 void GenSAMHub::update_race_state_machine_() {
-  if (!can_transmit()) {
+  if (!can_transmit() || current_standby_) {
     return;
   }
 
@@ -470,17 +510,14 @@ void GenSAMHub::update_race_state_machine_() {
 
   // Trigger initial wakeup + discovery cycle
   if (!initial_discovery_done_) {
-    this->send_wakeup();
-    race_state_ = RaceState::WAKEUP_SENT;
-    race_step_time_ = now;
-    initial_discovery_done_ = true;
+    this->rediscover_monitors();
     return;
   }
 
   switch (race_state_) {
     case RaceState::WAKEUP_SENT: {
-      // Wait 300ms after wakeup before beginning RACE
-      if (now - race_step_time_ >= 300) {
+      // Wait 400ms after wakeup before beginning RACE (~400ms for monitor DSP boot)
+      if (now - race_step_time_ >= 400) {
         this->start_race_discovery();
       }
       break;
@@ -625,11 +662,13 @@ void GenSAMHub::update_race_state_machine_() {
           this->send_frame(vf);
           delayMicroseconds(250);
 
-          Frame stay_online;
-          stay_online.address = BROADCAST_ADDRESS;
-          stay_online.command = CMD_STAY_ONLINE;
-          this->send_frame(stay_online);
-          delayMicroseconds(300);
+          if (!current_standby_) {
+            Frame stay_online;
+            stay_online.address = BROADCAST_ADDRESS;
+            stay_online.command = CMD_STAY_ONLINE;
+            this->send_frame(stay_online);
+            delayMicroseconds(300);
+          }
         }
 
         // Refresh address cache only if monitor registry size changed
@@ -659,10 +698,10 @@ void GenSAMHub::update_race_state_machine_() {
     }
 
     case RaceState::IDLE: {
-      // Periodically retry discovery if no monitors are registered
-      if (monitors_.empty() && now - last_discovery_retry_time_ >= 10000) {
+      // Periodically retry discovery if no monitors are registered and not in standby
+      if (!current_standby_ && monitors_.empty() && now - last_discovery_retry_time_ >= 10000) {
         last_discovery_retry_time_ = now;
-        this->start_race_discovery();
+        this->rediscover_monitors();
       }
       break;
     }
@@ -756,9 +795,7 @@ void GenSAMHub::check_glm_cooldown_() {
     ESP_LOGI(TAG, "No GLM master/adapter traffic observed for %u seconds. Resuming active bus control.",
              (unsigned)(glm_inactivity_cooldown_ms_ / 1000));
     // Trigger fresh wakeup and discovery when resuming active master control
-    this->send_wakeup();
-    race_state_ = RaceState::WAKEUP_SENT;
-    race_step_time_ = now;
+    this->rediscover_monitors();
   }
 }
 
@@ -892,6 +929,11 @@ void GenSAMHub::evaluate_system_mute_() {
 
 void GenSAMHub::set_volume_db(float db) {
   float target_db = std::clamp(db, min_volume_db_, max_volume_db_);
+  current_volume_db_ = target_db;
+  if (current_standby_) {
+    this->notify_state_callbacks_();
+    return;
+  }
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot send volume command: Bus is not available for TX");
     return;
@@ -1022,23 +1064,29 @@ void GenSAMHub::set_standby(bool standby) {
     ESP_LOGW(TAG, "Cannot send standby command: Bus is not available for TX");
     return;
   }
-  Frame f;
-  f.address = BROADCAST_ADDRESS;
-  f.command = CMD_WAKEUP;
-  f.payload = {WAKEUP_OP_POWER, standby ? WAKEUP_VAL_STANDBY : WAKEUP_VAL_ON};
-  bool sent = this->send_frame(f);
-  if (sent) {
-    delay(15);
-  }
-  sent = this->send_frame(f) || sent;
-  if (!sent) {
-    ESP_LOGW(TAG, "Standby command was not transmitted; keeping previous state");
-    return;
-  }
 
   current_standby_ = standby;
   ESP_LOGI(TAG, "Set system power: %s", standby ? "STANDBY" : "WAKEUP/ON");
   this->notify_state_callbacks_();
+
+  if (standby) {
+    this->send_standby();
+    // In standby, stop polling loop and mark monitors offline
+    for (auto &kv : monitors_) {
+      if (kv.second.online) {
+        kv.second.online = false;
+        if (kv.second.binding != nullptr && kv.second.binding->online_sensor != nullptr) {
+          kv.second.binding->online_sensor->publish_state(false);
+        }
+      }
+    }
+    this->evaluate_system_mute_();
+    race_state_ = RaceState::IDLE;
+  } else {
+    // When waking from standby, monitors power on in unaddressed state because their volatile
+    // RACE addresses are reset during <0.5W sleep. Automatically initiate RACE rediscovery.
+    this->rediscover_monitors();
+  }
 }
 
 void GenSAMHub::identify_monitor_by_serial(const std::string &serial_or_id, uint32_t duration_ms) {
@@ -1083,8 +1131,16 @@ void GenSAMHub::identify_monitor_by_address(uint8_t address, uint32_t duration_m
 }
 
 void GenSAMHub::rediscover_monitors() {
-  ESP_LOGI(TAG, "Manual rediscovery requested. Clearing %u cached monitors and restarting discovery...",
-           (unsigned)monitors_.size());
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot start RACE discovery: Hub is not in transmitting state");
+    return;
+  }
+
+  initial_discovery_done_ = true;
+  current_standby_ = false;
+  this->notify_state_callbacks_();
+
+  ESP_LOGI(TAG, "Resetting monitor table and initiating RACE discovery...");
 
   // Mark all currently known monitors offline before clearing cache so HA state does not remain stale.
   for (auto &kv : monitors_) {
@@ -1107,9 +1163,11 @@ void GenSAMHub::rediscover_monitors() {
   last_queried_addr_ = 0;
   last_queried_cmd_ = 0;
   next_assign_addr_ = MONITOR_START_ADDR;
-  race_state_ = RaceState::IDLE;
 
-  this->start_race_discovery();
+  // Send wakeup pulse sequence to ensure sleeping monitors boot up
+  this->send_wakeup();
+  race_state_ = RaceState::WAKEUP_SENT;
+  race_step_time_ = millis();
 }
 
 void GenSAMHub::loop() {

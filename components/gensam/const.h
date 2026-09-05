@@ -45,6 +45,9 @@ static constexpr uint8_t CMD_DISCOVERY = 0xFE;        ///< Monitor discovery pin
 static constexpr uint8_t ACK_OK = 0x2D;               ///< Positive ACK
 static constexpr uint8_t ACK_ERROR = 0x2E;            ///< Negative ACK
 
+// --- Status report payload values -----------------------------------------
+static constexpr uint8_t STATUS_STANDBY = 0x07;       ///< Monitor status payload: monitor in standby / sleep
+
 // --- LED colors (used with CMD_BYPASS) -----------------------------------
 static constexpr uint8_t LED_GREEN = 0;
 static constexpr uint8_t LED_RED = 1;
@@ -59,8 +62,10 @@ static constexpr uint8_t BYPASS_INVERT_LED_MASK = 0x10;    ///< Bit 4: Invert LE
 
 // --- CMD_WAKEUP (0x3A) control parameters ---------------------------------
 static constexpr uint8_t WAKEUP_OP_POWER = 0x03;           ///< Power sub-command byte
-static constexpr uint8_t WAKEUP_VAL_ON = 0x7F;             ///< Power ON / Wakeup
-static constexpr uint8_t WAKEUP_VAL_STANDBY = 0x01;        ///< Standby / Sleep
+static constexpr uint8_t WAKEUP_VAL_ON_1 = 0x7F;           ///< Power ON / Wakeup phase 1
+static constexpr uint8_t WAKEUP_VAL_ON_2 = 0x01;           ///< Power ON / Wakeup phase 2
+static constexpr uint8_t WAKEUP_VAL_STANDBY_1 = 0x02;      ///< Standby / Sleep phase 1 (prepare)
+static constexpr uint8_t WAKEUP_VAL_STANDBY_2 = 0x00;      ///< Standby / Sleep phase 2 (power off / sleep)
 
 }  // namespace gensam
 }  // namespace esphome

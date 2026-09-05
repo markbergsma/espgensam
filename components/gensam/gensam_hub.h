@@ -36,7 +36,21 @@
 ///    - LIVE POLLING: Hub broadcasts CMD_STAY_ONLINE (0x04) to refresh address leases and polls
 ///      monitors round-robin with CMD_QUERY_STATUS (0x08) for telemetry.
 ///
-/// 3. Hardware Transceiver Abstraction:
+/// 3. Power Control (Wakeup & Standby):
+///    Monitors enter and exit ultra-low-power sleep (<0.5W) using multi-step broadcast commands
+///    via CMD_WAKEUP (0x3A) with sub-command 0x03:
+///    - WAKEUP (Power ON): Alternates {0x03, 0x7F} and {0x03, 0x01} repeated 3 times.
+///    - STANDBY (Power OFF): Transmits {0x03, 0x02} twice (20 ms spacing), waits 80 ms, then
+///      transmits {0x03, 0x00} twice (20 ms spacing).
+///    - While monitors are in standby, the Hub enters silent idle: CMD_STAY_ONLINE (0x04) heartbeats
+///      and status queries are suppressed so monitors stay in low-power sleep.
+///    - Volatile Address Reset across Standby: In <0.5W standby, Genelec monitors shut down their
+///      DSP and reset their volatile RACE address leases. When waking monitors from standby, the Hub
+///      automatically initiates a fresh RACE rediscovery cycle: waking monitors, waiting 400 ms for
+///      DSP boot, assigning dynamic addresses (0x02..), refreshing CMD_STAY_ONLINE keep-alives,
+///      and restoring active volume.
+///
+/// 4. Hardware Transceiver Abstraction:
 ///    Supports both auto-direction transceivers (M5Stack Atomic RS-485 Base) and discrete
 ///    enable pins (LilyGO T-CAN485 with 5V booster `power_pin`, transceiver enable `se_pin`,
 ///    and receiver enable `re_pin`, or standard boards with hardware direction control `de_pin`).
@@ -218,6 +232,9 @@ class GenSAMHub : public Component {
 
   /// @brief Send broadcast wakeup sequence to wake SAM monitors from standby.
   void send_wakeup();
+
+  /// @brief Send broadcast standby sequence to place SAM monitors into low-power sleep (<0.5W).
+  void send_standby();
 
   /// @brief Trigger a fresh active RACE discovery cycle to detect and assign unaddressed monitors.
   void start_race_discovery();
