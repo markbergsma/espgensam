@@ -73,6 +73,10 @@ namespace binary_sensor {
 class BinarySensor;
 }  // namespace binary_sensor
 
+namespace number {
+class Number;
+}  // namespace number
+
 namespace gensam {
 
 /// @brief Phases of the active RACE monitor discovery and telemetry state machine.
@@ -139,6 +143,14 @@ class GenSAMHub : public Component {
   void set_glm_usb_adapter_active_sensor(binary_sensor::BinarySensor *sensor) {
     glm_usb_adapter_active_sensor_ = sensor;
   }
+
+  /// @brief Register system volume in dB number entity.
+  /// @param num Pointer to the GenSAMVolumeNumber entity.
+  void set_volume_number(number::Number *num) { volume_number_ = num; }
+
+  /// @brief Get system volume in dB number entity.
+  /// @return Pointer to registered number entity or nullptr.
+  number::Number *get_volume_number() const { return volume_number_; }
 
   /// @brief Register a callback for when volume, mute, or power changes (from commands or passive snooping).
   void add_state_callback(std::function<void(float, bool, bool)> cb) {
@@ -358,14 +370,11 @@ class GenSAMHub : public Component {
   float current_volume_db_{-30.0f};
   bool current_mute_{false};
   bool current_standby_{false};
-  void notify_state_callbacks_() {
-    for (auto &cb : state_callbacks_) {
-      cb(current_volume_db_, current_mute_, current_standby_);
-    }
-  }
+  void notify_state_callbacks_();
 
   std::vector<GenSAMMonitorBinding> bindings_;
   binary_sensor::BinarySensor *glm_usb_adapter_active_sensor_{nullptr};
+  number::Number *volume_number_{nullptr};
   std::vector<std::function<void(float, bool, bool)>> state_callbacks_;
 };
 

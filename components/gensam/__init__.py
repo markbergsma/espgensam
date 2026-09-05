@@ -58,6 +58,7 @@ CONF_HARDWARE_ID = "hardware_id"
 CONF_GLM_ADAPTER_ACTIVE = "glm_adapter_active"
 CONF_REDISCOVER_BUTTON = "rediscover_button"
 CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY = "bass_management_crossover_frequency"
+CONF_VOLUME_DB = "volume_db"
 
 gensam_ns = cg.esphome_ns.namespace("gensam")
 GenSAMHub = gensam_ns.class_("GenSAMHub", cg.Component)
@@ -65,6 +66,7 @@ GenSAMMuteSwitch = gensam_ns.class_("GenSAMMuteSwitch", switch.Switch)
 GenSAMIdentifyButton = gensam_ns.class_("GenSAMIdentifyButton", button.Button)
 GenSAMRediscoverButton = gensam_ns.class_("GenSAMRediscoverButton", button.Button)
 GenSAMCrossoverNumber = gensam_ns.class_("GenSAMCrossoverNumber", number.Number)
+GenSAMVolumeNumber = gensam_ns.class_("GenSAMVolumeNumber", number.Number)
 GenSAMMonitorBinding = gensam_ns.struct("GenSAMMonitorBinding")
 
 
@@ -297,6 +299,11 @@ _CONFIG_SCHEMA = cv.Schema(
             GenSAMRediscoverButton,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
+        cv.Optional(CONF_VOLUME_DB): number.number_schema(
+            GenSAMVolumeNumber,
+            icon="mdi:volume-high",
+            unit_of_measurement="dB",
+        ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -343,6 +350,19 @@ async def to_code(config):
     if CONF_REDISCOVER_BUTTON in config:
         btn = await button.new_button(config[CONF_REDISCOVER_BUTTON])
         cg.add(btn.set_hub(var))
+
+    if CONF_VOLUME_DB in config:
+        vol_conf = config[CONF_VOLUME_DB]
+        min_val = config[CONF_MIN_VOLUME_DB]
+        max_val = config[CONF_MAX_VOLUME_DB]
+        vol_num = await number.new_number(
+            vol_conf,
+            min_value=min_val,
+            max_value=max_val,
+            step=0.5,
+        )
+        cg.add(vol_num.set_hub(var))
+        cg.add(var.set_volume_number(vol_num))
 
     if CONF_MONITORS in config:
         for mon_conf in config[CONF_MONITORS]:

@@ -32,6 +32,19 @@
 ///      monitors are woken up from standby or rediscovered.
 ///    - In addition, passive bus sniffing detects GLM-initiated changes on the RS-485 bus,
 ///      ensuring Home Assistant reflects adjustments made in official Genelec software.
+///
+/// 4. System Volume in Decibels (GenSAMVolumeNumber):
+///    While the GenSAM MediaPlayer entity provides standard 0.0..1.0 (0-100%) linear slider
+///    control in Home Assistant, professional monitoring environments and studio workflows
+///    often require explicit decibel (dB) attenuation readouts and control.
+///    - The GenSAMVolumeNumber entity exposes the active system volume directly in decibels (dB),
+///      bounded by the configured [min_volume_db, max_volume_db] limits.
+///    - A step resolution of 0.5 dB is enforced to match standard audio mixing console fader
+///      increments and provide precise acoustic adjustment without flooding the half-duplex
+///      RS-485 bus during slider manipulation.
+///    - The entity maintains strict bidirectional synchronization with the GenSAM MediaPlayer,
+///      outgoing CMD_VOLUME (0x1F) broadcast frames, and passive bus sniffing of external GLM
+///      controllers.
 /// ===================================================================================
 
 #include "esphome/core/component.h"
@@ -41,6 +54,7 @@
 
 #include <cmath>
 #include <string>
+#include <algorithm>
 
 namespace esphome {
 namespace gensam {
@@ -78,6 +92,33 @@ class GenSAMCrossoverNumber : public number::Number {
 
   GenSAMHub *hub_{nullptr};        ///< Pointer to root GenSAM bus controller hub.
   std::string serial_or_id_{};    ///< Target monitor serial number or decimal ID.
+};
+
+/// @brief Number entity that configures and displays the master system volume in decibels (dB).
+class GenSAMVolumeNumber : public number::Number {
+ public:
+  /// @brief Set the parent GenSAMHub instance.
+  /// @param hub Pointer to the GenSAMHub.
+  void set_hub(GenSAMHub *hub) { hub_ = hub; }
+
+ protected:
+  /// @brief Action executed when user adjusts the volume dB number in Home Assistant.
+  /// @param value Requested volume level in decibels.
+  void control(float value) override {
+    float step = 0.5f;
+    float rounded = std::round(value / step) * step;
+    if (hub_ != nullptr) {
+      rounded = std::clamp(rounded, hub_->get_min_volume_db(), hub_->get_max_volume_db());
+      hub_->set_volume_db(rounded);
+      // If set_volume_db succeeded, notify_state_callbacks_() already published the state.
+      // If transmission failed or was blocked, revert HA UI to actual current volume.
+      this->publish_state(hub_->get_current_volume_db());
+    } else {
+      this->publish_state(rounded);
+    }
+  }
+
+  GenSAMHub *hub_{nullptr};        ///< Pointer to root GenSAM bus controller hub.
 };
 
 }  // namespace gensam

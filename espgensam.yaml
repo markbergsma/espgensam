@@ -63,6 +63,9 @@ gensam:
   rediscover_button:
     name: "Rediscover Monitors"
 
+  volume_db:
+    name: "Volume (dB)"
+
   monitors:
     - serial_number: "7350APM88123456"
       unique_id: 1842915

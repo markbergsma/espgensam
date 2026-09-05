@@ -93,6 +93,9 @@ void GenSAMHub::setup() {
     glm_usb_adapter_active_sensor_->publish_state(false);
   }
   current_volume_db_ = startup_volume_db_;
+  if (volume_number_ != nullptr) {
+    volume_number_->publish_state(current_volume_db_);
+  }
 
   ESP_LOGI(TAG, "GenSAM Hub initialized successfully (baud=%lu, TX=%s, RX=GPIO%d, yield_to_glm=%s, cooldown=%u ms)",
            (unsigned long)baud_rate_, listen_only_ ? "DISABLED (listen_only)" : ("GPIO" + std::to_string(tx_pin_)).c_str(),
@@ -105,6 +108,9 @@ void GenSAMHub::dump_config() {
   ESP_LOGCONFIG(TAG, "  RX Pin: GPIO%d", rx_pin_);
   ESP_LOGCONFIG(TAG, "  Volume Bounds: [%.1f dB, %.1f dB] (Startup: %.1f dB)",
                 min_volume_db_, max_volume_db_, startup_volume_db_);
+  if (volume_number_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Volume dB Number Entity: configured");
+  }
   ESP_LOGCONFIG(TAG, "  Configured Monitor Bindings: %u", (unsigned)bindings_.size());
   for (const auto &b : bindings_) {
     ESP_LOGCONFIG(TAG, "    - Name: '%s' (SN: '%s')", b.name.c_str(), b.serial_number.c_str());
@@ -1020,10 +1026,19 @@ void GenSAMHub::evaluate_system_mute_() {
   }
 }
 
+void GenSAMHub::notify_state_callbacks_() {
+  if (volume_number_ != nullptr) {
+    volume_number_->publish_state(current_volume_db_);
+  }
+  for (auto &cb : state_callbacks_) {
+    cb(current_volume_db_, current_mute_, current_standby_);
+  }
+}
+
 void GenSAMHub::set_volume_db(float db) {
   float target_db = std::clamp(db, min_volume_db_, max_volume_db_);
-  current_volume_db_ = target_db;
   if (current_standby_) {
+    current_volume_db_ = target_db;
     this->notify_state_callbacks_();
     return;
   }
