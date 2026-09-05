@@ -357,6 +357,55 @@ class GenSAMHub : public Component {
   /// @param frame The decoded frame to handle.
   void handle_incoming_frame_(const Frame &frame);
 
+  /// @brief Consume a frame as the awaited reply to something the active state machine sent.
+  /// @param frame The decoded frame to match against the current RaceState.
+  /// @param now Current millis() timestamp.
+  /// @return True if the frame was the expected reply and has been fully handled.
+  bool handle_active_reply_(const Frame &frame, uint32_t now);
+
+  // --- Passive snooping (implemented in snoop.cpp) ---------------------------------
+  //
+  // Every frame on the bus is snooped, whether GenSAM is the master or has yielded to an
+  // external GLM controller.  This is how the hub learns state it did not command itself:
+  // GLM's volume, mute, power, crossover, and source changes, and the monitors it addresses.
+  //
+  // The handlers below are deliberately independent and are all offered every frame, in the
+  // order snoop_frame_ calls them.  That order matters in one place: snoop_addressing_ records
+  // which monitor was last queried, and snoop_host_reply_ attributes a later host-addressed
+  // reply to it.  Handlers must stay tolerant of frames from an unknown address, since GLM may
+  // be addressing monitors this hub has not discovered yet.
+
+  /// @brief Offer a frame to every passive snooping handler.
+  /// @param frame The decoded frame to snoop.
+  void snoop_frame_(const Frame &frame);
+
+  /// @brief Track which monitor is being addressed, and adopt RACE assignments made by GLM.
+  void snoop_addressing_(const Frame &frame);
+
+  /// @brief Track master volume broadcasts.
+  void snoop_volume_(const Frame &frame);
+
+  /// @brief Track wakeup and standby power commands.
+  void snoop_power_(const Frame &frame);
+
+  /// @brief Track bypass / mute commands, per monitor or across the whole group.
+  void snoop_mute_(const Frame &frame);
+
+  /// @brief Track bass management crossover frequency commands.
+  void snoop_crossover_(const Frame &frame);
+
+  /// @brief Track audio source selection and AES3 sub-channel assignment.
+  void snoop_audio_source_(const Frame &frame);
+
+  /// @brief Attribute a monitor's reply to the host to whichever query was last observed.
+  void snoop_host_reply_(const Frame &frame);
+
+  /// @brief Advance the device interrogation cursor: software query -> barcode -> next monitor.
+  ///
+  /// Each monitor is asked two questions in turn during QUERYING_DEVICES; this steps to the
+  /// next question, or to the next monitor once both have been asked or timed out.
+  void advance_device_query_();
+
   /// @brief Complete address assignment for a monitor after receiving RID ACK.
   /// @param address The assigned logical address.
   void complete_rid_assignment_(uint8_t address);

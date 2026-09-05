@@ -261,6 +261,16 @@ void GenSAMHub::start_race_discovery() {
   this->send_frame(make_discovery_ping());
 }
 
+void GenSAMHub::advance_device_query_() {
+  if (current_query_cmd_ == CMD_SOFTWARE_QUERY) {
+    current_query_cmd_ = CMD_BAR_CODE;
+  } else {
+    current_query_cmd_ = CMD_SOFTWARE_QUERY;
+    current_poll_index_++;
+  }
+  current_query_addr_ = 0;
+}
+
 void GenSAMHub::complete_rid_assignment_(uint8_t address) {
   uint32_t now = millis();
   GenSAMMonitor &mon = registry_.get_or_create(address);
@@ -288,246 +298,112 @@ void GenSAMHub::complete_rid_assignment_(uint8_t address) {
 void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
   uint32_t now = millis();
 
-  // 1. ACTIVE MASTER STATE MACHINE
-  if (!arbiter_.is_active() && !listen_only_) {
-    if (race_state_ == RaceState::RACE_PING_SENT) {
+  // 1. ACTIVE MASTER STATE MACHINE: a frame that answers our own outstanding request is
+  //    consumed here and not snooped, since we already know what it means.
+  if (!arbiter_.is_active() && !listen_only_ && this->handle_active_reply_(frame, now)) {
+    return;
+  }
+
+  // 2. PASSIVE SNOOPING: everything else, including all traffic from an external GLM master.
+  this->snoop_frame_(frame);
+}
+
+bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
+  switch (race_state_) {
+    case RaceState::RACE_PING_SENT: {
       // Expecting winning unassigned monitor response with 3-byte serial
-      if (frame.payload.size() == 3) {
-        current_racing_bytes_ = frame.payload;
-        current_racing_id_ = (static_cast<uint32_t>(frame.payload[0]) << 16) |
-                             (static_cast<uint32_t>(frame.payload[1]) << 8) |
-                             static_cast<uint32_t>(frame.payload[2]);
-        race_state_ = RaceState::RACE_SET_RID_SENT;
-        race_step_time_ = now;
-        rid_retries_ = 0;
-
-        // Allow 300us transceiver turnaround before transmitting CMD_SET_RID
-        delayMicroseconds(300);
-
-        // Assign address to this monitor via CMD_SET_RID to multicast (0xF0)
-        this->send_frame(make_set_rid(current_racing_bytes_, next_assign_addr_));
-        return;
+      if (frame.payload.size() != 3) {
+        return false;
       }
-    } else if (race_state_ == RaceState::RACE_SET_RID_SENT) {
+      current_racing_bytes_ = frame.payload;
+      current_racing_id_ = (static_cast<uint32_t>(frame.payload[0]) << 16) |
+                           (static_cast<uint32_t>(frame.payload[1]) << 8) |
+                           static_cast<uint32_t>(frame.payload[2]);
+      race_state_ = RaceState::RACE_SET_RID_SENT;
+      race_step_time_ = now;
+      rid_retries_ = 0;
+
+      // Allow 300us transceiver turnaround before transmitting CMD_SET_RID
+      delayMicroseconds(300);
+
+      // Assign address to this monitor via CMD_SET_RID to multicast (0xF0)
+      this->send_frame(make_set_rid(current_racing_bytes_, next_assign_addr_));
+      return true;
+    }
+
+    case RaceState::RACE_SET_RID_SENT: {
       // Expecting ACK confirming address assignment:
       // Frame addressed to HOST_ADDRESS (0x01) with CMD_REPORT_STATUS (0x09) or CMD_ACK (0x01),
       // containing exactly 1 payload byte matching the assigned address.
-      if (frame.address == HOST_ADDRESS &&
-          (frame.command == CMD_REPORT_STATUS || frame.command == CMD_ACK) &&
-          frame.payload.size() == 1 && frame.payload[0] == next_assign_addr_) {
-        this->complete_rid_assignment_(next_assign_addr_);
-        return;
+      if (frame.address != HOST_ADDRESS ||
+          (frame.command != CMD_REPORT_STATUS && frame.command != CMD_ACK) ||
+          frame.payload.size() != 1 || frame.payload[0] != next_assign_addr_) {
+        return false;
       }
-    } else if (race_state_ == RaceState::QUERYING_DEVICES) {
-      if (current_query_addr_ != 0 && frame.address == HOST_ADDRESS && !frame.payload.empty() &&
-          (frame.command == CMD_REPORT_STATUS || frame.command == CMD_HARDWARE_QUERY ||
-           frame.command == CMD_SOFTWARE_QUERY || frame.command == CMD_BAR_CODE)) {
-        GenSAMMonitor &mon = registry_.get_or_create(current_query_addr_);
-        if (current_query_cmd_ == CMD_BAR_CODE) {
-          parse_barcode(frame.payload.data(), frame.payload.size(), mon);
-          ESP_LOGI(TAG, "Discovered serial for 0x%02X: %s", current_query_addr_, mon.serial_number.c_str());
-        } else {
-          parse_device_info(frame.payload.data(), frame.payload.size(), mon);
-          ESP_LOGI(TAG, "Discovered: %s", mon.to_string().c_str());
-        }
-        this->mark_monitor_seen_(mon);
-        registry_.bind_if_matched(mon);
-        registry_.publish_metadata(mon);
-
-        // Advance to next query (info -> barcode -> next monitor)
-        if (current_query_cmd_ == CMD_SOFTWARE_QUERY) {
-          current_query_cmd_ = CMD_BAR_CODE;
-        } else {
-          current_query_cmd_ = CMD_SOFTWARE_QUERY;
-          current_poll_index_++;
-        }
-        current_query_addr_ = 0;
-        race_step_time_ = now;
-        return;
-      }
-    } else if (race_state_ == RaceState::CONFIGURING_DEVICES) {
-      if (current_query_addr_ != 0 && frame.address == HOST_ADDRESS &&
-          (frame.command == CMD_REPORT_STATUS || frame.command == CMD_ACK)) {
-        ESP_LOGD(TAG, "Monitor 0x%02X acknowledged configuration", current_query_addr_);
-        current_poll_index_++;
-        current_query_addr_ = 0;
-        race_step_time_ = now;
-        return;
-      }
-    } else if (race_state_ == RaceState::POLLING_MONITORS) {
-      if (current_query_addr_ != 0 && frame.address == HOST_ADDRESS &&
-          (frame.command == CMD_REPORT_STATUS || frame.command == CMD_QUERY_STATUS)) {
-        GenSAMMonitor &mon = registry_.get_or_create(current_query_addr_);
-        parse_telemetry(frame.payload.data(), frame.payload.size(), mon);
-        this->mark_monitor_seen_(mon);
-        registry_.bind_if_matched(mon);
-        registry_.publish_telemetry(mon);
-        if (frame.payload.size() == 1 && frame.payload[0] == STATUS_STANDBY) {
-          ESP_LOGD(TAG, "[0x%02X %s] Telemetry: Monitor in standby (0x%02X)", current_query_addr_, mon.model.c_str(), STATUS_STANDBY);
-        } else {
-          ESP_LOGI(TAG, "[0x%02X %s] Telemetry: Temp=%d°C In=%d dBFS Out=%d dBFS",
-                   current_query_addr_, mon.model.c_str(),
-                   (int)mon.temperature, (int)mon.input_db, (int)mon.output_db);
-        }
-        current_query_addr_ = 0;
-        last_poll_step_time_ = now;
-        return;
-      }
+      this->complete_rid_assignment_(next_assign_addr_);
+      return true;
     }
-  }
 
-  // 2. PASSIVE SNOOPING (Listen-Only or External GLM Master Active)
-  // Track commands sent on bus
-  if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
-    last_queried_addr_ = frame.address;
-    last_queried_cmd_ = frame.command;
-  } else if (frame.address == MULTICAST_ADDRESS && frame.command == CMD_SET_RID &&
-             frame.payload.size() == 4) {
-    uint8_t addr = frame.payload[3];
-    GenSAMMonitor &mon = registry_.get_or_create(addr);
-    mon.unique_id = (static_cast<uint32_t>(frame.payload[0]) << 16) |
-                    (static_cast<uint32_t>(frame.payload[1]) << 8) |
-                    static_cast<uint32_t>(frame.payload[2]);
-    this->mark_monitor_seen_(mon);
-    ESP_LOGI(TAG, "[Sniffed] Assigned monitor 0x%02X (ID: %u)", addr, (unsigned)mon.unique_id);
-    registry_.bind_if_matched(mon);
-  }
-
-  // Sniff volume broadcast (GLM broadcasts master volume to 0xFF; 0xF0 carries auxiliary pot data)
-  if (frame.address == BROADCAST_ADDRESS && frame.command == CMD_VOLUME && frame.payload.size() >= 3) {
-    uint32_t int24 = decode_int24(frame.payload.data());
-    current_volume_db_ = volume_int24_to_db(int24);
-    ESP_LOGI(TAG, "[Sniffed] System volume updated to %.1f dB", current_volume_db_);
-    this->notify_state_callbacks_();
-  }
-
-  // Sniff wakeup / standby broadcast or multicast commands
-  if ((frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) &&
-      frame.command == CMD_WAKEUP && frame.payload.size() >= 2) {
-    if (frame.payload[0] == WAKEUP_OP_POWER) {
-      bool is_standby = (frame.payload[1] == WAKEUP_VAL_STANDBY_1 || frame.payload[1] == WAKEUP_VAL_STANDBY_2);
-      bool is_on = (frame.payload[1] == WAKEUP_VAL_ON_1 || frame.payload[1] == WAKEUP_VAL_ON_2);
-      if (is_standby && !current_standby_) {
-        current_standby_ = true;
-        ESP_LOGI(TAG, "[Sniffed] System power state updated to STANDBY (val 0x%02X)", frame.payload[1]);
-        this->notify_state_callbacks_();
-      } else if (is_on && current_standby_) {
-        current_standby_ = false;
-        ESP_LOGI(TAG, "[Sniffed] System power state updated to ON (val 0x%02X)", frame.payload[1]);
-        this->notify_state_callbacks_();
+    case RaceState::QUERYING_DEVICES: {
+      if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS || frame.payload.empty() ||
+          (frame.command != CMD_REPORT_STATUS && frame.command != CMD_HARDWARE_QUERY &&
+           frame.command != CMD_SOFTWARE_QUERY && frame.command != CMD_BAR_CODE)) {
+        return false;
       }
-    }
-  }
-
-  // Sniff bypass / mute commands (broadcast, multicast, or unicast to individual monitors)
-  if (frame.command == CMD_BYPASS && !frame.payload.empty()) {
-    bool is_muted = (frame.payload[0] & BYPASS_MUTE_MASK) != 0;
-
-    GenSAMMonitor *known = registry_.find(frame.address);
-    if (known != nullptr) {
-      registry_.set_mute(*known, is_muted);
-      ESP_LOGD(TAG, "[Sniffed] Monitor 0x%02X mute updated to %s (raw 0x%02X)", frame.address, YESNO(is_muted), frame.payload[0]);
-    } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
-      GenSAMMonitor &mon = registry_.get_or_create(frame.address);
-      // Record mute before marking seen, so the system mute re-evaluation triggered by the
-      // offline->online transition already accounts for this monitor's new state.
-      mon.mute = is_muted;
+      GenSAMMonitor &mon = registry_.get_or_create(current_query_addr_);
+      if (current_query_cmd_ == CMD_BAR_CODE) {
+        parse_barcode(frame.payload.data(), frame.payload.size(), mon);
+        ESP_LOGI(TAG, "Discovered serial for 0x%02X: %s", current_query_addr_, mon.serial_number.c_str());
+      } else {
+        parse_device_info(frame.payload.data(), frame.payload.size(), mon);
+        ESP_LOGI(TAG, "Discovered: %s", mon.to_string().c_str());
+      }
       this->mark_monitor_seen_(mon);
       registry_.bind_if_matched(mon);
-      registry_.publish_mute(mon);
-      ESP_LOGD(TAG, "[Sniffed] Discovered monitor 0x%02X mute set to %s (raw 0x%02X)", frame.address, YESNO(is_muted), frame.payload[0]);
-    } else if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
-      for (auto &kv : registry_.monitors()) {
-        registry_.set_mute(kv.second, is_muted);
-      }
+      registry_.publish_metadata(mon);
+
+      this->advance_device_query_();
+      race_step_time_ = now;
+      return true;
     }
 
-    this->evaluate_system_mute_();
-  }
-
-  // Sniff bass management crossover commands (broadcast, multicast, or unicast to individual monitors)
-  if (frame.command == CMD_BASS_MANAGE_XO && frame.payload.size() >= 2) {
-    uint16_t freq = (static_cast<uint16_t>(frame.payload[0]) << 8) | frame.payload[1];
-    if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
-      for (auto &kv : registry_.monitors()) {
-        registry_.set_crossover(kv.second, freq);
+    case RaceState::CONFIGURING_DEVICES: {
+      if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS ||
+          (frame.command != CMD_REPORT_STATUS && frame.command != CMD_ACK)) {
+        return false;
       }
-      ESP_LOGI(TAG, "[Sniffed] Global bass management crossover frequency set to %u Hz", freq);
-    } else {
-      GenSAMMonitor *known = registry_.find(frame.address);
-      if (known != nullptr) {
-        registry_.set_crossover(*known, freq);
-        ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X bass management crossover frequency set to %u Hz", frame.address, freq);
-      } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
-        GenSAMMonitor &mon = registry_.get_or_create(frame.address);
-        this->mark_monitor_seen_(mon);
-        registry_.bind_if_matched(mon);
-        registry_.set_crossover(mon, freq);
-        ESP_LOGI(TAG, "[Sniffed] Discovered monitor 0x%02X bass management crossover frequency set to %u Hz", frame.address, freq);
-      }
-    }
-  }
-
-  // Sniff audio source selection and AES3 channel configuration
-  if (frame.command == CMD_SELECT_AUDIO_SOURCE && frame.payload.size() >= 4) {
-    uint8_t input_idx = frame.payload[0];
-    uint8_t src = frame.payload[1];
-    uint8_t ch = frame.payload[3];
-
-    if (input_idx == 0x00) {
-      if (src == SOURCE_ANALOG || src == SOURCE_DIGITAL_AES3) {
-        if (!audio_source_configured_ || current_audio_source_ != src) {
-          current_audio_source_ = src;
-          audio_source_configured_ = true;
-          if (audio_source_select_ != nullptr) {
-            audio_source_select_->publish_state(
-                (src == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3);
-          }
-          ESP_LOGI(TAG, "[Sniffed] System audio source set to %s",
-                   (src == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3);
-        }
-      }
+      ESP_LOGD(TAG, "Monitor 0x%02X acknowledged configuration", current_query_addr_);
+      current_poll_index_++;
+      current_query_addr_ = 0;
+      race_step_time_ = now;
+      return true;
     }
 
-    if (src == SOURCE_DIGITAL_AES3 && (ch >= AES3_CHANNEL_A && ch <= AES3_CHANNEL_SUM) && input_idx == 0x00) {
-      GenSAMMonitor *known = registry_.find(frame.address);
-      if (known != nullptr) {
-        registry_.set_aes3_channel(*known, ch);
-        ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X AES3 channel set to 0x%02X", frame.address, ch);
-      } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
-        GenSAMMonitor &mon = registry_.get_or_create(frame.address);
-        this->mark_monitor_seen_(mon);
-        registry_.bind_if_matched(mon);
-        registry_.set_aes3_channel(mon, ch);
-        ESP_LOGI(TAG, "[Sniffed] Discovered monitor 0x%02X AES3 channel set to 0x%02X", frame.address, ch);
+    case RaceState::POLLING_MONITORS: {
+      if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS ||
+          (frame.command != CMD_REPORT_STATUS && frame.command != CMD_QUERY_STATUS)) {
+        return false;
       }
-    }
-  }
-
-  // Track replies sent to host
-  if (frame.address == HOST_ADDRESS && frame.command == CMD_REPORT_STATUS) {
-    if (last_queried_cmd_ == CMD_SOFTWARE_QUERY && last_queried_addr_ != 0) {
-      GenSAMMonitor &mon = registry_.get_or_create(last_queried_addr_);
-      parse_device_info(frame.payload.data(), frame.payload.size(), mon);
-      this->mark_monitor_seen_(mon);
-      registry_.bind_if_matched(mon);
-      ESP_LOGI(TAG, "[Sniffed] Discovered: %s", mon.to_string().c_str());
-      last_queried_cmd_ = 0;
-    } else if (last_queried_cmd_ == CMD_BAR_CODE && last_queried_addr_ != 0) {
-      GenSAMMonitor &mon = registry_.get_or_create(last_queried_addr_);
-      parse_barcode(frame.payload.data(), frame.payload.size(), mon);
-      this->mark_monitor_seen_(mon);
-      registry_.bind_if_matched(mon);
-      ESP_LOGI(TAG, "[Sniffed] Serial for 0x%02X: %s", last_queried_addr_, mon.serial_number.c_str());
-      last_queried_cmd_ = 0;
-    } else if (last_queried_cmd_ == CMD_QUERY_STATUS && last_queried_addr_ != 0) {
-      GenSAMMonitor &mon = registry_.get_or_create(last_queried_addr_);
+      GenSAMMonitor &mon = registry_.get_or_create(current_query_addr_);
       parse_telemetry(frame.payload.data(), frame.payload.size(), mon);
       this->mark_monitor_seen_(mon);
       registry_.bind_if_matched(mon);
       registry_.publish_telemetry(mon);
-      last_queried_cmd_ = 0;
+      if (frame.payload.size() == 1 && frame.payload[0] == STATUS_STANDBY) {
+        ESP_LOGD(TAG, "[0x%02X %s] Telemetry: Monitor in standby (0x%02X)",
+                 current_query_addr_, mon.model.c_str(), STATUS_STANDBY);
+      } else {
+        ESP_LOGI(TAG, "[0x%02X %s] Telemetry: Temp=%d°C In=%d dBFS Out=%d dBFS",
+                 current_query_addr_, mon.model.c_str(),
+                 (int)mon.temperature, (int)mon.input_db, (int)mon.output_db);
+      }
+      current_query_addr_ = 0;
+      last_poll_step_time_ = now;
+      return true;
     }
+
+    default:
+      return false;
   }
 }
 
@@ -608,13 +484,7 @@ void GenSAMHub::update_race_state_machine_() {
     case RaceState::QUERYING_DEVICES: {
       if (current_query_addr_ != 0 && now - race_step_time_ > 250) {
         // Query timed out; advance to next query (info -> barcode -> next monitor)
-        if (current_query_cmd_ == CMD_SOFTWARE_QUERY) {
-          current_query_cmd_ = CMD_BAR_CODE;
-        } else {
-          current_query_cmd_ = CMD_SOFTWARE_QUERY;
-          current_poll_index_++;
-        }
-        current_query_addr_ = 0;
+        this->advance_device_query_();
       }
 
       if (current_query_addr_ == 0) {
