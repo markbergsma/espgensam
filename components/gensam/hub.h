@@ -74,6 +74,7 @@
 #include "const.h"
 #include "frame.h"
 #include "monitor.h"
+#include "registry.h"
 #include "uart9bit.h"
 #include "util.h"
 
@@ -154,7 +155,7 @@ class GenSAMHub : public Component {
   void set_startup_volume_db(float db) { startup_volume_db_ = db; current_volume_db_ = db; }
 
   /// @brief Register a configured monitor binding to match discovered hardware.
-  void add_monitor_binding(const GenSAMMonitorBinding &binding) { bindings_.push_back(binding); }
+  void add_monitor_binding(const GenSAMMonitorBinding &binding) { registry_.add_binding(binding); }
 
   /// @brief Set optional binary sensor reflecting external GLM USB adapter bus occupancy.
   void set_glm_usb_adapter_active_sensor(binary_sensor::BinarySensor *sensor) {
@@ -334,17 +335,17 @@ class GenSAMHub : public Component {
 
   /// @brief Access the registry table of discovered monitors, keyed by logical address.
   /// @return Map of address to GenSAMMonitor descriptors.
-  const std::map<uint8_t, GenSAMMonitor> &get_monitors() const { return monitors_; }
+  const std::map<uint8_t, GenSAMMonitor> &get_monitors() const { return registry_.monitors(); }
 
   /// @brief Look up a discovered monitor by its logical RS-485 address.
   /// @param address Target address (0x02..0x7F).
   /// @return Pointer to GenSAMMonitor descriptor, or nullptr if not registered.
-  GenSAMMonitor *get_monitor(uint8_t address);
+  GenSAMMonitor *get_monitor(uint8_t address) { return registry_.find(address); }
 
   /// @brief Look up a discovered monitor by its logical RS-485 address (read-only).
   /// @param address Target address (0x02..0x7F).
   /// @return Const pointer to GenSAMMonitor descriptor, or nullptr if not registered.
-  const GenSAMMonitor *get_monitor(uint8_t address) const;
+  const GenSAMMonitor *get_monitor(uint8_t address) const { return registry_.find(address); }
 
  protected:
   /// @brief Drain RX ring buffer, log raw bytes, feed the parser, and dispatch decoded frames.
@@ -360,21 +361,11 @@ class GenSAMHub : public Component {
   /// @param frame The decoded frame to handle.
   void handle_incoming_frame_(const Frame &frame);
 
-  /// @brief Match discovered monitor against configured bindings.
-  void bind_monitor_if_matched_(GenSAMMonitor &mon);
-
-  /// @brief Publish parsed monitor telemetry to linked Home Assistant sensor entities.
-  void publish_monitor_telemetry_(const GenSAMMonitor &mon);
-
-  /// @brief Publish monitor metadata (model, serial, firmware revision, ID) to linked text sensors.
-  void publish_monitor_metadata_(const GenSAMMonitor &mon);
-
   /// @brief Complete address assignment for a monitor after receiving RID ACK.
   /// @param address The assigned logical address.
   void complete_rid_assignment_(uint8_t address);
 
-  /// @brief Mark a monitor as recently seen, updating last_seen_ms and transitioning its
-  /// online status if it was previously offline.
+  /// @brief Mark a monitor as recently seen, re-evaluating system mute if it came back online.
   /// @param mon Reference to the active monitor.
   void mark_monitor_seen_(GenSAMMonitor &mon);
 
@@ -414,8 +405,8 @@ class GenSAMHub : public Component {
   uint32_t last_tx_blocked_warning_{0};
   uint32_t last_stat_log_{0};
 
-  // Monitor registry
-  std::map<uint8_t, GenSAMMonitor> monitors_;
+  // Monitor registry, configured bindings, and all Home Assistant entity publishing
+  MonitorRegistry registry_;
 
   // Active RACE & query state machine
   RaceState race_state_{RaceState::IDLE};
@@ -448,7 +439,6 @@ class GenSAMHub : public Component {
   bool current_standby_{false};
   void notify_state_callbacks_();
 
-  std::vector<GenSAMMonitorBinding> bindings_;
   binary_sensor::BinarySensor *glm_usb_adapter_active_sensor_{nullptr};
   number::Number *volume_number_{nullptr};
   select::Select *audio_source_select_{nullptr};

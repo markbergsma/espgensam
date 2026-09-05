@@ -9,9 +9,6 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
-#include "esphome/components/sensor/sensor.h"
-#include "esphome/components/switch/switch.h"
-#include "esphome/components/text_sensor/text_sensor.h"
 #include "driver/gpio.h"
 
 static const char *const TAG = "gensam";
@@ -99,7 +96,7 @@ void GenSAMHub::setup() {
     volume_number_->publish_state(current_volume_db_);
   }
 
-  for (auto &b : bindings_) {
+  for (auto &b : registry_.bindings()) {
     if (b.aes3_channel_select != nullptr) {
       b.aes3_channel_select->publish_state(aes3_channel_to_str(b.aes3_channel));
     }
@@ -122,8 +119,8 @@ void GenSAMHub::dump_config() {
   if (audio_source_select_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Audio Source Select Entity: configured");
   }
-  ESP_LOGCONFIG(TAG, "  Configured Monitor Bindings: %u", (unsigned)bindings_.size());
-  for (const auto &b : bindings_) {
+  ESP_LOGCONFIG(TAG, "  Configured Monitor Bindings: %u", (unsigned)registry_.bindings().size());
+  for (const auto &b : registry_.bindings()) {
     ESP_LOGCONFIG(TAG, "    - Name: '%s' (SN: '%s')", b.name.c_str(), b.serial_number.c_str());
   }
   if (de_pin_ >= 0) {
@@ -143,8 +140,8 @@ void GenSAMHub::dump_config() {
   ESP_LOGCONFIG(TAG, "  Listen Only: %s", YESNO(listen_only_));
   ESP_LOGCONFIG(TAG, "  Yield to GLM: %s", YESNO(yield_to_glm_));
   ESP_LOGCONFIG(TAG, "  GLM Inactivity Cooldown: %u ms", (unsigned)glm_inactivity_cooldown_ms_);
-  ESP_LOGCONFIG(TAG, "  Discovered Monitors: %u", (unsigned)monitors_.size());
-  for (const auto &kv : monitors_) {
+  ESP_LOGCONFIG(TAG, "  Discovered Monitors: %u", (unsigned)registry_.size());
+  for (const auto &kv : registry_.monitors()) {
     ESP_LOGCONFIG(TAG, "    - %s", kv.second.to_string().c_str());
   }
 }
@@ -207,22 +204,6 @@ bool GenSAMHub::send_frame_twice(const Frame &frame) {
   return this->send_frame(frame) || sent;
 }
 
-GenSAMMonitor *GenSAMHub::get_monitor(uint8_t address) {
-  auto it = monitors_.find(address);
-  if (it != monitors_.end()) {
-    return &it->second;
-  }
-  return nullptr;
-}
-
-const GenSAMMonitor *GenSAMHub::get_monitor(uint8_t address) const {
-  auto it = monitors_.find(address);
-  if (it != monitors_.end()) {
-    return &it->second;
-  }
-  return nullptr;
-}
-
 void GenSAMHub::send_wakeup() {
   if (!can_transmit()) {
     return;
@@ -282,14 +263,13 @@ void GenSAMHub::start_race_discovery() {
 
 void GenSAMHub::complete_rid_assignment_(uint8_t address) {
   uint32_t now = millis();
-  GenSAMMonitor &mon = monitors_[address];
-  mon.address = address;
+  GenSAMMonitor &mon = registry_.get_or_create(address);
   mon.unique_id = current_racing_id_;
   this->mark_monitor_seen_(mon);
 
   ESP_LOGI(TAG, "Assigned monitor at address 0x%02X (ID: %u)",
            address, (unsigned)mon.unique_id);
-  this->bind_monitor_if_matched_(mon);
+  registry_.bind_if_matched(mon);
 
   next_assign_addr_++;
   current_racing_bytes_.clear();
@@ -342,7 +322,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
       if (current_query_addr_ != 0 && frame.address == HOST_ADDRESS && !frame.payload.empty() &&
           (frame.command == CMD_REPORT_STATUS || frame.command == CMD_HARDWARE_QUERY ||
            frame.command == CMD_SOFTWARE_QUERY || frame.command == CMD_BAR_CODE)) {
-        GenSAMMonitor &mon = monitors_[current_query_addr_];
+        GenSAMMonitor &mon = registry_.get_or_create(current_query_addr_);
         if (current_query_cmd_ == CMD_BAR_CODE) {
           parse_barcode(frame.payload.data(), frame.payload.size(), mon);
           ESP_LOGI(TAG, "Discovered serial for 0x%02X: %s", current_query_addr_, mon.serial_number.c_str());
@@ -351,8 +331,8 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
           ESP_LOGI(TAG, "Discovered: %s", mon.to_string().c_str());
         }
         this->mark_monitor_seen_(mon);
-        bind_monitor_if_matched_(mon);
-        publish_monitor_metadata_(mon);
+        registry_.bind_if_matched(mon);
+        registry_.publish_metadata(mon);
 
         // Advance to next query (info -> barcode -> next monitor)
         if (current_query_cmd_ == CMD_SOFTWARE_QUERY) {
@@ -377,11 +357,11 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     } else if (race_state_ == RaceState::POLLING_MONITORS) {
       if (current_query_addr_ != 0 && frame.address == HOST_ADDRESS &&
           (frame.command == CMD_REPORT_STATUS || frame.command == CMD_QUERY_STATUS)) {
-        GenSAMMonitor &mon = monitors_[current_query_addr_];
+        GenSAMMonitor &mon = registry_.get_or_create(current_query_addr_);
         parse_telemetry(frame.payload.data(), frame.payload.size(), mon);
         this->mark_monitor_seen_(mon);
-        bind_monitor_if_matched_(mon);
-        publish_monitor_telemetry_(mon);
+        registry_.bind_if_matched(mon);
+        registry_.publish_telemetry(mon);
         if (frame.payload.size() == 1 && frame.payload[0] == STATUS_STANDBY) {
           ESP_LOGD(TAG, "[0x%02X %s] Telemetry: Monitor in standby (0x%02X)", current_query_addr_, mon.model.c_str(), STATUS_STANDBY);
         } else {
@@ -404,14 +384,13 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
   } else if (frame.address == MULTICAST_ADDRESS && frame.command == CMD_SET_RID &&
              frame.payload.size() == 4) {
     uint8_t addr = frame.payload[3];
-    GenSAMMonitor &mon = monitors_[addr];
-    mon.address = addr;
+    GenSAMMonitor &mon = registry_.get_or_create(addr);
     mon.unique_id = (static_cast<uint32_t>(frame.payload[0]) << 16) |
                     (static_cast<uint32_t>(frame.payload[1]) << 8) |
                     static_cast<uint32_t>(frame.payload[2]);
     this->mark_monitor_seen_(mon);
     ESP_LOGI(TAG, "[Sniffed] Assigned monitor 0x%02X (ID: %u)", addr, (unsigned)mon.unique_id);
-    bind_monitor_if_matched_(mon);
+    registry_.bind_if_matched(mon);
   }
 
   // Sniff volume broadcast (GLM broadcasts master volume to 0xFF; 0xF0 carries auxiliary pot data)
@@ -444,29 +423,22 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
   if (frame.command == CMD_BYPASS && !frame.payload.empty()) {
     bool is_muted = (frame.payload[0] & BYPASS_MUTE_MASK) != 0;
 
-    auto it = monitors_.find(frame.address);
-    if (it != monitors_.end()) {
-      it->second.mute = is_muted;
-      if (it->second.binding != nullptr && it->second.binding->mute_switch != nullptr) {
-        it->second.binding->mute_switch->publish_state(is_muted);
-      }
+    GenSAMMonitor *known = registry_.find(frame.address);
+    if (known != nullptr) {
+      registry_.set_mute(*known, is_muted);
       ESP_LOGD(TAG, "[Sniffed] Monitor 0x%02X mute updated to %s (raw 0x%02X)", frame.address, YESNO(is_muted), frame.payload[0]);
     } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
-      GenSAMMonitor &mon = monitors_[frame.address];
-      mon.address = frame.address;
+      GenSAMMonitor &mon = registry_.get_or_create(frame.address);
+      // Record mute before marking seen, so the system mute re-evaluation triggered by the
+      // offline->online transition already accounts for this monitor's new state.
       mon.mute = is_muted;
       this->mark_monitor_seen_(mon);
-      bind_monitor_if_matched_(mon);
-      if (mon.binding != nullptr && mon.binding->mute_switch != nullptr) {
-        mon.binding->mute_switch->publish_state(is_muted);
-      }
+      registry_.bind_if_matched(mon);
+      registry_.publish_mute(mon);
       ESP_LOGD(TAG, "[Sniffed] Discovered monitor 0x%02X mute set to %s (raw 0x%02X)", frame.address, YESNO(is_muted), frame.payload[0]);
     } else if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
-      for (auto &kv : monitors_) {
-        kv.second.mute = is_muted;
-        if (kv.second.binding != nullptr && kv.second.binding->mute_switch != nullptr) {
-          kv.second.binding->mute_switch->publish_state(is_muted);
-        }
+      for (auto &kv : registry_.monitors()) {
+        registry_.set_mute(kv.second, is_muted);
       }
     }
 
@@ -477,39 +449,20 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
   if (frame.command == CMD_BASS_MANAGE_XO && frame.payload.size() >= 2) {
     uint16_t freq = (static_cast<uint16_t>(frame.payload[0]) << 8) | frame.payload[1];
     if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
-      for (auto &kv : monitors_) {
-        if (kv.second.binding != nullptr) {
-          kv.second.binding->crossover_freq = freq;
-          kv.second.binding->crossover_configured = true;
-          if (kv.second.binding->crossover_number != nullptr) {
-            kv.second.binding->crossover_number->publish_state(freq);
-          }
-        }
+      for (auto &kv : registry_.monitors()) {
+        registry_.set_crossover(kv.second, freq);
       }
       ESP_LOGI(TAG, "[Sniffed] Global bass management crossover frequency set to %u Hz", freq);
     } else {
-      auto it = monitors_.find(frame.address);
-      if (it != monitors_.end()) {
-        if (it->second.binding != nullptr) {
-          it->second.binding->crossover_freq = freq;
-          it->second.binding->crossover_configured = true;
-          if (it->second.binding->crossover_number != nullptr) {
-            it->second.binding->crossover_number->publish_state(freq);
-          }
-        }
+      GenSAMMonitor *known = registry_.find(frame.address);
+      if (known != nullptr) {
+        registry_.set_crossover(*known, freq);
         ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X bass management crossover frequency set to %u Hz", frame.address, freq);
       } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
-        GenSAMMonitor &mon = monitors_[frame.address];
-        mon.address = frame.address;
+        GenSAMMonitor &mon = registry_.get_or_create(frame.address);
         this->mark_monitor_seen_(mon);
-        bind_monitor_if_matched_(mon);
-        if (mon.binding != nullptr) {
-          mon.binding->crossover_freq = freq;
-          mon.binding->crossover_configured = true;
-          if (mon.binding->crossover_number != nullptr) {
-            mon.binding->crossover_number->publish_state(freq);
-          }
-        }
+        registry_.bind_if_matched(mon);
+        registry_.set_crossover(mon, freq);
         ESP_LOGI(TAG, "[Sniffed] Discovered monitor 0x%02X bass management crossover frequency set to %u Hz", frame.address, freq);
       }
     }
@@ -537,28 +490,15 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     }
 
     if (src == SOURCE_DIGITAL_AES3 && (ch >= AES3_CHANNEL_A && ch <= AES3_CHANNEL_SUM) && input_idx == 0x00) {
-      auto it = monitors_.find(frame.address);
-      if (it != monitors_.end()) {
-        if (it->second.binding != nullptr) {
-          it->second.binding->aes3_channel = ch;
-          it->second.binding->aes3_channel_configured = true;
-          if (it->second.binding->aes3_channel_select != nullptr) {
-            it->second.binding->aes3_channel_select->publish_state(aes3_channel_to_str(ch));
-          }
-        }
+      GenSAMMonitor *known = registry_.find(frame.address);
+      if (known != nullptr) {
+        registry_.set_aes3_channel(*known, ch);
         ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X AES3 channel set to 0x%02X", frame.address, ch);
       } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
-        GenSAMMonitor &mon = monitors_[frame.address];
-        mon.address = frame.address;
+        GenSAMMonitor &mon = registry_.get_or_create(frame.address);
         this->mark_monitor_seen_(mon);
-        bind_monitor_if_matched_(mon);
-        if (mon.binding != nullptr) {
-          mon.binding->aes3_channel = ch;
-          mon.binding->aes3_channel_configured = true;
-          if (mon.binding->aes3_channel_select != nullptr) {
-            mon.binding->aes3_channel_select->publish_state(aes3_channel_to_str(ch));
-          }
-        }
+        registry_.bind_if_matched(mon);
+        registry_.set_aes3_channel(mon, ch);
         ESP_LOGI(TAG, "[Sniffed] Discovered monitor 0x%02X AES3 channel set to 0x%02X", frame.address, ch);
       }
     }
@@ -567,28 +507,25 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
   // Track replies sent to host
   if (frame.address == HOST_ADDRESS && frame.command == CMD_REPORT_STATUS) {
     if (last_queried_cmd_ == CMD_SOFTWARE_QUERY && last_queried_addr_ != 0) {
-      GenSAMMonitor &mon = monitors_[last_queried_addr_];
-      mon.address = last_queried_addr_;
+      GenSAMMonitor &mon = registry_.get_or_create(last_queried_addr_);
       parse_device_info(frame.payload.data(), frame.payload.size(), mon);
       this->mark_monitor_seen_(mon);
-      bind_monitor_if_matched_(mon);
+      registry_.bind_if_matched(mon);
       ESP_LOGI(TAG, "[Sniffed] Discovered: %s", mon.to_string().c_str());
       last_queried_cmd_ = 0;
     } else if (last_queried_cmd_ == CMD_BAR_CODE && last_queried_addr_ != 0) {
-      GenSAMMonitor &mon = monitors_[last_queried_addr_];
-      mon.address = last_queried_addr_;
+      GenSAMMonitor &mon = registry_.get_or_create(last_queried_addr_);
       parse_barcode(frame.payload.data(), frame.payload.size(), mon);
       this->mark_monitor_seen_(mon);
-      bind_monitor_if_matched_(mon);
+      registry_.bind_if_matched(mon);
       ESP_LOGI(TAG, "[Sniffed] Serial for 0x%02X: %s", last_queried_addr_, mon.serial_number.c_str());
       last_queried_cmd_ = 0;
     } else if (last_queried_cmd_ == CMD_QUERY_STATUS && last_queried_addr_ != 0) {
-      GenSAMMonitor &mon = monitors_[last_queried_addr_];
-      mon.address = last_queried_addr_;
+      GenSAMMonitor &mon = registry_.get_or_create(last_queried_addr_);
       parse_telemetry(frame.payload.data(), frame.payload.size(), mon);
       this->mark_monitor_seen_(mon);
-      bind_monitor_if_matched_(mon);
-      publish_monitor_telemetry_(mon);
+      registry_.bind_if_matched(mon);
+      registry_.publish_telemetry(mon);
       last_queried_cmd_ = 0;
     }
   }
@@ -624,22 +561,18 @@ void GenSAMHub::update_race_state_machine_() {
     case RaceState::RACE_PING_SENT: {
       // Timeout waiting for unassigned monitors -> RACE discovery complete
       if (now - race_step_time_ > 350) {
-        if (monitors_.empty()) {
+        if (registry_.empty()) {
           ESP_LOGI(TAG, "RACE discovery complete: No monitors responded (will retry in 10s)");
           race_state_ = RaceState::IDLE;
           last_discovery_retry_time_ = now;
         } else {
-          ESP_LOGI(TAG, "RACE discovery complete. Total monitors found: %u", (unsigned)monitors_.size());
+          ESP_LOGI(TAG, "RACE discovery complete. Total monitors found: %u", (unsigned)registry_.size());
 
           // Transition all monitors from discovery to online mode
           this->send_frame(make_stay_online());
 
           // Populate poll_addrs_ with discovered monitor addresses
-          poll_addrs_.clear();
-          poll_addrs_.reserve(monitors_.size());
-          for (const auto &kv : monitors_) {
-            poll_addrs_.push_back(kv.first);
-          }
+          poll_addrs_ = registry_.addresses();
 
           race_state_ = RaceState::QUERYING_DEVICES;
           race_step_time_ = now;
@@ -712,8 +645,8 @@ void GenSAMHub::update_race_state_machine_() {
       if (current_query_addr_ == 0) {
         while (current_poll_index_ < poll_addrs_.size()) {
           uint8_t addr = poll_addrs_[current_poll_index_];
-          auto it = monitors_.find(addr);
-          if (it != monitors_.end()) {
+          GenSAMMonitor *mon = registry_.find(addr);
+          if (mon != nullptr) {
             bool configured_anything = false;
 
             // 1. Audio source and AES3 channel configuration
@@ -723,25 +656,24 @@ void GenSAMHub::update_race_state_machine_() {
             // transients.  Volume is restored later by the normal post-wakeup volume command.
             if (audio_source_configured_) {
               uint8_t ch = AES3_CHANNEL_A;
-              if (it->second.binding != nullptr) {
-                ch = it->second.binding->aes3_channel;
-              } else if (it->second.is_subwoofer()) {
+              if (mon->binding != nullptr) {
+                ch = mon->binding->aes3_channel;
+              } else if (mon->is_subwoofer()) {
                 ch = AES3_CHANNEL_SUM;
               }
               ESP_LOGI(TAG, "Configuring audio source for monitor 0x%02X: %s (ch 0x%02X)",
                        addr, (current_audio_source_ == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3, ch);
-              this->send_audio_source_frame(addr, current_audio_source_, ch, it->second.is_subwoofer());
+              this->send_audio_source_frame(addr, current_audio_source_, ch, mon->is_subwoofer());
               configured_anything = true;
             }
 
             // 2. Bass management crossover frequency
-            if (it->second.binding != nullptr &&
-                it->second.binding->crossover_number != nullptr &&
-                it->second.binding->crossover_configured) {
+            if (mon->binding != nullptr && mon->binding->crossover_number != nullptr &&
+                mon->binding->crossover_configured) {
               if (configured_anything) {
                 delay(10);
               }
-              uint16_t freq = it->second.binding->crossover_freq;
+              uint16_t freq = mon->binding->crossover_freq;
               ESP_LOGI(TAG, "Configuring bass management crossover frequency for monitor 0x%02X: %u Hz", addr, freq);
               this->send_frame(make_crossover(addr, freq));
               configured_anything = true;
@@ -775,7 +707,7 @@ void GenSAMHub::update_race_state_machine_() {
     }
 
     case RaceState::POLLING_MONITORS: {
-      if (monitors_.empty()) {
+      if (registry_.empty()) {
         race_state_ = RaceState::IDLE;
         return;
       }
@@ -799,12 +731,8 @@ void GenSAMHub::update_race_state_machine_() {
         }
 
         // Refresh address cache only if monitor registry size changed
-        if (poll_addrs_.size() != monitors_.size()) {
-          poll_addrs_.clear();
-          poll_addrs_.reserve(monitors_.size());
-          for (const auto &kv : monitors_) {
-            poll_addrs_.push_back(kv.first);
-          }
+        if (poll_addrs_.size() != registry_.size()) {
+          poll_addrs_ = registry_.addresses();
         }
 
         if (current_poll_index_ < poll_addrs_.size()) {
@@ -823,7 +751,7 @@ void GenSAMHub::update_race_state_machine_() {
 
     case RaceState::IDLE: {
       // Periodically retry discovery if no monitors are registered and not in standby
-      if (!current_standby_ && monitors_.empty() && now - last_discovery_retry_time_ >= 10000) {
+      if (!current_standby_ && registry_.empty() && now - last_discovery_retry_time_ >= 10000) {
         last_discovery_retry_time_ = now;
         this->rediscover_monitors();
       }
@@ -923,80 +851,8 @@ void GenSAMHub::check_glm_cooldown_() {
   }
 }
 
-void GenSAMHub::bind_monitor_if_matched_(GenSAMMonitor &mon) {
-  if (mon.binding != nullptr) {
-    return;
-  }
-  for (auto &b : bindings_) {
-    if (mon.matches(b)) {
-      mon.binding = &b;
-      if ((mon.serial_number.empty() || mon.serial_number == "(none)") && !b.serial_number.empty()) {
-        mon.serial_number = b.serial_number;
-      }
-      ESP_LOGI(TAG, "Bound monitor 0x%02X (%s, SN:%s) to HA entity '%s'",
-               mon.address, mon.model.empty() ? "(querying)" : mon.model.c_str(),
-               mon.serial_number.c_str(), b.name.c_str());
-      publish_monitor_metadata_(mon);
-      if (mon.binding->online_sensor != nullptr) {
-        mon.binding->online_sensor->publish_state(mon.online);
-      }
-      if (mon.binding->crossover_number != nullptr && mon.binding->crossover_configured) {
-        mon.binding->crossover_number->publish_state(mon.binding->crossover_freq);
-      }
-      if (mon.binding->aes3_channel_select != nullptr) {
-        mon.binding->aes3_channel_select->publish_state(aes3_channel_to_str(mon.binding->aes3_channel));
-      }
-      break;
-    }
-  }
-}
-
-void GenSAMHub::publish_monitor_metadata_(const GenSAMMonitor &mon) {
-  if (mon.binding == nullptr) {
-    return;
-  }
-  if (mon.binding->model_sensor != nullptr && !mon.model.empty()) {
-    mon.binding->model_sensor->publish_state(mon.model);
-  }
-  if (mon.binding->serial_sensor != nullptr && !mon.serial_number.empty() && mon.serial_number != "(none)") {
-    mon.binding->serial_sensor->publish_state(mon.serial_number);
-  }
-  if (mon.binding->firmware_sensor != nullptr && !mon.firmware_version.empty() && mon.firmware_version != "?") {
-    mon.binding->firmware_sensor->publish_state(mon.firmware_version);
-  }
-  if (mon.binding->hardware_id_sensor != nullptr && mon.unique_id != 0) {
-    mon.binding->hardware_id_sensor->publish_state(std::to_string(mon.unique_id));
-  }
-}
-
-void GenSAMHub::publish_monitor_telemetry_(const GenSAMMonitor &mon) {
-  if (mon.binding == nullptr) {
-    return;
-  }
-  if (mon.binding->temperature_sensor != nullptr) {
-    mon.binding->temperature_sensor->publish_state(mon.temperature);
-  }
-  if (mon.binding->input_level_sensor != nullptr) {
-    mon.binding->input_level_sensor->publish_state(mon.input_db);
-  }
-  if (mon.binding->output_level_sensor != nullptr) {
-    mon.binding->output_level_sensor->publish_state(mon.output_db);
-  }
-  if (mon.binding->online_sensor != nullptr) {
-    mon.binding->online_sensor->publish_state(mon.online);
-  }
-}
-
 void GenSAMHub::mark_monitor_seen_(GenSAMMonitor &mon) {
-  uint32_t now = millis();
-  mon.last_seen_ms = now;
-  if (!mon.online) {
-    mon.online = true;
-    if (mon.binding != nullptr && mon.binding->online_sensor != nullptr) {
-      mon.binding->online_sensor->publish_state(true);
-    }
-    ESP_LOGI(TAG, "[0x%02X %s] Monitor is online",
-             mon.address, mon.model.empty() ? "(querying)" : mon.model.c_str());
+  if (registry_.mark_seen(mon)) {
     this->evaluate_system_mute_();
   }
 }
@@ -1013,41 +869,17 @@ void GenSAMHub::check_monitor_timeouts_() {
     stale_timeout_ms = std::max<uint32_t>(stale_timeout_ms, 15000);
   }
 
-  bool state_changed = false;
-  for (auto &kv : monitors_) {
-    GenSAMMonitor &mon = kv.second;
-    if (mon.online && (now - mon.last_seen_ms > stale_timeout_ms)) {
-      mon.online = false;
-      if (mon.binding != nullptr && mon.binding->online_sensor != nullptr) {
-        mon.binding->online_sensor->publish_state(false);
-      }
-      ESP_LOGW(TAG, "[0x%02X %s] Monitor went offline (no response for %u ms)",
-               mon.address, mon.model.empty() ? "(unknown)" : mon.model.c_str(),
-               (unsigned)(now - mon.last_seen_ms));
-      state_changed = true;
-    }
-  }
-
-  if (state_changed) {
+  if (registry_.expire_stale(now, stale_timeout_ms)) {
     this->evaluate_system_mute_();
   }
 }
 
 void GenSAMHub::evaluate_system_mute_() {
-  if (monitors_.empty()) {
+  if (registry_.empty()) {
     return;
   }
   bool any_online = false;
-  bool all_muted = true;
-  for (const auto &kv : monitors_) {
-    if (kv.second.online) {
-      any_online = true;
-      if (!kv.second.mute) {
-        all_muted = false;
-        break;
-      }
-    }
-  }
+  bool all_muted = registry_.all_online_muted(any_online);
 
   bool new_mute = any_online ? all_muted : false;
   if (current_mute_ != new_mute) {
@@ -1098,7 +930,7 @@ void GenSAMHub::set_group_mute(bool mute) {
   bool transmitted = false;
 
   // 1. Unicast CMD_BYPASS to each discovered monitor individually (as per GLM protocol)
-  for (const auto &kv : monitors_) {
+  for (const auto &kv : registry_.monitors()) {
     bool sent = this->send_frame(make_bypass(kv.first, mute));
     transmitted = transmitted || sent;
     if (sent) {
@@ -1115,20 +947,17 @@ void GenSAMHub::set_group_mute(bool mute) {
   }
 
   current_mute_ = mute;
-  for (auto &kv : monitors_) {
-    kv.second.mute = mute;
-    if (kv.second.binding != nullptr && kv.second.binding->mute_switch != nullptr) {
-      kv.second.binding->mute_switch->publish_state(mute);
-    }
+  for (auto &kv : registry_.monitors()) {
+    registry_.set_mute(kv.second, mute);
   }
 
-  ESP_LOGI(TAG, "Set system mute: %s across %zu monitors", YESNO(mute), monitors_.size());
+  ESP_LOGI(TAG, "Set system mute: %s across %zu monitors", YESNO(mute), registry_.size());
   this->notify_state_callbacks_();
 }
 
 void GenSAMHub::set_monitor_mute(uint8_t address, bool mute) {
-  auto it = monitors_.find(address);
-  if (it == monitors_.end()) {
+  GenSAMMonitor *mon = registry_.find(address);
+  if (mon == nullptr) {
     ESP_LOGW(TAG, "Cannot mute monitor 0x%02X: not found in registry", address);
     return;
   }
@@ -1143,37 +972,24 @@ void GenSAMHub::set_monitor_mute(uint8_t address, bool mute) {
     return;
   }
 
-  it->second.mute = mute;
-  if (it->second.binding != nullptr && it->second.binding->mute_switch != nullptr) {
-    it->second.binding->mute_switch->publish_state(mute);
-  }
-
+  registry_.set_mute(*mon, mute);
   this->evaluate_system_mute_();
 
   ESP_LOGI(TAG, "Set monitor 0x%02X mute: %s", address, YESNO(mute));
 }
 
 void GenSAMHub::set_monitor_mute_by_serial(const std::string &serial_or_id, bool mute) {
-  for (auto &kv : monitors_) {
-    GenSAMMonitor &mon = kv.second;
-    bool matches = (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-                    std::to_string(mon.unique_id) == serial_or_id);
-    if (!matches && mon.binding != nullptr) {
-      matches = (strcasecmp(mon.binding->serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-                 std::to_string(mon.binding->unique_id) == serial_or_id ||
-                 strcasecmp(mon.binding->name.c_str(), serial_or_id.c_str()) == 0);
-    }
-    if (matches) {
-      this->set_monitor_mute(mon.address, mute);
-      return;
-    }
+  GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
+  if (mon == nullptr) {
+    ESP_LOGW(TAG, "Cannot mute speaker '%s': monitor not currently discovered on bus", serial_or_id.c_str());
+    return;
   }
-  ESP_LOGW(TAG, "Cannot mute speaker '%s': monitor not currently discovered on bus", serial_or_id.c_str());
+  this->set_monitor_mute(mon->address, mute);
 }
 
 void GenSAMHub::set_monitor_crossover(uint8_t address, uint16_t freq_hz) {
-  auto it = monitors_.find(address);
-  if (it == monitors_.end()) {
+  GenSAMMonitor *mon = registry_.find(address);
+  if (mon == nullptr) {
     ESP_LOGW(TAG, "Cannot set crossover for unknown monitor 0x%02X", address);
     return;
   }
@@ -1188,45 +1004,26 @@ void GenSAMHub::set_monitor_crossover(uint8_t address, uint16_t freq_hz) {
     return;
   }
 
-  if (it->second.binding != nullptr) {
-    it->second.binding->crossover_freq = freq_hz;
-    it->second.binding->crossover_configured = true;
-    if (it->second.binding->crossover_number != nullptr) {
-      it->second.binding->crossover_number->publish_state(freq_hz);
-    }
-  }
+  registry_.set_crossover(*mon, freq_hz);
 
   ESP_LOGI(TAG, "Set monitor 0x%02X crossover frequency: %u Hz", address, freq_hz);
 }
 
 void GenSAMHub::set_monitor_crossover_by_serial(const std::string &serial_or_id, uint16_t freq_hz) {
-  for (auto &b : bindings_) {
-    bool matches = (strcasecmp(b.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-                    std::to_string(b.unique_id) == serial_or_id ||
-                    strcasecmp(b.name.c_str(), serial_or_id.c_str()) == 0);
-    if (matches) {
-      b.crossover_freq = freq_hz;
-      b.crossover_configured = true;
-      break;
-    }
+  // Store on the binding first, so the setting survives a monitor that is not (yet) on the bus.
+  GenSAMMonitorBinding *binding = registry_.find_binding_by_serial_or_id(serial_or_id);
+  if (binding != nullptr) {
+    binding->crossover_freq = freq_hz;
+    binding->crossover_configured = true;
   }
 
-  for (auto &kv : monitors_) {
-    GenSAMMonitor &mon = kv.second;
-    bool matches = (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-                    std::to_string(mon.unique_id) == serial_or_id);
-    if (!matches && mon.binding != nullptr) {
-      matches = (strcasecmp(mon.binding->serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-                 std::to_string(mon.binding->unique_id) == serial_or_id ||
-                 strcasecmp(mon.binding->name.c_str(), serial_or_id.c_str()) == 0);
-    }
-    if (matches) {
-      this->set_monitor_crossover(mon.address, freq_hz);
-      return;
-    }
+  GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
+  if (mon == nullptr) {
+    ESP_LOGW(TAG, "Crossover set for '%s' to %u Hz (stored; monitor not currently discovered on bus)",
+             serial_or_id.c_str(), freq_hz);
+    return;
   }
-  ESP_LOGW(TAG, "Crossover set for '%s' to %u Hz (stored; monitor not currently discovered on bus)",
-           serial_or_id.c_str(), freq_hz);
+  this->set_monitor_crossover(mon->address, freq_hz);
 }
 
 void GenSAMHub::send_audio_source_frame(uint8_t address, uint8_t source, uint8_t channel, bool is_subwoofer) {
@@ -1280,8 +1077,8 @@ void GenSAMHub::set_global_source(uint8_t source) {
     delay(30);  // Slew time for monitors' internal DSP volume ramp down
   }
 
-  ESP_LOGI(TAG, "Setting global audio source to %s across %u monitor(s)...", name, (unsigned)monitors_.size());
-  for (const auto &kv : monitors_) {
+  ESP_LOGI(TAG, "Setting global audio source to %s across %u monitor(s)...", name, (unsigned)registry_.size());
+  for (const auto &kv : registry_.monitors()) {
     const GenSAMMonitor &mon = kv.second;
     uint8_t ch = AES3_CHANNEL_A;
     if (mon.binding != nullptr) {
@@ -1313,17 +1110,13 @@ void GenSAMHub::set_global_source_by_name(const std::string &source_name) {
 // TODO: When the system is actively playing digital audio, this function blocks ~130 ms
 //       (silence ramp-down + PLL settling + volume restore).  Same consideration as set_global_source().
 void GenSAMHub::set_monitor_aes3_channel(uint8_t address, uint8_t channel) {
-  auto it = monitors_.find(address);
-  if (it != monitors_.end() && it->second.binding != nullptr) {
-    it->second.binding->aes3_channel = channel;
-    it->second.binding->aes3_channel_configured = true;
-    if (it->second.binding->aes3_channel_select != nullptr) {
-      it->second.binding->aes3_channel_select->publish_state(aes3_channel_to_str(channel));
-    }
+  GenSAMMonitor *mon = registry_.find(address);
+  if (mon != nullptr) {
+    registry_.set_aes3_channel(*mon, channel);
   }
 
   if (audio_source_configured_ && current_audio_source_ == SOURCE_DIGITAL_AES3) {
-    bool is_sub = (it != monitors_.end()) ? it->second.is_subwoofer() : false;
+    bool is_sub = (mon != nullptr) ? mon->is_subwoofer() : false;
     bool active = (!current_standby_ && can_transmit());
     if (active) {
       this->silence_system_volume_();
@@ -1340,36 +1133,19 @@ void GenSAMHub::set_monitor_aes3_channel(uint8_t address, uint8_t channel) {
 }
 
 void GenSAMHub::set_monitor_aes3_channel_by_serial(const std::string &serial_or_id, uint8_t channel) {
-  for (auto &b : bindings_) {
-    bool matches = (strcasecmp(b.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-                    std::to_string(b.unique_id) == serial_or_id ||
-                    strcasecmp(b.name.c_str(), serial_or_id.c_str()) == 0);
-    if (matches) {
-      b.aes3_channel = channel;
-      b.aes3_channel_configured = true;
-      if (b.aes3_channel_select != nullptr) {
-        b.aes3_channel_select->publish_state(aes3_channel_to_str(channel));
-      }
-      break;
-    }
+  // Store on the binding first, so the setting survives a monitor that is not (yet) on the bus.
+  GenSAMMonitorBinding *binding = registry_.find_binding_by_serial_or_id(serial_or_id);
+  if (binding != nullptr) {
+    registry_.set_binding_aes3_channel(*binding, channel);
   }
 
-  for (auto &kv : monitors_) {
-    GenSAMMonitor &mon = kv.second;
-    bool matches = (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-                    std::to_string(mon.unique_id) == serial_or_id);
-    if (!matches && mon.binding != nullptr) {
-      matches = (strcasecmp(mon.binding->serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-                 std::to_string(mon.binding->unique_id) == serial_or_id ||
-                 strcasecmp(mon.binding->name.c_str(), serial_or_id.c_str()) == 0);
-    }
-    if (matches) {
-      this->set_monitor_aes3_channel(mon.address, channel);
-      return;
-    }
+  GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
+  if (mon == nullptr) {
+    ESP_LOGW(TAG, "AES3 channel set for '%s' to 0x%02X (stored; monitor not currently discovered on bus)",
+             serial_or_id.c_str(), channel);
+    return;
   }
-  ESP_LOGW(TAG, "AES3 channel set for '%s' to 0x%02X (stored; monitor not currently discovered on bus)",
-           serial_or_id.c_str(), channel);
+  this->set_monitor_aes3_channel(mon->address, channel);
 }
 
 void GenSAMHub::set_monitor_aes3_channel_by_name(const std::string &serial_or_id, const std::string &channel_name) {
@@ -1400,14 +1176,7 @@ void GenSAMHub::set_standby(bool standby) {
   if (standby) {
     this->send_standby();
     // In standby, stop polling loop and mark monitors offline
-    for (auto &kv : monitors_) {
-      if (kv.second.online) {
-        kv.second.online = false;
-        if (kv.second.binding != nullptr && kv.second.binding->online_sensor != nullptr) {
-          kv.second.binding->online_sensor->publish_state(false);
-        }
-      }
-    }
+    registry_.mark_all_offline();
     this->evaluate_system_mute_();
     race_state_ = RaceState::IDLE;
   } else {
@@ -1418,26 +1187,17 @@ void GenSAMHub::set_standby(bool standby) {
 }
 
 void GenSAMHub::identify_monitor_by_serial(const std::string &serial_or_id, uint32_t duration_ms) {
-  for (auto &kv : monitors_) {
-    GenSAMMonitor &mon = kv.second;
-    bool matches = (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-                    std::to_string(mon.unique_id) == serial_or_id);
-    if (!matches && mon.binding != nullptr) {
-      matches = (strcasecmp(mon.binding->serial_number.c_str(), serial_or_id.c_str()) == 0 ||
-                 std::to_string(mon.binding->unique_id) == serial_or_id ||
-                 strcasecmp(mon.binding->name.c_str(), serial_or_id.c_str()) == 0);
-    }
-    if (matches) {
-      this->identify_monitor_by_address(mon.address, duration_ms);
-      return;
-    }
+  GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
+  if (mon == nullptr) {
+    ESP_LOGW(TAG, "Cannot identify speaker '%s': monitor not currently discovered on bus", serial_or_id.c_str());
+    return;
   }
-  ESP_LOGW(TAG, "Cannot identify speaker '%s': monitor not currently discovered on bus", serial_or_id.c_str());
+  this->identify_monitor_by_address(mon->address, duration_ms);
 }
 
 void GenSAMHub::identify_monitor_by_address(uint8_t address, uint32_t duration_ms) {
-  auto it = monitors_.find(address);
-  if (it == monitors_.end()) {
+  GenSAMMonitor *mon = registry_.find(address);
+  if (mon == nullptr) {
     ESP_LOGW(TAG, "Cannot identify monitor 0x%02X: not in registry", address);
     return;
   }
@@ -1445,11 +1205,11 @@ void GenSAMHub::identify_monitor_by_address(uint8_t address, uint32_t duration_m
     ESP_LOGW(TAG, "Cannot identify monitor: bus not available for TX");
     return;
   }
-  it->second.identify_end_ms = millis() + duration_ms;
-  Frame f = make_bypass(address, it->second.mute, /*pulsing=*/true);
+  mon->identify_end_ms = millis() + duration_ms;
+  Frame f = make_bypass(address, mon->mute, /*pulsing=*/true);
   this->send_frame_twice(f);
   ESP_LOGI(TAG, "Identify activated on monitor 0x%02X (%s) for %u ms (val 0x%02X)",
-           address, it->second.model.c_str(), (unsigned)duration_ms, f.payload[0]);
+           address, mon->model.c_str(), (unsigned)duration_ms, f.payload[0]);
 }
 
 void GenSAMHub::rediscover_monitors() {
@@ -1465,16 +1225,10 @@ void GenSAMHub::rediscover_monitors() {
   ESP_LOGI(TAG, "Resetting monitor table and initiating RACE discovery...");
 
   // Mark all currently known monitors offline before clearing cache so HA state does not remain stale.
-  for (auto &kv : monitors_) {
-    kv.second.online = false;
-    kv.second.last_seen_ms = 0;
-    if (kv.second.binding != nullptr && kv.second.binding->online_sensor != nullptr) {
-      kv.second.binding->online_sensor->publish_state(false);
-    }
-  }
+  registry_.invalidate_all();
   this->evaluate_system_mute_();
 
-  monitors_.clear();
+  registry_.clear();
   poll_addrs_.clear();
   current_poll_index_ = 0;
   current_query_addr_ = 0;
@@ -1501,7 +1255,7 @@ void GenSAMHub::loop() {
 
   // Check if any monitor identify pulse timer has expired
   uint32_t now = millis();
-  for (auto &kv : monitors_) {
+  for (auto &kv : registry_.monitors()) {
     if (kv.second.identify_end_ms != 0 && now >= kv.second.identify_end_ms) {
       kv.second.identify_end_ms = 0;
       if (can_transmit()) {
@@ -1523,7 +1277,7 @@ void GenSAMHub::loop() {
                (unsigned long)uart9_.rx_framing_err_count(),
                (unsigned long)parser_.invalid_count(), (unsigned long)parser_.crc_mismatch_count(),
                glm_active_ ? " [GLM ACTIVE - YIELDING]" : "",
-               (unsigned)monitors_.size());
+               (unsigned)registry_.size());
     }
   }
 }
