@@ -49,7 +49,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/number/number.h"
-#include "gensam_hub.h"
+#include "hub.h"
 #include "const.h"
 
 #include <cmath>

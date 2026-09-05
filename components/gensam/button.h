@@ -21,7 +21,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/button/button.h"
-#include "gensam_hub.h"
+#include "hub.h"
 
 #include <string>
 

@@ -1,8 +1,9 @@
-/// @file gensam_hub.cpp
+/// @file hub.cpp
 /// @brief ESPHome hub component for native Genelec SAM RS-485 communication.
-/// See gensam_hub.h for architectural design rationale and complete API documentation.
+/// See hub.h for architectural design rationale and complete API documentation.
 
-#include "gensam_hub.h"
+#include "hub.h"
+#include "commands.h"
 #include "crc.h"
 #include "esphome/core/log.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
@@ -198,6 +199,14 @@ bool GenSAMHub::send_frame(const Frame &frame) {
   return true;
 }
 
+bool GenSAMHub::send_frame_twice(const Frame &frame) {
+  bool sent = this->send_frame(frame);
+  if (sent) {
+    delayMicroseconds(250);
+  }
+  return this->send_frame(frame) || sent;
+}
+
 GenSAMMonitor *GenSAMHub::get_monitor(uint8_t address) {
   auto it = monitors_.find(address);
   if (it != monitors_.end()) {
@@ -221,18 +230,9 @@ void GenSAMHub::send_wakeup() {
   ESP_LOGI(TAG, "Sending GLM wakeup broadcast sequence to monitors...");
 
   for (int i = 0; i < 3; i++) {
-    Frame w1;
-    w1.address = BROADCAST_ADDRESS;
-    w1.command = CMD_WAKEUP;  // 0x3A
-    w1.payload = {WAKEUP_OP_POWER, WAKEUP_VAL_ON_1};  // {0x03, 0x7F}
-    this->send_frame(w1);
+    this->send_frame(make_wakeup_step(WAKEUP_OP_POWER, WAKEUP_VAL_ON_1));  // {0x03, 0x7F}
     delay(5);
-
-    Frame w2;
-    w2.address = BROADCAST_ADDRESS;
-    w2.command = CMD_WAKEUP;  // 0x3A
-    w2.payload = {WAKEUP_OP_POWER, WAKEUP_VAL_ON_2};  // {0x03, 0x01}
-    this->send_frame(w2);
+    this->send_frame(make_wakeup_step(WAKEUP_OP_POWER, WAKEUP_VAL_ON_2));  // {0x03, 0x01}
     delay(10);
   }
 }
@@ -244,22 +244,14 @@ void GenSAMHub::send_standby() {
   ESP_LOGI(TAG, "Sending GLM standby broadcast sequence to monitors...");
 
   for (int i = 0; i < 2; i++) {
-    Frame s1;
-    s1.address = BROADCAST_ADDRESS;
-    s1.command = CMD_WAKEUP;  // 0x3A
-    s1.payload = {WAKEUP_OP_POWER, WAKEUP_VAL_STANDBY_1};  // {0x03, 0x02}
-    this->send_frame(s1);
+    this->send_frame(make_wakeup_step(WAKEUP_OP_POWER, WAKEUP_VAL_STANDBY_1));  // {0x03, 0x02}
     delay(20);
   }
 
   delay(80);
 
   for (int i = 0; i < 2; i++) {
-    Frame s2;
-    s2.address = BROADCAST_ADDRESS;
-    s2.command = CMD_WAKEUP;  // 0x3A
-    s2.payload = {WAKEUP_OP_POWER, WAKEUP_VAL_STANDBY_2};  // {0x03, 0x00}
-    this->send_frame(s2);
+    this->send_frame(make_wakeup_step(WAKEUP_OP_POWER, WAKEUP_VAL_STANDBY_2));  // {0x03, 0x00}
     delay(20);
   }
 }
@@ -285,10 +277,7 @@ void GenSAMHub::start_race_discovery() {
   race_step_time_ = millis();
 
   // Broadcast initial RACE discovery ping (0xFF 0xFE)
-  Frame ping;
-  ping.address = BROADCAST_ADDRESS;
-  ping.command = CMD_DISCOVERY;
-  this->send_frame(ping);
+  this->send_frame(make_discovery_ping());
 }
 
 void GenSAMHub::complete_rid_assignment_(uint8_t address) {
@@ -311,10 +300,7 @@ void GenSAMHub::complete_rid_assignment_(uint8_t address) {
   delayMicroseconds(300);
 
   // Send next RACE ping
-  Frame ping;
-  ping.address = BROADCAST_ADDRESS;
-  ping.command = CMD_DISCOVERY;
-  this->send_frame(ping);
+  this->send_frame(make_discovery_ping());
   race_state_ = RaceState::RACE_PING_SENT;
   race_step_time_ = now;
 }
@@ -339,12 +325,7 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
         delayMicroseconds(300);
 
         // Assign address to this monitor via CMD_SET_RID to multicast (0xF0)
-        Frame set_rid;
-        set_rid.address = MULTICAST_ADDRESS;
-        set_rid.command = CMD_SET_RID;
-        set_rid.payload = current_racing_bytes_;
-        set_rid.payload.push_back(next_assign_addr_);
-        this->send_frame(set_rid);
+        this->send_frame(make_set_rid(current_racing_bytes_, next_assign_addr_));
         return;
       }
     } else if (race_state_ == RaceState::RACE_SET_RID_SENT) {
@@ -420,8 +401,8 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
   if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
     last_queried_addr_ = frame.address;
     last_queried_cmd_ = frame.command;
-  } else if ((frame.address == MULTICAST_ADDRESS || frame.address == 0xF0) &&
-             frame.command == CMD_SET_RID && frame.payload.size() == 4) {
+  } else if (frame.address == MULTICAST_ADDRESS && frame.command == CMD_SET_RID &&
+             frame.payload.size() == 4) {
     uint8_t addr = frame.payload[3];
     GenSAMMonitor &mon = monitors_[addr];
     mon.address = addr;
@@ -651,10 +632,7 @@ void GenSAMHub::update_race_state_machine_() {
           ESP_LOGI(TAG, "RACE discovery complete. Total monitors found: %u", (unsigned)monitors_.size());
 
           // Transition all monitors from discovery to online mode
-          Frame stay_online;
-          stay_online.address = BROADCAST_ADDRESS;
-          stay_online.command = CMD_STAY_ONLINE;
-          this->send_frame(stay_online);
+          this->send_frame(make_stay_online());
 
           // Populate poll_addrs_ with discovered monitor addresses
           poll_addrs_.clear();
@@ -681,12 +659,7 @@ void GenSAMHub::update_race_state_machine_() {
           ESP_LOGW(TAG, "Timeout waiting for RID ACK for address 0x%02X (attempt %u/3). Retrying CMD_SET_RID...",
                    next_assign_addr_, (unsigned)rid_retries_);
           // Re-send CMD_SET_RID
-          Frame set_rid;
-          set_rid.address = MULTICAST_ADDRESS;
-          set_rid.command = CMD_SET_RID;
-          set_rid.payload = current_racing_bytes_;
-          set_rid.payload.push_back(next_assign_addr_);
-          this->send_frame(set_rid);
+          this->send_frame(make_set_rid(current_racing_bytes_, next_assign_addr_));
           race_step_time_ = now;
         } else {
           // Retries exhausted. Monitor may have adopted the address despite lost ACK.
@@ -715,13 +688,7 @@ void GenSAMHub::update_race_state_machine_() {
         if (current_poll_index_ < poll_addrs_.size()) {
           current_query_addr_ = poll_addrs_[current_poll_index_];
           race_step_time_ = now;
-          Frame q;
-          q.address = current_query_addr_;
-          q.command = current_query_cmd_;
-          if (current_query_cmd_ == CMD_BAR_CODE) {
-            q.payload = {0x01};
-          }
-          this->send_frame(q);
+          this->send_frame(make_query(current_query_addr_, current_query_cmd_));
           return;
         }
 
@@ -774,13 +741,9 @@ void GenSAMHub::update_race_state_machine_() {
               if (configured_anything) {
                 delay(10);
               }
-              Frame xo_frame;
-              xo_frame.address = addr;
-              xo_frame.command = CMD_BASS_MANAGE_XO;
               uint16_t freq = it->second.binding->crossover_freq;
-              xo_frame.payload = {static_cast<uint8_t>((freq >> 8) & 0xFF), static_cast<uint8_t>(freq & 0xFF)};
               ESP_LOGI(TAG, "Configuring bass management crossover frequency for monitor 0x%02X: %u Hz", addr, freq);
-              this->send_frame(xo_frame);
+              this->send_frame(make_crossover(addr, freq));
               configured_anything = true;
             }
 
@@ -797,20 +760,9 @@ void GenSAMHub::update_race_state_machine_() {
         ESP_LOGI(TAG, "All discovered monitors configured. Entering live telemetry polling loop.");
 
         // Broadcast active volume and stay_online heartbeat to establish monitor gain
-        uint32_t int24 = volume_db_to_int24(current_volume_db_);
-        uint8_t pld[3];
-        encode_int24(int24, pld);
-        Frame vol_frame;
-        vol_frame.address = BROADCAST_ADDRESS;
-        vol_frame.command = CMD_VOLUME;
-        vol_frame.payload = {pld[0], pld[1], pld[2]};
-        this->send_frame(vol_frame);
+        this->send_frame(make_broadcast_volume_db(current_volume_db_));
         delayMicroseconds(250);
-
-        Frame stay_online;
-        stay_online.address = BROADCAST_ADDRESS;
-        stay_online.command = CMD_STAY_ONLINE;
-        this->send_frame(stay_online);
+        this->send_frame(make_stay_online());
 
         race_state_ = RaceState::POLLING_MONITORS;
         last_poll_cycle_time_ = now - poll_interval_ms_;  // Start polling immediately
@@ -837,21 +789,11 @@ void GenSAMHub::update_race_state_machine_() {
           (now - last_poll_cycle_time_ >= poll_interval_ms_)) {
         // At the start of each polling cycle, broadcast active volume and stay_online heartbeat
         if (current_poll_index_ == 0) {
-          uint32_t int24 = volume_db_to_int24(current_volume_db_);
-          uint8_t pld[3];
-          encode_int24(int24, pld);
-          Frame vf;
-          vf.address = BROADCAST_ADDRESS;
-          vf.command = CMD_VOLUME;
-          vf.payload = {pld[0], pld[1], pld[2]};
-          this->send_frame(vf);
+          this->send_frame(make_broadcast_volume_db(current_volume_db_));
           delayMicroseconds(250);
 
           if (!current_standby_) {
-            Frame stay_online;
-            stay_online.address = BROADCAST_ADDRESS;
-            stay_online.command = CMD_STAY_ONLINE;
-            this->send_frame(stay_online);
+            this->send_frame(make_stay_online());
             delayMicroseconds(300);
           }
         }
@@ -869,10 +811,7 @@ void GenSAMHub::update_race_state_machine_() {
           current_query_addr_ = poll_addrs_[current_poll_index_++];
           race_step_time_ = now;
           last_poll_step_time_ = now;
-          Frame poll_frame;
-          poll_frame.address = current_query_addr_;
-          poll_frame.command = CMD_QUERY_STATUS;
-          this->send_frame(poll_frame);
+          this->send_frame(make_query(current_query_addr_, CMD_QUERY_STATUS));
         } else {
           current_poll_index_ = 0;
           last_poll_cycle_time_ = now;
@@ -1138,23 +1077,16 @@ void GenSAMHub::set_volume_db(float db) {
     ESP_LOGW(TAG, "Cannot send volume command: Bus is not available for TX");
     return;
   }
-  uint32_t int24 = volume_db_to_int24(target_db);
-  uint8_t pld[3];
-  encode_int24(int24, pld);
-
   // Broadcast master volume (0xFF) to all monitors on bus
-  Frame f;
-  f.address = BROADCAST_ADDRESS;
-  f.command = CMD_VOLUME;
-  f.payload = {pld[0], pld[1], pld[2]};
-  if (!this->send_frame(f)) {
+  if (!this->send_frame(make_broadcast_volume_db(target_db))) {
     ESP_LOGW(TAG, "Volume command was not transmitted; keeping previous state");
     return;
   }
 
   current_volume_db_ = target_db;
 
-  ESP_LOGI(TAG, "Set system volume: %.1f dB (int24=%u)", current_volume_db_, (unsigned)int24);
+  ESP_LOGI(TAG, "Set system volume: %.1f dB (int24=%u)", current_volume_db_,
+           (unsigned)volume_db_to_int24(target_db));
   this->notify_state_callbacks_();
 }
 
@@ -1163,16 +1095,11 @@ void GenSAMHub::set_group_mute(bool mute) {
     ESP_LOGW(TAG, "Cannot send mute command: Bus is not available for TX");
     return;
   }
-  uint8_t val = mute ? (BYPASS_MUTE_MASK | (LED_RED << 1)) : (LED_OFF << 1);
   bool transmitted = false;
 
   // 1. Unicast CMD_BYPASS to each discovered monitor individually (as per GLM protocol)
   for (const auto &kv : monitors_) {
-    Frame f;
-    f.address = kv.first;
-    f.command = CMD_BYPASS;
-    f.payload = {val};
-    bool sent = this->send_frame(f);
+    bool sent = this->send_frame(make_bypass(kv.first, mute));
     transmitted = transmitted || sent;
     if (sent) {
       delayMicroseconds(250);
@@ -1180,11 +1107,7 @@ void GenSAMHub::set_group_mute(bool mute) {
   }
 
   // 2. Also send to BROADCAST_ADDRESS (0xFF)
-  Frame fb;
-  fb.address = BROADCAST_ADDRESS;
-  fb.command = CMD_BYPASS;
-  fb.payload = {val};
-  transmitted = this->send_frame(fb) || transmitted;
+  transmitted = this->send_frame(make_bypass(BROADCAST_ADDRESS, mute)) || transmitted;
 
   if (!transmitted) {
     ESP_LOGW(TAG, "Mute command was not transmitted; keeping previous state");
@@ -1215,18 +1138,7 @@ void GenSAMHub::set_monitor_mute(uint8_t address, bool mute) {
     return;
   }
 
-  uint8_t val = mute ? (BYPASS_MUTE_MASK | (LED_RED << 1)) : (LED_OFF << 1);
-  Frame f;
-  f.address = address;
-  f.command = CMD_BYPASS;
-  f.payload = {val};
-  bool sent = this->send_frame(f);
-  if (sent) {
-    delayMicroseconds(250);
-  }
-  sent = this->send_frame(f) || sent;
-
-  if (!sent) {
+  if (!this->send_frame_twice(make_bypass(address, mute))) {
     ESP_LOGW(TAG, "Mute command to 0x%02X was not transmitted; keeping previous state", address);
     return;
   }
@@ -1271,17 +1183,7 @@ void GenSAMHub::set_monitor_crossover(uint8_t address, uint16_t freq_hz) {
     return;
   }
 
-  Frame f;
-  f.address = address;
-  f.command = CMD_BASS_MANAGE_XO;
-  f.payload = {static_cast<uint8_t>((freq_hz >> 8) & 0xFF), static_cast<uint8_t>(freq_hz & 0xFF)};
-  bool sent = this->send_frame(f);
-  if (sent) {
-    delayMicroseconds(250);
-  }
-  sent = this->send_frame(f) || sent;
-
-  if (!sent) {
+  if (!this->send_frame_twice(make_crossover(address, freq_hz))) {
     ESP_LOGW(TAG, "Crossover command to 0x%02X was not transmitted", address);
     return;
   }
@@ -1332,48 +1234,21 @@ void GenSAMHub::send_audio_source_frame(uint8_t address, uint8_t source, uint8_t
     return;
   }
   // Primary frame (Input 0)
-  Frame f0;
-  f0.address = address;
-  f0.command = CMD_SELECT_AUDIO_SOURCE;
-  if (source == SOURCE_DIGITAL_AES3) {
-    f0.payload = {0x00, SOURCE_DIGITAL_AES3, 0x00, channel};
-  } else {
-    f0.payload = {0x00, SOURCE_ANALOG, 0x02, 0x00};
-  }
-  this->send_frame(f0);
+  this->send_frame(make_audio_source(address, 0x00, source, channel));
 
   // Subwoofers (7xxx series) require a secondary frame for Input 1
   if (is_subwoofer) {
     delay(5);
-    Frame f1;
-    f1.address = address;
-    f1.command = CMD_SELECT_AUDIO_SOURCE;
-    if (source == SOURCE_DIGITAL_AES3) {
-      f1.payload = {0x01, SOURCE_DIGITAL_AES3, 0x00, 0x00};
-    } else {
-      f1.payload = {0x01, SOURCE_ANALOG, 0x01, 0x00};
-    }
-    this->send_frame(f1);
+    this->send_frame(make_audio_source(address, 0x01, source, channel));
   }
 }
 
 void GenSAMHub::silence_system_volume_() {
-  Frame f;
-  f.address = BROADCAST_ADDRESS;
-  f.command = CMD_VOLUME;
-  f.payload = {VOLUME_PAYLOAD_SILENCE[0], VOLUME_PAYLOAD_SILENCE[1], VOLUME_PAYLOAD_SILENCE[2]};
-  this->send_frame(f);
+  this->send_frame(make_broadcast_volume_silence());
 }
 
 void GenSAMHub::restore_system_volume_() {
-  uint32_t int24 = volume_db_to_int24(current_volume_db_);
-  uint8_t pld[3];
-  encode_int24(int24, pld);
-  Frame f;
-  f.address = BROADCAST_ADDRESS;
-  f.command = CMD_VOLUME;
-  f.payload = {pld[0], pld[1], pld[2]};
-  this->send_frame(f);
+  this->send_frame(make_broadcast_volume_db(current_volume_db_));
 }
 
 // TODO: This function blocks the main loop for ~130 ms + 5 ms per monitor (silence ramp-down,
@@ -1571,16 +1446,10 @@ void GenSAMHub::identify_monitor_by_address(uint8_t address, uint32_t duration_m
     return;
   }
   it->second.identify_end_ms = millis() + duration_ms;
-  uint8_t val = (it->second.mute ? BYPASS_MUTE_MASK : 0x00) | (LED_OFF << 1) | BYPASS_LED_PULSING_MASK;
-  Frame f;
-  f.address = address;
-  f.command = CMD_BYPASS;
-  f.payload = {val};
-  this->send_frame(f);
-  delayMicroseconds(250);
-  this->send_frame(f);
+  Frame f = make_bypass(address, it->second.mute, /*pulsing=*/true);
+  this->send_frame_twice(f);
   ESP_LOGI(TAG, "Identify activated on monitor 0x%02X (%s) for %u ms (val 0x%02X)",
-           address, it->second.model.c_str(), (unsigned)duration_ms, val);
+           address, it->second.model.c_str(), (unsigned)duration_ms, f.payload[0]);
 }
 
 void GenSAMHub::rediscover_monitors() {
@@ -1636,16 +1505,10 @@ void GenSAMHub::loop() {
     if (kv.second.identify_end_ms != 0 && now >= kv.second.identify_end_ms) {
       kv.second.identify_end_ms = 0;
       if (can_transmit()) {
-        uint8_t val = kv.second.mute ? (BYPASS_MUTE_MASK | (LED_RED << 1)) : (LED_OFF << 1);
-        Frame f;
-        f.address = kv.first;
-        f.command = CMD_BYPASS;
-        f.payload = {val};
-        this->send_frame(f);
-        delayMicroseconds(250);
-        this->send_frame(f);
+        Frame f = make_bypass(kv.first, kv.second.mute);
+        this->send_frame_twice(f);
         ESP_LOGI(TAG, "Identify completed on monitor 0x%02X (%s); restored steady LED (val 0x%02X)",
-                 kv.first, kv.second.model.c_str(), val);
+                 kv.first, kv.second.model.c_str(), f.payload[0]);
       }
     }
   }
