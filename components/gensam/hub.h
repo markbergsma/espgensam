@@ -350,8 +350,48 @@ class GenSAMHub : public Component {
   /// @brief Check whether the external GLM master inactivity timer has expired to reclaim bus control.
   void check_glm_cooldown_();
 
+  // --- RACE discovery and telemetry polling (implemented in race.cpp) ---------------
+  //
+  // The phases and protocol are described in section 2 of this file's header comment.
+  // Each phase is a non-blocking step function called once per loop() while its state is
+  // current; it either waits, times out, or advances race_state_.  Every step is driven by
+  // race_step_time_ against a named timeout, and the reply that ends a step arrives
+  // separately through handle_active_reply_.
+
   /// @brief Advance the active RACE discovery and telemetry polling state machine.
   void update_race_state_machine_();
+
+  /// @brief WAKEUP_SENT: wait for monitor DSPs to boot, then start the discovery race.
+  void race_step_wakeup_(uint32_t now);
+
+  /// @brief RACE_PING_SENT: on silence, conclude discovery and move to device interrogation.
+  void race_step_ping_(uint32_t now);
+
+  /// @brief RACE_SET_RID_SENT: retry the address assignment, or accept it unacknowledged.
+  void race_step_set_rid_(uint32_t now);
+
+  /// @brief QUERYING_DEVICES: walk the discovered monitors asking model, firmware, and serial.
+  void race_step_querying_(uint32_t now);
+
+  /// @brief CONFIGURING_DEVICES: walk the discovered monitors applying their configuration.
+  void race_step_configuring_(uint32_t now);
+
+  /// @brief POLLING_MONITORS: round-robin telemetry polling with a per-cycle keep-alive.
+  void race_step_polling_(uint32_t now);
+
+  /// @brief IDLE: periodically retry discovery while no monitors are registered.
+  void race_step_idle_(uint32_t now);
+
+  /// @brief Transmit one monitor's audio source and crossover configuration.
+  /// @param mon The monitor to configure.
+  /// @return True if any configuration frame was sent, false if the monitor needed nothing.
+  bool configure_monitor_(const GenSAMMonitor &mon);
+
+  /// @brief Broadcast the active volume followed by a STAY_ONLINE keep-alive.
+  ///
+  /// Sent when entering the polling loop and at the start of every polling cycle, to
+  /// establish monitor gain and refresh the volatile RACE address leases.
+  void broadcast_volume_and_keepalive_();
 
   /// @brief Process an incoming frame through the active state machine or passive snooping registry.
   /// @param frame The decoded frame to handle.
