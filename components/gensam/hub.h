@@ -1,6 +1,6 @@
 #pragma once
 
-/// @file gensam_hub.h
+/// @file hub.h
 /// @brief ESPHome hub component for native Genelec SAM RS-485 communication.
 ///
 /// ===================================================================================
@@ -304,6 +304,14 @@ class GenSAMHub : public Component {
   /// @param frame The frame to serialize and transmit.
   /// @return True if transmission was accepted, false if blocked by arbitration or uninitialized.
   bool send_frame(const Frame &frame);
+
+  /// @brief Send a frame twice, separated by a 250 us transceiver turnaround gap.
+  ///
+  /// Genelec monitors occasionally miss a single unicast control frame during RS-485
+  /// direction turnaround, so mute, crossover, and identify commands are sent twice.
+  /// @param frame The frame to serialize and transmit.
+  /// @return True if at least one of the two transmissions was accepted.
+  bool send_frame_twice(const Frame &frame);
 
   /// @brief Send raw 9-bit characters onto the bus (for testing and low-level diagnostics).
   /// @param raw_chars Vector of characters to transmit.

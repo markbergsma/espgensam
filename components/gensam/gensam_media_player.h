@@ -29,7 +29,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/media_player/media_player.h"
-#include "gensam_hub.h"
+#include "hub.h"
 
 namespace esphome {
 namespace gensam {

@@ -23,7 +23,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/switch/switch.h"
-#include "gensam_hub.h"
+#include "hub.h"
 
 #include <string>
 
