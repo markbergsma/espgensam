@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import sensor, binary_sensor, button, text_sensor, switch, number
+from esphome.components import sensor, binary_sensor, button, text_sensor, switch, number, select
 from esphome.const import (
     CONF_ID,
     CONF_NAME,
@@ -21,7 +21,7 @@ from esphome.const import (
     CONF_DISABLED_BY_DEFAULT,
 )
 
-AUTO_LOAD = ["sensor", "binary_sensor", "button", "text_sensor", "switch", "number"]
+AUTO_LOAD = ["sensor", "binary_sensor", "button", "text_sensor", "switch", "number", "select"]
 MULTI_CONF = True
 
 CONF_DE_PIN = "de_pin"
@@ -59,6 +59,9 @@ CONF_GLM_ADAPTER_ACTIVE = "glm_adapter_active"
 CONF_REDISCOVER_BUTTON = "rediscover_button"
 CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY = "bass_management_crossover_frequency"
 CONF_VOLUME_DB = "volume_db"
+CONF_AUDIO_SOURCE = "audio_source"
+CONF_AES3_CHANNEL = "aes3_channel"
+CONF_INITIAL_AES3_CHANNEL = "initial_aes3_channel"
 
 gensam_ns = cg.esphome_ns.namespace("gensam")
 GenSAMHub = gensam_ns.class_("GenSAMHub", cg.Component)
@@ -67,7 +70,40 @@ GenSAMIdentifyButton = gensam_ns.class_("GenSAMIdentifyButton", button.Button)
 GenSAMRediscoverButton = gensam_ns.class_("GenSAMRediscoverButton", button.Button)
 GenSAMCrossoverNumber = gensam_ns.class_("GenSAMCrossoverNumber", number.Number)
 GenSAMVolumeNumber = gensam_ns.class_("GenSAMVolumeNumber", number.Number)
+GenSAMSourceSelect = gensam_ns.class_("GenSAMSourceSelect", select.Select)
+GenSAMAES3ChannelSelect = gensam_ns.class_("GenSAMAES3ChannelSelect", select.Select)
 GenSAMMonitorBinding = gensam_ns.struct("GenSAMMonitorBinding")
+
+
+def _parse_aes3_channel(val, monitor_name="", serial_number=""):
+    """Parse an AES3 channel value, or infer a smart default.
+
+    Smart defaults when no explicit channel is configured:
+      - Serial number starting with "7" (7xxx subwoofers) → Channel A+B (Sum)
+      - Monitor name containing "right" → Channel B (Right)
+      - Monitor name containing "sub" → Channel A+B (Sum)
+      - Otherwise → Channel A (Left)
+    """
+    if val is not None:
+        s = str(val).strip().lower()
+        if s in ("a", "left", "channel a", "channel a (left)", "1"):
+            return 1  # AES3_CHANNEL_A
+        if s in ("b", "right", "channel b", "channel b (right)", "2"):
+            return 2  # AES3_CHANNEL_B
+        if s in ("sum", "a+b", "a + b", "channel a+b", "channel a+b (sum)", "both", "3"):
+            return 3  # AES3_CHANNEL_SUM
+        raise cv.Invalid(f"Invalid AES3 channel: '{val}'. Valid options: 'a' ('left'), 'b' ('right'), 'sum'")
+
+    # Smart default: 7xxx series serials are subwoofers → summed mono
+    if serial_number and serial_number.startswith("7"):
+        return 3  # AES3_CHANNEL_SUM
+    # Smart default based on monitor name keywords
+    name_lower = monitor_name.lower()
+    if "right" in name_lower:
+        return 2  # AES3_CHANNEL_B
+    if "sub" in name_lower:
+        return 3  # AES3_CHANNEL_SUM
+    return 1  # AES3_CHANNEL_A
 
 
 def _validate_monitor(conf):
@@ -182,6 +218,33 @@ def _validate_monitor(conf):
             entity_category=ENTITY_CATEGORY_CONFIG,
         )(c)
 
+    if CONF_AES3_CHANNEL in conf:
+        val = conf[CONF_AES3_CHANNEL]
+        if isinstance(val, str):
+            conf[CONF_INITIAL_AES3_CHANNEL] = val
+            c = {CONF_NAME: f"{name} AES3 Channel"}
+            if dev_id:
+                c[CONF_DEVICE_ID] = dev_id
+            conf[CONF_AES3_CHANNEL] = select.select_schema(
+                GenSAMAES3ChannelSelect,
+                icon="mdi:audio-input-xlr",
+                entity_category=ENTITY_CATEGORY_CONFIG,
+            )(c)
+        elif isinstance(val, dict):
+            if "channel" in val:
+                conf[CONF_INITIAL_AES3_CHANNEL] = val.pop("channel")
+            elif "initial_channel" in val:
+                conf[CONF_INITIAL_AES3_CHANNEL] = val.pop("initial_channel")
+    else:
+        c = {CONF_NAME: f"{name} AES3 Channel"}
+        if dev_id:
+            c[CONF_DEVICE_ID] = dev_id
+        conf[CONF_AES3_CHANNEL] = select.select_schema(
+            GenSAMAES3ChannelSelect,
+            icon="mdi:audio-input-xlr",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        )(c)
+
     return conf
 
 
@@ -242,12 +305,26 @@ MONITOR_SCHEMA = cv.All(
                 unit_of_measurement="Hz",
                 entity_category=ENTITY_CATEGORY_CONFIG,
             ),
+            cv.Optional(CONF_AES3_CHANNEL): cv.Any(
+                cv.string,
+                select.select_schema(
+                    GenSAMAES3ChannelSelect,
+                    icon="mdi:audio-input-xlr",
+                    entity_category=ENTITY_CATEGORY_CONFIG,
+                ),
+            ),
         }
     ),
     _validate_monitor,
 )
 
 def _validate_hub(config):
+    if CONF_AUDIO_SOURCE not in config:
+        config[CONF_AUDIO_SOURCE] = select.select_schema(
+            GenSAMSourceSelect,
+            icon="mdi:audio-input-xlr",
+        )({CONF_NAME: "Audio Source"})
+
     period = config.get(CONF_TELEMETRY_AVERAGING_PERIOD)
     for mon_conf in config.get(CONF_MONITORS, []):
         # 1. Temperature default filter: 1.0 degC delta + 60s heartbeat
@@ -303,6 +380,10 @@ _CONFIG_SCHEMA = cv.Schema(
             GenSAMVolumeNumber,
             icon="mdi:volume-high",
             unit_of_measurement="dB",
+        ),
+        cv.Optional(CONF_AUDIO_SOURCE): select.select_schema(
+            GenSAMSourceSelect,
+            icon="mdi:audio-input-xlr",
         ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -364,6 +445,14 @@ async def to_code(config):
         cg.add(vol_num.set_hub(var))
         cg.add(var.set_volume_number(vol_num))
 
+    if CONF_AUDIO_SOURCE in config:
+        source_sel = await select.new_select(
+            config[CONF_AUDIO_SOURCE],
+            options=["Analog", "Digital (AES3)"],
+        )
+        cg.add(source_sel.set_hub(var))
+        cg.add(var.set_audio_source_select(source_sel))
+
     if CONF_MONITORS in config:
         for mon_conf in config[CONF_MONITORS]:
             name = mon_conf[CONF_NAME]
@@ -417,6 +506,17 @@ async def to_code(config):
                 cg.add(xo_var.set_serial_or_id(target_id))
                 xo_num = f"{xo_var}"
 
+            # 11. AES3 channel select
+            aes3_ch_conf = mon_conf[CONF_AES3_CHANNEL]
+            initial_ch = mon_conf.get(CONF_INITIAL_AES3_CHANNEL)
+            ch_num = _parse_aes3_channel(initial_ch, name, serial)
+            aes3_sel = await select.new_select(
+                aes3_ch_conf,
+                options=["Channel A (Left)", "Channel B (Right)", "Channel A+B (Sum)"],
+            )
+            cg.add(aes3_sel.set_hub(var))
+            cg.add(aes3_sel.set_serial_or_id(target_id))
+
             # Register binding in C++ hub
             cg.add(
                 var.add_monitor_binding(
@@ -426,7 +526,8 @@ async def to_code(config):
                         f"{temp_sens}, {in_sens}, {out_sens}, {online_sens}, "
                         f"{mute_sw}, "
                         f"{model_sens}, {serial_sens}, {fw_sens}, {hw_id_sens}, "
-                        f"{xo_num}, 85U, false}}"
+                        f"{xo_num}, 85U, false, "
+                        f"{aes3_sel}, {ch_num}U, false}}"
                     )
                 )
             )

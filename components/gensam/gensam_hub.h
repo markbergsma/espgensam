@@ -54,6 +54,19 @@
 ///    Supports both auto-direction transceivers (M5Stack Atomic RS-485 Base) and discrete
 ///    enable pins (LilyGO T-CAN485 with 5V booster `power_pin`, transceiver enable `se_pin`,
 ///    and receiver enable `re_pin`, or standard boards with hardware direction control `de_pin`).
+///
+/// 5. Audio Source Selection & AES3 Routing:
+///    SAM monitors support Analog vs Digital (AES3) routing via CMD_SELECT_AUDIO_SOURCE (0x40).
+///    Standard monitors receive 1 frame (input 0), while 7xxx subwoofers receive 2 frames (input 0 and 1).
+///    Non-destructive boot ensures initial boot and discovery preserve monitor presets until changed
+///    or snooped from GLM.
+///    - Transient Volume Silencing: To prevent audible pops, clicks, or transient distortion during
+///      analog multiplexer switching, AES3 PLL clock relock, or Sample Rate Converter (SRC) relocking,
+///      audio is temporarily silenced by broadcasting CMD_VOLUME (0x1F) with minimum volume (-130.0 dB /
+///      {0x00, 0x00, 0x02}) before transmitting source selection frames. After monitors settle on the
+///      new input stream (~100 ms), the previous listening volume is automatically restored. System
+///      volume state callbacks are not triggered during this transient silence so the Home Assistant
+///      volume slider remains steady.
 /// ===================================================================================
 
 #include "esphome/core/component.h"
@@ -76,6 +89,10 @@ class BinarySensor;
 namespace number {
 class Number;
 }  // namespace number
+
+namespace select {
+class Select;
+}  // namespace select
 
 namespace gensam {
 
@@ -152,6 +169,20 @@ class GenSAMHub : public Component {
   /// @return Pointer to registered number entity or nullptr.
   number::Number *get_volume_number() const { return volume_number_; }
 
+  /// @brief Set optional global audio source select entity.
+  /// @param sel Pointer to the GenSAMSourceSelect entity.
+  void set_audio_source_select(select::Select *sel) { audio_source_select_ = sel; }
+
+  /// @brief Get optional global audio source select entity.
+  /// @return Pointer to registered select entity or nullptr.
+  select::Select *get_audio_source_select() const { return audio_source_select_; }
+
+  /// @brief Current system audio source (SOURCE_ANALOG or SOURCE_DIGITAL_AES3).
+  uint8_t get_current_audio_source() const { return current_audio_source_; }
+
+  /// @brief Whether system audio source has been configured by user or snooped from GLM.
+  bool is_audio_source_configured() const { return audio_source_configured_; }
+
   /// @brief Register a callback for when volume, mute, or power changes (from commands or passive snooping).
   void add_state_callback(std::function<void(float, bool, bool)> cb) {
     state_callbacks_.push_back(std::move(cb));
@@ -204,6 +235,37 @@ class GenSAMHub : public Component {
   /// @param serial_or_id Serial number string (e.g. "7350APM88123456") or decimal unique ID string.
   /// @param freq_hz Crossover filter frequency in Hz (typically 50..120 Hz, step 5 Hz).
   void set_monitor_crossover_by_serial(const std::string &serial_or_id, uint16_t freq_hz);
+
+  /// @brief Set global audio source (Analog vs Digital AES3) across all monitors.
+  /// @param source SOURCE_ANALOG (0x01) or SOURCE_DIGITAL_AES3 (0x02).
+  void set_global_source(uint8_t source);
+
+  /// @brief Set global audio source by option string ("Analog" or "Digital (AES3)").
+  /// @param source_name Option name string.
+  void set_global_source_by_name(const std::string &source_name);
+
+  /// @brief Set AES3 channel routing for an individual monitor by logical RS-485 address.
+  /// @param address Logical bus address (0x02..0x7F).
+  /// @param channel AES3_CHANNEL_A (0x01), AES3_CHANNEL_B (0x02), or AES3_CHANNEL_SUM (0x03).
+  void set_monitor_aes3_channel(uint8_t address, uint8_t channel);
+
+  /// @brief Set AES3 channel routing for an individual monitor by serial number or unique ID string.
+  /// @param serial_or_id Serial number string (e.g. "7350APM88123456") or decimal unique ID string.
+  /// @param channel AES3_CHANNEL_A (0x01), AES3_CHANNEL_B (0x02), or AES3_CHANNEL_SUM (0x03).
+  void set_monitor_aes3_channel_by_serial(const std::string &serial_or_id, uint8_t channel);
+
+  /// @brief Set AES3 channel routing for an individual monitor by option name string.
+  /// @param serial_or_id Serial number string or decimal unique ID string.
+  /// @param channel_name Option string ("Channel A (Left)", "Channel B (Right)", or "Channel A+B (Sum)").
+  void set_monitor_aes3_channel_by_name(const std::string &serial_or_id, const std::string &channel_name);
+
+  /// @brief Send audio source frame(s) to a specific monitor.
+  /// Standard monitors receive 1 frame (input 0); subwoofers (7xxx) receive 2 frames (inputs 0 and 1).
+  /// @param address Target monitor RS-485 bus address.
+  /// @param source SOURCE_ANALOG (0x01) or SOURCE_DIGITAL_AES3 (0x02).
+  /// @param channel AES3_CHANNEL_A (0x01), AES3_CHANNEL_B (0x02), or AES3_CHANNEL_SUM (0x03).
+  /// @param is_subwoofer True if monitor is a 7xxx series subwoofer.
+  void send_audio_source_frame(uint8_t address, uint8_t source, uint8_t channel, bool is_subwoofer);
 
   /// @brief Set system power / standby state.
   /// @param standby True to place monitors into amplifier standby (<0.5W), false to wake up.
@@ -314,6 +376,12 @@ class GenSAMHub : public Component {
   /// @brief Re-evaluate whether all online monitors are muted and notify state callbacks if the state changed.
   void evaluate_system_mute_();
 
+  /// @brief Broadcast transient digital silence (-130 dBFS) to all monitors prior to input switching.
+  void silence_system_volume_();
+
+  /// @brief Restore active listening volume across all monitors following input switching and settling.
+  void restore_system_volume_();
+
   int tx_pin_{-1};
   int rx_pin_{-1};
   int de_pin_{-1};
@@ -375,6 +443,9 @@ class GenSAMHub : public Component {
   std::vector<GenSAMMonitorBinding> bindings_;
   binary_sensor::BinarySensor *glm_usb_adapter_active_sensor_{nullptr};
   number::Number *volume_number_{nullptr};
+  select::Select *audio_source_select_{nullptr};
+  uint8_t current_audio_source_{SOURCE_ANALOG};
+  bool audio_source_configured_{false};
   std::vector<std::function<void(float, bool, bool)>> state_callbacks_;
 };
 

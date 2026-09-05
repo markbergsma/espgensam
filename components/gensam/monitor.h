@@ -60,6 +60,10 @@ namespace number {
 class Number;
 }  // namespace number
 
+namespace select {
+class Select;
+}  // namespace select
+
 namespace gensam {
 
 /// @brief Static binding between a configured speaker and its ESPHome sensor entities.
@@ -80,6 +84,9 @@ struct GenSAMMonitorBinding {
   number::Number *crossover_number{nullptr};           ///< Bass management crossover frequency number entity (Hz).
   uint16_t crossover_freq{DEFAULT_CROSSOVER_HZ};       ///< Configured / active crossover frequency in Hz (default: 85 Hz).
   bool crossover_configured{false};                    ///< True if a custom crossover was set by user or sniffed from GLM.
+  select::Select *aes3_channel_select{nullptr};        ///< AES3 input sub-channel select entity (Channel A, B, Sum).
+  uint8_t aes3_channel{AES3_CHANNEL_A};                ///< Configured / active AES3 channel (default: AES3_CHANNEL_A).
+  bool aes3_channel_configured{false};                 ///< True if an AES3 channel was set by user or sniffed from GLM.
 };
 
 /// @brief Represents a single Genelec SAM monitor or subwoofer discovered on the RS-485 bus.
@@ -102,6 +109,10 @@ struct GenSAMMonitor {
 
   GenSAMMonitorBinding *binding{nullptr}; ///< Pointer to matched Home Assistant entity binding.
   uint32_t identify_end_ms{0};            ///< If non-zero, timestamp (millis) when LED pulsing should revert.
+
+  /// @brief Check whether this monitor is a subwoofer (7xxx series).
+  /// Note: The W371 adaptive woofer system is an adaptive woofer system, not a subwoofer, and is excluded.
+  bool is_subwoofer() const { return !model.empty() && model[0] == '7'; }
 
   /// @brief Check if this monitor matches a configured binding by serial number or unique ID.
   /// @param b The candidate binding to test against.

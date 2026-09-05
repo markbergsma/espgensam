@@ -7,6 +7,7 @@
 #include "esphome/core/log.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/number/number.h"
+#include "esphome/components/select/select.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/text_sensor/text_sensor.h"
@@ -97,6 +98,12 @@ void GenSAMHub::setup() {
     volume_number_->publish_state(current_volume_db_);
   }
 
+  for (auto &b : bindings_) {
+    if (b.aes3_channel_select != nullptr) {
+      b.aes3_channel_select->publish_state(aes3_channel_to_str(b.aes3_channel));
+    }
+  }
+
   ESP_LOGI(TAG, "GenSAM Hub initialized successfully (baud=%lu, TX=%s, RX=GPIO%d, yield_to_glm=%s, cooldown=%u ms)",
            (unsigned long)baud_rate_, listen_only_ ? "DISABLED (listen_only)" : ("GPIO" + std::to_string(tx_pin_)).c_str(),
            rx_pin_, YESNO(yield_to_glm_), (unsigned)glm_inactivity_cooldown_ms_);
@@ -110,6 +117,9 @@ void GenSAMHub::dump_config() {
                 min_volume_db_, max_volume_db_, startup_volume_db_);
   if (volume_number_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Volume dB Number Entity: configured");
+  }
+  if (audio_source_select_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Audio Source Select Entity: configured");
   }
   ESP_LOGCONFIG(TAG, "  Configured Monitor Bindings: %u", (unsigned)bindings_.size());
   for (const auto &b : bindings_) {
@@ -524,6 +534,55 @@ void GenSAMHub::handle_incoming_frame_(const Frame &frame) {
     }
   }
 
+  // Sniff audio source selection and AES3 channel configuration
+  if (frame.command == CMD_SELECT_AUDIO_SOURCE && frame.payload.size() >= 4) {
+    uint8_t input_idx = frame.payload[0];
+    uint8_t src = frame.payload[1];
+    uint8_t ch = frame.payload[3];
+
+    if (input_idx == 0x00) {
+      if (src == SOURCE_ANALOG || src == SOURCE_DIGITAL_AES3) {
+        if (!audio_source_configured_ || current_audio_source_ != src) {
+          current_audio_source_ = src;
+          audio_source_configured_ = true;
+          if (audio_source_select_ != nullptr) {
+            audio_source_select_->publish_state(
+                (src == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3);
+          }
+          ESP_LOGI(TAG, "[Sniffed] System audio source set to %s",
+                   (src == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3);
+        }
+      }
+    }
+
+    if (src == SOURCE_DIGITAL_AES3 && (ch >= AES3_CHANNEL_A && ch <= AES3_CHANNEL_SUM) && input_idx == 0x00) {
+      auto it = monitors_.find(frame.address);
+      if (it != monitors_.end()) {
+        if (it->second.binding != nullptr) {
+          it->second.binding->aes3_channel = ch;
+          it->second.binding->aes3_channel_configured = true;
+          if (it->second.binding->aes3_channel_select != nullptr) {
+            it->second.binding->aes3_channel_select->publish_state(aes3_channel_to_str(ch));
+          }
+        }
+        ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X AES3 channel set to 0x%02X", frame.address, ch);
+      } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
+        GenSAMMonitor &mon = monitors_[frame.address];
+        mon.address = frame.address;
+        this->mark_monitor_seen_(mon);
+        bind_monitor_if_matched_(mon);
+        if (mon.binding != nullptr) {
+          mon.binding->aes3_channel = ch;
+          mon.binding->aes3_channel_configured = true;
+          if (mon.binding->aes3_channel_select != nullptr) {
+            mon.binding->aes3_channel_select->publish_state(aes3_channel_to_str(ch));
+          }
+        }
+        ESP_LOGI(TAG, "[Sniffed] Discovered monitor 0x%02X AES3 channel set to 0x%02X", frame.address, ch);
+      }
+    }
+  }
+
   // Track replies sent to host
   if (frame.address == HOST_ADDRESS && frame.command == CMD_REPORT_STATUS) {
     if (last_queried_cmd_ == CMD_SOFTWARE_QUERY && last_queried_addr_ != 0) {
@@ -687,19 +746,49 @@ void GenSAMHub::update_race_state_machine_() {
         while (current_poll_index_ < poll_addrs_.size()) {
           uint8_t addr = poll_addrs_[current_poll_index_];
           auto it = monitors_.find(addr);
-          if (it != monitors_.end() && it->second.binding != nullptr &&
-              it->second.binding->crossover_number != nullptr &&
-              it->second.binding->crossover_configured) {
-            current_query_addr_ = addr;
-            race_step_time_ = now;
-            Frame xo_frame;
-            xo_frame.address = addr;
-            xo_frame.command = CMD_BASS_MANAGE_XO;
-            uint16_t freq = it->second.binding->crossover_freq;
-            xo_frame.payload = {static_cast<uint8_t>((freq >> 8) & 0xFF), static_cast<uint8_t>(freq & 0xFF)};
-            ESP_LOGI(TAG, "Configuring bass management crossover frequency for monitor 0x%02X: %u Hz", addr, freq);
-            this->send_frame(xo_frame);
-            return;
+          if (it != monitors_.end()) {
+            bool configured_anything = false;
+
+            // 1. Audio source and AES3 channel configuration
+            // Note: Transient volume silencing (silence_system_volume_ / restore_system_volume_) is
+            // intentionally omitted here.  Monitors are waking from amplifier standby with internal
+            // amplifiers already muted, so there is no listening signal to protect from switching
+            // transients.  Volume is restored later by the normal post-wakeup volume command.
+            if (audio_source_configured_) {
+              uint8_t ch = AES3_CHANNEL_A;
+              if (it->second.binding != nullptr) {
+                ch = it->second.binding->aes3_channel;
+              } else if (it->second.is_subwoofer()) {
+                ch = AES3_CHANNEL_SUM;
+              }
+              ESP_LOGI(TAG, "Configuring audio source for monitor 0x%02X: %s (ch 0x%02X)",
+                       addr, (current_audio_source_ == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3, ch);
+              this->send_audio_source_frame(addr, current_audio_source_, ch, it->second.is_subwoofer());
+              configured_anything = true;
+            }
+
+            // 2. Bass management crossover frequency
+            if (it->second.binding != nullptr &&
+                it->second.binding->crossover_number != nullptr &&
+                it->second.binding->crossover_configured) {
+              if (configured_anything) {
+                delay(10);
+              }
+              Frame xo_frame;
+              xo_frame.address = addr;
+              xo_frame.command = CMD_BASS_MANAGE_XO;
+              uint16_t freq = it->second.binding->crossover_freq;
+              xo_frame.payload = {static_cast<uint8_t>((freq >> 8) & 0xFF), static_cast<uint8_t>(freq & 0xFF)};
+              ESP_LOGI(TAG, "Configuring bass management crossover frequency for monitor 0x%02X: %u Hz", addr, freq);
+              this->send_frame(xo_frame);
+              configured_anything = true;
+            }
+
+            if (configured_anything) {
+              current_query_addr_ = addr;
+              race_step_time_ = now;
+              return;
+            }
           }
           current_poll_index_++;
         }
@@ -914,6 +1003,9 @@ void GenSAMHub::bind_monitor_if_matched_(GenSAMMonitor &mon) {
       }
       if (mon.binding->crossover_number != nullptr && mon.binding->crossover_configured) {
         mon.binding->crossover_number->publish_state(mon.binding->crossover_freq);
+      }
+      if (mon.binding->aes3_channel_select != nullptr) {
+        mon.binding->aes3_channel_select->publish_state(aes3_channel_to_str(mon.binding->aes3_channel));
       }
       break;
     }
@@ -1233,6 +1325,191 @@ void GenSAMHub::set_monitor_crossover_by_serial(const std::string &serial_or_id,
   }
   ESP_LOGW(TAG, "Crossover set for '%s' to %u Hz (stored; monitor not currently discovered on bus)",
            serial_or_id.c_str(), freq_hz);
+}
+
+void GenSAMHub::send_audio_source_frame(uint8_t address, uint8_t source, uint8_t channel, bool is_subwoofer) {
+  if (!can_transmit()) {
+    return;
+  }
+  // Primary frame (Input 0)
+  Frame f0;
+  f0.address = address;
+  f0.command = CMD_SELECT_AUDIO_SOURCE;
+  if (source == SOURCE_DIGITAL_AES3) {
+    f0.payload = {0x00, SOURCE_DIGITAL_AES3, 0x00, channel};
+  } else {
+    f0.payload = {0x00, SOURCE_ANALOG, 0x02, 0x00};
+  }
+  this->send_frame(f0);
+
+  // Subwoofers (7xxx series) require a secondary frame for Input 1
+  if (is_subwoofer) {
+    delay(5);
+    Frame f1;
+    f1.address = address;
+    f1.command = CMD_SELECT_AUDIO_SOURCE;
+    if (source == SOURCE_DIGITAL_AES3) {
+      f1.payload = {0x01, SOURCE_DIGITAL_AES3, 0x00, 0x00};
+    } else {
+      f1.payload = {0x01, SOURCE_ANALOG, 0x01, 0x00};
+    }
+    this->send_frame(f1);
+  }
+}
+
+void GenSAMHub::silence_system_volume_() {
+  Frame f;
+  f.address = BROADCAST_ADDRESS;
+  f.command = CMD_VOLUME;
+  f.payload = {VOLUME_PAYLOAD_SILENCE[0], VOLUME_PAYLOAD_SILENCE[1], VOLUME_PAYLOAD_SILENCE[2]};
+  this->send_frame(f);
+}
+
+void GenSAMHub::restore_system_volume_() {
+  uint32_t int24 = volume_db_to_int24(current_volume_db_);
+  uint8_t pld[3];
+  encode_int24(int24, pld);
+  Frame f;
+  f.address = BROADCAST_ADDRESS;
+  f.command = CMD_VOLUME;
+  f.payload = {pld[0], pld[1], pld[2]};
+  this->send_frame(f);
+}
+
+// TODO: This function blocks the main loop for ~130 ms + 5 ms per monitor (silence ramp-down,
+//       per-monitor source frames, PLL/SRC settling, volume restore).  Consider converting to a
+//       non-blocking state machine if the number of monitors grows significantly.
+void GenSAMHub::set_global_source(uint8_t source) {
+  if (source != SOURCE_ANALOG && source != SOURCE_DIGITAL_AES3) {
+    ESP_LOGW(TAG, "Unknown global audio source value: 0x%02X", source);
+    return;
+  }
+
+  current_audio_source_ = source;
+  audio_source_configured_ = true;
+
+  const char *name = (source == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3;
+  if (audio_source_select_ != nullptr) {
+    audio_source_select_->publish_state(name);
+  }
+
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Audio source set to %s (bus not ready for TX)", name);
+    return;
+  }
+
+  // Pre-switch transient silencing: fade down to minimum volume before switching inputs
+  bool active = (!current_standby_ && can_transmit());
+  if (active) {
+    this->silence_system_volume_();
+    delay(30);  // Slew time for monitors' internal DSP volume ramp down
+  }
+
+  ESP_LOGI(TAG, "Setting global audio source to %s across %u monitor(s)...", name, (unsigned)monitors_.size());
+  for (const auto &kv : monitors_) {
+    const GenSAMMonitor &mon = kv.second;
+    uint8_t ch = AES3_CHANNEL_A;
+    if (mon.binding != nullptr) {
+      ch = mon.binding->aes3_channel;
+    } else if (mon.is_subwoofer()) {
+      ch = AES3_CHANNEL_SUM;
+    }
+    this->send_audio_source_frame(mon.address, source, ch, mon.is_subwoofer());
+    delay(5);
+  }
+
+  // Post-switch volume restoration: wait for AES3 PLL clock relock and input stages to settle
+  if (active) {
+    delay(100);  // Allow monitor input circuitry and PLL/SRC to stabilize
+    this->restore_system_volume_();
+  }
+}
+
+void GenSAMHub::set_global_source_by_name(const std::string &source_name) {
+  if (source_name == SOURCE_STR_ANALOG) {
+    this->set_global_source(SOURCE_ANALOG);
+  } else if (source_name == SOURCE_STR_DIGITAL_AES3) {
+    this->set_global_source(SOURCE_DIGITAL_AES3);
+  } else {
+    ESP_LOGW(TAG, "Unknown audio source option: '%s'", source_name.c_str());
+  }
+}
+
+// TODO: When the system is actively playing digital audio, this function blocks ~130 ms
+//       (silence ramp-down + PLL settling + volume restore).  Same consideration as set_global_source().
+void GenSAMHub::set_monitor_aes3_channel(uint8_t address, uint8_t channel) {
+  auto it = monitors_.find(address);
+  if (it != monitors_.end() && it->second.binding != nullptr) {
+    it->second.binding->aes3_channel = channel;
+    it->second.binding->aes3_channel_configured = true;
+    if (it->second.binding->aes3_channel_select != nullptr) {
+      it->second.binding->aes3_channel_select->publish_state(aes3_channel_to_str(channel));
+    }
+  }
+
+  if (audio_source_configured_ && current_audio_source_ == SOURCE_DIGITAL_AES3) {
+    bool is_sub = (it != monitors_.end()) ? it->second.is_subwoofer() : false;
+    bool active = (!current_standby_ && can_transmit());
+    if (active) {
+      this->silence_system_volume_();
+      delay(30);
+    }
+    this->send_audio_source_frame(address, SOURCE_DIGITAL_AES3, channel, is_sub);
+    if (active) {
+      delay(100);
+      this->restore_system_volume_();
+    }
+  }
+
+  ESP_LOGI(TAG, "Set monitor 0x%02X AES3 channel: 0x%02X", address, channel);
+}
+
+void GenSAMHub::set_monitor_aes3_channel_by_serial(const std::string &serial_or_id, uint8_t channel) {
+  for (auto &b : bindings_) {
+    bool matches = (strcasecmp(b.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+                    std::to_string(b.unique_id) == serial_or_id ||
+                    strcasecmp(b.name.c_str(), serial_or_id.c_str()) == 0);
+    if (matches) {
+      b.aes3_channel = channel;
+      b.aes3_channel_configured = true;
+      if (b.aes3_channel_select != nullptr) {
+        b.aes3_channel_select->publish_state(aes3_channel_to_str(channel));
+      }
+      break;
+    }
+  }
+
+  for (auto &kv : monitors_) {
+    GenSAMMonitor &mon = kv.second;
+    bool matches = (strcasecmp(mon.serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+                    std::to_string(mon.unique_id) == serial_or_id);
+    if (!matches && mon.binding != nullptr) {
+      matches = (strcasecmp(mon.binding->serial_number.c_str(), serial_or_id.c_str()) == 0 ||
+                 std::to_string(mon.binding->unique_id) == serial_or_id ||
+                 strcasecmp(mon.binding->name.c_str(), serial_or_id.c_str()) == 0);
+    }
+    if (matches) {
+      this->set_monitor_aes3_channel(mon.address, channel);
+      return;
+    }
+  }
+  ESP_LOGW(TAG, "AES3 channel set for '%s' to 0x%02X (stored; monitor not currently discovered on bus)",
+           serial_or_id.c_str(), channel);
+}
+
+void GenSAMHub::set_monitor_aes3_channel_by_name(const std::string &serial_or_id, const std::string &channel_name) {
+  uint8_t ch = AES3_CHANNEL_A;
+  if (channel_name == AES3_CHANNEL_STR_B) {
+    ch = AES3_CHANNEL_B;
+  } else if (channel_name == AES3_CHANNEL_STR_SUM) {
+    ch = AES3_CHANNEL_SUM;
+  } else if (channel_name == AES3_CHANNEL_STR_A) {
+    ch = AES3_CHANNEL_A;
+  } else {
+    ESP_LOGW(TAG, "Unknown AES3 channel option '%s' for '%s'", channel_name.c_str(), serial_or_id.c_str());
+    return;
+  }
+  this->set_monitor_aes3_channel_by_serial(serial_or_id, ch);
 }
 
 void GenSAMHub::set_standby(bool standby) {
