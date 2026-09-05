@@ -16,6 +16,64 @@ static const char *const TAG = "gensam";
 namespace esphome {
 namespace gensam {
 
+namespace {
+
+/// Slew time for the monitors' internal DSP volume to ramp down to digital silence.
+constexpr uint32_t VOLUME_RAMP_DOWN_MS = 30;
+
+/// Time for monitor input circuitry, the AES3 PLL, and the SRC to relock after an input switch.
+constexpr uint32_t INPUT_SETTLE_MS = 100;
+
+/// Spacing between per-monitor source selection frames during a global source change.
+constexpr uint32_t SOURCE_FRAME_GAP_MS = 5;
+
+/// How often to emit the RX / framing statistics line.
+constexpr uint32_t STAT_LOG_INTERVAL_MS = 15000;
+
+}  // namespace
+
+void GenSAMHub::drive_output_pin_(int pin, bool pull_up, const char *description) {
+  gpio_config_t cfg = {};
+  cfg.pin_bit_mask = (1ULL << pin);
+  cfg.mode = GPIO_MODE_OUTPUT;
+  cfg.pull_up_en = pull_up ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE;
+  cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  cfg.intr_type = GPIO_INTR_DISABLE;
+  gpio_config(&cfg);
+  gpio_set_level(static_cast<gpio_num_t>(pin), 1);
+  ESP_LOGI(TAG, "%s (GPIO%d) asserted HIGH", description, pin);
+}
+
+void GenSAMHub::setup_transceiver_pins_() {
+  // 1. Assert RS485 DC-DC Power Enable (T-CAN485: GPIO16 = 1 powers 5V boost converter)
+  if (power_pin_ >= 0) {
+    this->drive_output_pin_(power_pin_, false, "RS485 5V Power Enable pin");
+    delay(50);  // Allow 5V DC-DC booster to stabilize
+  }
+
+  // 2. Assert Transceiver Enable (T-CAN485: GPIO19 = 1 turns ON NPN shifter to enable MAX13487)
+  if (se_pin_ >= 0) {
+    this->drive_output_pin_(se_pin_, false, "RS485 Transceiver Enable pin");
+  }
+
+  // 3. Assert Receiver Enable / AutoDirection (T-CAN485: GPIO17 = 1 turns ON NPN shifter -> Receiver & AutoDirection ON)
+  if (re_pin_ >= 0) {
+    this->drive_output_pin_(re_pin_, false, "RS485 Receiver Enable pin");
+  }
+}
+
+void GenSAMHub::setup_uart_() {
+  // Initialize 9-bit driver (RMT RX + RMT TX continuous zero-gap bitstream)
+  if (listen_only_) {
+    // In listen-only mode, drive TX pin HIGH (DE deasserted on RS-485 transceiver)
+    // and do not initialize the RMT TX transmitter channel.
+    this->drive_output_pin_(tx_pin_, true, "RS485 TX pin (listen-only, idle)");
+    uart9_.setup(1, -1, rx_pin_, de_pin_, baud_rate_, rx_buffer_size_);
+  } else {
+    uart9_.setup(1, tx_pin_, rx_pin_, de_pin_, baud_rate_, rx_buffer_size_);
+  }
+}
+
 void GenSAMHub::setup() {
   ESP_LOGI(TAG, "Initializing GenSAM Hub on RS485 bus...");
   boot_time_ = millis();
@@ -26,62 +84,9 @@ void GenSAMHub::setup() {
     return;
   }
 
-  // 1. Assert RS485 DC-DC Power Enable (T-CAN485: GPIO16 = 1 powers 5V boost converter)
-  if (power_pin_ >= 0) {
-    gpio_config_t pwr_cfg = {};
-    pwr_cfg.pin_bit_mask = (1ULL << power_pin_);
-    pwr_cfg.mode = GPIO_MODE_OUTPUT;
-    pwr_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
-    pwr_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    pwr_cfg.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&pwr_cfg);
-    gpio_set_level(static_cast<gpio_num_t>(power_pin_), 1);  // High = 5V ON
-    ESP_LOGI(TAG, "RS485 5V Power Enable pin (GPIO%d) asserted HIGH (5V Booster ON)", power_pin_);
-    delay(50);  // Allow 5V DC-DC booster to stabilize
-  }
+  this->setup_transceiver_pins_();
+  this->setup_uart_();
 
-  // 2. Assert Transceiver Enable (T-CAN485: GPIO19 = 1 turns ON NPN shifter to enable MAX13487)
-  if (se_pin_ >= 0) {
-    gpio_config_t se_cfg = {};
-    se_cfg.pin_bit_mask = (1ULL << se_pin_);
-    se_cfg.mode = GPIO_MODE_OUTPUT;
-    se_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
-    se_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    se_cfg.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&se_cfg);
-    gpio_set_level(static_cast<gpio_num_t>(se_pin_), 1);  // High = NPN ON -> Transceiver ENABLED
-    ESP_LOGI(TAG, "RS485 Transceiver Enable pin (GPIO%d) asserted HIGH", se_pin_);
-  }
-
-  // 3. Assert Receiver Enable / AutoDirection (T-CAN485: GPIO17 = 1 turns ON NPN shifter -> Receiver & AutoDirection ON)
-  if (re_pin_ >= 0) {
-    gpio_config_t re_cfg = {};
-    re_cfg.pin_bit_mask = (1ULL << re_pin_);
-    re_cfg.mode = GPIO_MODE_OUTPUT;
-    re_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
-    re_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    re_cfg.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&re_cfg);
-    gpio_set_level(static_cast<gpio_num_t>(re_pin_), 1);  // High = NPN ON -> RX & AutoDirection ON
-    ESP_LOGI(TAG, "RS485 Receiver Enable pin (GPIO%d) asserted HIGH", re_pin_);
-  }
-
-  // 4. Initialize 9-bit driver (RMT RX + RMT TX continuous zero-gap bitstream)
-  if (listen_only_) {
-    // In listen-only mode, drive TX pin HIGH (DE deasserted on RS-485 transceiver)
-    // and do not initialize the RMT TX transmitter channel.
-    gpio_config_t tx_cfg = {};
-    tx_cfg.pin_bit_mask = (1ULL << tx_pin_);
-    tx_cfg.mode = GPIO_MODE_OUTPUT;
-    tx_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
-    tx_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    tx_cfg.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&tx_cfg);
-    gpio_set_level(static_cast<gpio_num_t>(tx_pin_), 1);
-    uart9_.setup(1, -1, rx_pin_, de_pin_, baud_rate_, rx_buffer_size_);
-  } else {
-    uart9_.setup(1, tx_pin_, rx_pin_, de_pin_, baud_rate_, rx_buffer_size_);
-  }
   if (!uart9_.is_initialized()) {
     ESP_LOGE(TAG, "Failed to initialize 9-bit UART/RMT driver");
     this->mark_failed();
@@ -516,6 +521,24 @@ void GenSAMHub::restore_system_volume_() {
   this->send_frame(make_broadcast_volume_db(current_volume_db_));
 }
 
+void GenSAMHub::with_transient_silence_(const std::function<void()> &switch_inputs) {
+  // Silencing is only worth doing (and only possible) when the monitors are awake and
+  // reachable; otherwise there is no listening signal to protect and no bus to protect it on.
+  bool active = (!current_standby_ && can_transmit());
+
+  if (active) {
+    this->silence_system_volume_();
+    delay(VOLUME_RAMP_DOWN_MS);
+  }
+
+  switch_inputs();
+
+  if (active) {
+    delay(INPUT_SETTLE_MS);
+    this->restore_system_volume_();
+  }
+}
+
 // TODO: This function blocks the main loop for ~130 ms + 5 ms per monitor (silence ramp-down,
 //       per-monitor source frames, PLL/SRC settling, volume restore).  Consider converting to a
 //       non-blocking state machine if the number of monitors grows significantly.
@@ -538,31 +561,20 @@ void GenSAMHub::set_global_source(uint8_t source) {
     return;
   }
 
-  // Pre-switch transient silencing: fade down to minimum volume before switching inputs
-  bool active = (!current_standby_ && can_transmit());
-  if (active) {
-    this->silence_system_volume_();
-    delay(30);  // Slew time for monitors' internal DSP volume ramp down
-  }
-
   ESP_LOGI(TAG, "Setting global audio source to %s across %u monitor(s)...", name, (unsigned)registry_.size());
-  for (const auto &kv : registry_.monitors()) {
-    const GenSAMMonitor &mon = kv.second;
-    uint8_t ch = AES3_CHANNEL_A;
-    if (mon.binding != nullptr) {
-      ch = mon.binding->aes3_channel;
-    } else if (mon.is_subwoofer()) {
-      ch = AES3_CHANNEL_SUM;
+  this->with_transient_silence_([this, source]() {
+    for (const auto &kv : registry_.monitors()) {
+      const GenSAMMonitor &mon = kv.second;
+      uint8_t ch = AES3_CHANNEL_A;
+      if (mon.binding != nullptr) {
+        ch = mon.binding->aes3_channel;
+      } else if (mon.is_subwoofer()) {
+        ch = AES3_CHANNEL_SUM;
+      }
+      this->send_audio_source_frame(mon.address, source, ch, mon.is_subwoofer());
+      delay(SOURCE_FRAME_GAP_MS);
     }
-    this->send_audio_source_frame(mon.address, source, ch, mon.is_subwoofer());
-    delay(5);
-  }
-
-  // Post-switch volume restoration: wait for AES3 PLL clock relock and input stages to settle
-  if (active) {
-    delay(100);  // Allow monitor input circuitry and PLL/SRC to stabilize
-    this->restore_system_volume_();
-  }
+  });
 }
 
 void GenSAMHub::set_global_source_by_name(const std::string &source_name) {
@@ -585,16 +597,9 @@ void GenSAMHub::set_monitor_aes3_channel(uint8_t address, uint8_t channel) {
 
   if (audio_source_configured_ && current_audio_source_ == SOURCE_DIGITAL_AES3) {
     bool is_sub = (mon != nullptr) ? mon->is_subwoofer() : false;
-    bool active = (!current_standby_ && can_transmit());
-    if (active) {
-      this->silence_system_volume_();
-      delay(30);
-    }
-    this->send_audio_source_frame(address, SOURCE_DIGITAL_AES3, channel, is_sub);
-    if (active) {
-      delay(100);
-      this->restore_system_volume_();
-    }
+    this->with_transient_silence_([this, address, channel, is_sub]() {
+      this->send_audio_source_frame(address, SOURCE_DIGITAL_AES3, channel, is_sub);
+    });
   }
 
   ESP_LOGI(TAG, "Set monitor 0x%02X AES3 channel: 0x%02X", address, channel);
@@ -680,40 +685,49 @@ void GenSAMHub::identify_monitor_by_address(uint8_t address, uint32_t duration_m
            address, mon->model.c_str(), (unsigned)duration_ms, f.payload[0]);
 }
 
-void GenSAMHub::loop() {
-  process_rx_();
-
-  check_glm_cooldown_();
-  update_race_state_machine_();
-  check_monitor_timeouts_();
-
-  // Check if any monitor identify pulse timer has expired
+void GenSAMHub::check_identify_timeouts_() {
   uint32_t now = millis();
   for (auto &kv : registry_.monitors()) {
-    if (kv.second.identify_end_ms != 0 && now >= kv.second.identify_end_ms) {
-      kv.second.identify_end_ms = 0;
-      if (can_transmit()) {
-        Frame f = make_bypass(kv.first, kv.second.mute);
-        this->send_frame_twice(f);
-        ESP_LOGI(TAG, "Identify completed on monitor 0x%02X (%s); restored steady LED (val 0x%02X)",
-                 kv.first, kv.second.model.c_str(), f.payload[0]);
-      }
+    GenSAMMonitor &mon = kv.second;
+    if (mon.identify_end_ms == 0 || now < mon.identify_end_ms) {
+      continue;
     }
+    mon.identify_end_ms = 0;
+    if (!can_transmit()) {
+      continue;
+    }
+    Frame f = make_bypass(mon.address, mon.mute);
+    this->send_frame_twice(f);
+    ESP_LOGI(TAG, "Identify completed on monitor 0x%02X (%s); restored steady LED (val 0x%02X)",
+             mon.address, mon.model.c_str(), f.payload[0]);
   }
+}
 
-  uint32_t now_stat = millis();
-  if (now_stat - last_stat_log_ > 15000) {
-    last_stat_log_ = now_stat;
-    if (uart9_.rx_char_count() > 0) {
-      ESP_LOGD(TAG, "Stats: %lu chars (%lu addr, %lu data), %lu bursts, %lu framing errs, %lu invalid, %lu crc errs%s [Monitors: %u]",
-               (unsigned long)uart9_.rx_char_count(), (unsigned long)uart9_.rx_addr_count(),
-               (unsigned long)uart9_.rx_data_count(), (unsigned long)uart9_.rx_burst_count(),
-               (unsigned long)uart9_.rx_framing_err_count(),
-               (unsigned long)parser_.invalid_count(), (unsigned long)parser_.crc_mismatch_count(),
-               arbiter_.is_active() ? " [GLM ACTIVE - YIELDING]" : "",
-               (unsigned)registry_.size());
-    }
+void GenSAMHub::log_stats_() {
+  uint32_t now = millis();
+  if (now - last_stat_log_ <= STAT_LOG_INTERVAL_MS) {
+    return;
   }
+  last_stat_log_ = now;
+  if (uart9_.rx_char_count() == 0) {
+    return;  // Nothing has been received yet; stay quiet rather than log an empty tally
+  }
+  ESP_LOGD(TAG, "Stats: %lu chars (%lu addr, %lu data), %lu bursts, %lu framing errs, %lu invalid, %lu crc errs%s [Monitors: %u]",
+           (unsigned long)uart9_.rx_char_count(), (unsigned long)uart9_.rx_addr_count(),
+           (unsigned long)uart9_.rx_data_count(), (unsigned long)uart9_.rx_burst_count(),
+           (unsigned long)uart9_.rx_framing_err_count(),
+           (unsigned long)parser_.invalid_count(), (unsigned long)parser_.crc_mismatch_count(),
+           arbiter_.is_active() ? " [GLM ACTIVE - YIELDING]" : "",
+           (unsigned)registry_.size());
+}
+
+void GenSAMHub::loop() {
+  this->process_rx_();
+  this->check_glm_cooldown_();
+  this->update_race_state_machine_();
+  this->check_monitor_timeouts_();
+  this->check_identify_timeouts_();
+  this->log_stats_();
 }
 
 }  // namespace gensam
