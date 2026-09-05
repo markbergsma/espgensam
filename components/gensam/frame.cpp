@@ -152,18 +152,19 @@ void FrameParser::feed(const Uart9BitChar &c) {
     //   Decoded bits: D1..D7 + 9th + Stop1 = [0, 0, 0, 0, 0, 0, 1, 1] = 0xC0 (with 9th bit = 1).
     // The rest of the frame (command, payload, CRC, delimiter) arrives completely uncorrupted.
     //
-    // In host_only mode (active master), all monitor replies must be addressed to HOST_ADDRESS (0x01).
-    // We map 0xC0' back to HOST_ADDRESS. Full integrity is strictly protected by the 16-bit CRC check
+    // Fast-replying monitor responses destined for HOST_ADDRESS (0x01) can experience 1-bit
+    // transceiver turnaround lag on passive-pull RS-485 modules, decoding as 0xC0'.
+    // We map 0xC0' to HOST_ADDRESS. Full integrity is strictly protected by the 16-bit CRC check
     // in process_candidate_(); any corrupted noise frame will fail CRC and be dropped.
     // NOTE: If hardware with faster active-drive direction switching (e.g. discrete DE line control)
     // is used in the future and eliminates turnaround lag, this alias can be removed.
-    if (host_only_ && addr == 0xC0) {
+    if (addr == 0xC0) {
       addr = HOST_ADDRESS;
     }
 
     // Only accept bytes that represent valid GLM destination addresses.
     // Transceiver loopback echo with distorted rise times often samples false 9th bits (e.g. BF', DF', AD', 7F').
-    if (!is_valid_glm_address(addr, host_only_)) {
+    if (!is_valid_glm_address(addr)) {
       return;
     }
 
@@ -206,7 +207,7 @@ void FrameParser::process_candidate_() {
 
   // buffer_[0] is address with 9th bit = 1
   uint8_t address = buffer_[0].data;
-  if (!is_valid_glm_address(address, host_only_)) {
+  if (!is_valid_glm_address(address)) {
     invalid_count_++;
     return;
   }

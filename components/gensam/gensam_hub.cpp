@@ -88,8 +88,6 @@ void GenSAMHub::setup() {
     return;
   }
 
-  parser_.set_host_only(!listen_only_);
-
   if (glm_usb_adapter_active_sensor_ != nullptr) {
     glm_usb_adapter_active_sensor_->publish_state(false);
   }
@@ -707,12 +705,15 @@ void GenSAMHub::process_rx_() {
 
     // Bus arbitration: Detect any external GLM master/adapter activity
     bool external_master_frame = false;
-    if (frame.address != HOST_ADDRESS) {
+    if (glm_active_) {
+      // While yielded, any observed traffic on the bus originates from the external GLM ecosystem
+      external_master_frame = true;
+    } else if (frame.address != HOST_ADDRESS) {
       if (now - last_our_tx_time_ > 50) {
         external_master_frame = true;
       }
     } else {
-      if (now - last_our_tx_time_ > 200) {
+      if (last_our_tx_time_ == 0 || now - last_our_tx_time_ > 300) {
         external_master_frame = true;
       }
     }
@@ -721,7 +722,6 @@ void GenSAMHub::process_rx_() {
       last_glm_activity_ = now;
       if (!glm_active_) {
         glm_active_ = true;
-        parser_.set_host_only(false);
         if (glm_usb_adapter_active_sensor_ != nullptr) {
           glm_usb_adapter_active_sensor_->publish_state(true);
         }
@@ -750,7 +750,6 @@ void GenSAMHub::check_glm_cooldown_() {
   uint32_t now = millis();
   if (now - last_glm_activity_ >= glm_inactivity_cooldown_ms_) {
     glm_active_ = false;
-    parser_.set_host_only(!listen_only_);
     if (glm_usb_adapter_active_sensor_ != nullptr) {
       glm_usb_adapter_active_sensor_->publish_state(false);
     }

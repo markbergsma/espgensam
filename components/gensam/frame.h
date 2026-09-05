@@ -37,7 +37,7 @@
 /// 4. Stream Parser (FrameParser):
 ///    - Discards leading noise characters (9th bit = 0 while IDLE).
 ///    - Immediately resynchronizes on any valid 9th-bit address byte.
-///    - In host_only mode, accommodates 1-bit RS-485 transceiver turnaround lag (where HOST_ADDRESS
+///    - Accommodates 1-bit RS-485 transceiver turnaround lag (where HOST_ADDRESS
 ///      0x01' is sampled as 0xC0' by fast-replying monitors) under strict 16-bit CRC validation.
 ///    - Accumulates body bytes up to MAX_FRAME_LENGTH (256) safety bound.
 ///    - Unescapes body and CRC on delimiter (0x7E) and verifies CRC checksum.
@@ -77,17 +77,14 @@ void unescape_bytes(const Uart9BitChar *in, size_t len, std::vector<uint8_t> &ou
 ///
 /// Valid network addresses comprise:
 /// - Host controller: 0x01 (HOST_ADDRESS)
-/// - Unicast monitors: 0x02 to 0x20 (MONITOR_START_ADDR up to 32 devices)
+/// - Unicast monitors: 0x02 to 0x7E (MONITOR_START_ADDR up to 0x7E)
 /// - Multicast group: 0xF0 (MULTICAST_ADDRESS)
 /// - Broadcast group: 0xFF (BROADCAST_ADDRESS)
 /// @param addr The 8-bit address candidate to validate.
 /// @return True if @p addr is a valid GLM network address.
-inline bool is_valid_glm_address(uint8_t addr, bool host_only = false) {
-  if (host_only) {
-    return addr == HOST_ADDRESS;
-  }
+inline bool is_valid_glm_address(uint8_t addr) {
   return addr == HOST_ADDRESS ||
-         (addr >= MONITOR_START_ADDR && addr <= 0x20) ||
+         (addr >= MONITOR_START_ADDR && addr <= 0x7E) ||
          addr == MULTICAST_ADDRESS ||
          addr == BROADCAST_ADDRESS;
 }
@@ -160,16 +157,6 @@ class FrameParser {
   /// @brief Reset internal state machine, discarding any partial frame and queued frames.
   void clear();
 
-  /// @brief Set whether parser only accepts frames addressed to HOST_ADDRESS (0x01).
-  ///
-  /// When active master on the bus, all incoming monitor responses are addressed to HOST_ADDRESS.
-  /// Enabling host_only prevents loopback echoes or noise with broadcast/multicast addresses
-  /// from being parsed.
-  void set_host_only(bool host_only) { host_only_ = host_only; }
-
-  /// @brief Whether host_only filtering is enabled.
-  bool host_only() const { return host_only_; }
-
  private:
   /// Process an accumulated frame candidate upon encountering the 0x7E delimiter.
   void process_candidate_();
@@ -185,7 +172,6 @@ class FrameParser {
 
   uint32_t invalid_count_{0};
   uint32_t crc_mismatch_count_{0};
-  bool host_only_{false};
 };
 
 }  // namespace gensam
