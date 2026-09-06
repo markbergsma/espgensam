@@ -88,8 +88,6 @@ void GenSAMHub::rediscover_monitors() {
   }
 
   initial_discovery_done_ = true;
-  current_standby_ = false;
-  this->notify_state_callbacks_();
 
   ESP_LOGI(TAG, "Resetting monitor table and initiating RACE discovery...");
 
@@ -109,11 +107,31 @@ void GenSAMHub::rediscover_monitors() {
   last_queried_cmd_ = 0;
   next_assign_addr_ = MONITOR_START_ADDR;
 
-  // Send wakeup pulse sequence to ensure sleeping monitors boot up
+  // A sleeping monitor cannot answer a RACE ping: its DSP is down and it is not listening on the
+  // bus at all. Discovery therefore always begins by waking, exactly as GLM does. When the system
+  // is meant to remain off, the amplifiers are silenced right behind the wakeup so nothing is
+  // audible, and returned to standby by finish_temporary_wake_() once discovery completes.
   this->send_wakeup();
+  if (current_standby_) {
+    this->silence_system_volume_();
+    restore_standby_after_discovery_ = true;
+    ESP_LOGI(TAG, "Waking monitors silently for discovery; will return them to standby");
+  }
   race_state_ = RaceState::WAKEUP_SENT;
   this->update_bus_status_();
   race_step_time_ = millis();
+}
+
+void GenSAMHub::finish_temporary_wake_() {
+  if (!restore_standby_after_discovery_) {
+    return;
+  }
+  restore_standby_after_discovery_ = false;
+  ESP_LOGI(TAG, "Discovery complete; returning monitors to standby");
+  this->send_standby();
+  // Monitors keep reporting an active amplifier until the transition lands; hold the commanded
+  // state over that telemetry the same way an explicit standby command does.
+  last_standby_command_ = millis();
 }
 
 void GenSAMHub::complete_rid_assignment_(uint8_t address) {
@@ -149,8 +167,13 @@ void GenSAMHub::advance_device_query_() {
 }
 
 void GenSAMHub::broadcast_volume_and_keepalive_() {
-  this->send_frame(make_broadcast_volume_db(current_volume_db_));
-  delayMicroseconds(VOLUME_KEEPALIVE_GAP_US);
+  // The volume broadcast is what re-establishes amplifier gain, so it is skipped while in
+  // standby. The keep-alive is not: it refreshes the volatile RACE address leases, and without
+  // it monitors stop answering on their assigned addresses a minute or two later.
+  if (!current_standby_) {
+    this->send_frame(make_broadcast_volume_db(current_volume_db_));
+    delayMicroseconds(VOLUME_KEEPALIVE_GAP_US);
+  }
   this->send_frame(make_stay_online());
 }
 
@@ -237,12 +260,14 @@ bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
       this->mark_monitor_seen_(mon);
       registry_.bind_if_matched(mon);
       registry_.publish_telemetry(mon);
+      this->evaluate_system_standby_();
       if (frame.payload.size() == 1 && frame.payload[0] == STATUS_STANDBY) {
         ESP_LOGD(TAG, "[0x%02X %s] Telemetry: Monitor in standby (0x%02X)",
                  current_query_addr_, mon.model.c_str(), STATUS_STANDBY);
       } else {
-        ESP_LOGI(TAG, "[0x%02X %s] Telemetry: Temp=%d°C In=%d dBFS Out=%d dBFS",
+        ESP_LOGI(TAG, "[0x%02X %s] Telemetry: %s Temp=%d°C In=%d dBFS Out=%d dBFS",
                  current_query_addr_, mon.model.c_str(),
+                 mon.standby_known ? (mon.standby ? "STANDBY" : "ACTIVE") : "UNKNOWN",
                  (int)mon.temperature, (int)mon.input_db, (int)mon.output_db);
       }
       current_query_addr_ = 0;
@@ -258,7 +283,7 @@ bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
 // --- State machine ------------------------------------------------------------------
 
 void GenSAMHub::update_race_state_machine_() {
-  if (!can_transmit() || current_standby_) {
+  if (!can_transmit()) {
     return;
   }
 
@@ -318,6 +343,8 @@ void GenSAMHub::race_step_ping_(uint32_t now) {
   if (registry_.empty()) {
     ESP_LOGI(TAG, "RACE discovery complete: No monitors responded (will retry in %us)",
              (unsigned)(DISCOVERY_RETRY_INTERVAL_MS / 1000));
+    // Nothing answered, but the wakeup may still have powered something up; put it back.
+    this->finish_temporary_wake_();
     race_state_ = RaceState::IDLE;
     this->update_bus_status_();
     last_discovery_retry_time_ = now;
@@ -450,7 +477,9 @@ void GenSAMHub::race_step_configuring_(uint32_t now) {
 
   ESP_LOGI(TAG, "All discovered monitors configured. Entering live telemetry polling loop.");
 
-  // Broadcast active volume and stay_online heartbeat to establish monitor gain
+  this->finish_temporary_wake_();
+
+  // Refresh the address leases, and monitor gain too when not in standby
   this->broadcast_volume_and_keepalive_();
 
   race_state_ = RaceState::POLLING_MONITORS;
@@ -463,7 +492,9 @@ void GenSAMHub::race_step_configuring_(uint32_t now) {
 }
 
 void GenSAMHub::race_step_polling_(uint32_t now) {
-  if (registry_.empty()) {
+  // Fall back to IDLE once nothing answers any more, so discovery gets retried. Testing
+  // registry_.empty() here would never fire: stale monitors are marked offline but kept.
+  if (!registry_.any_online()) {
     race_state_ = RaceState::IDLE;
     this->update_bus_status_();
     return;
@@ -479,7 +510,7 @@ void GenSAMHub::race_step_polling_(uint32_t now) {
     return;
   }
 
-  // At the start of each polling cycle, refresh monitor gain and address leases
+  // At the start of each polling cycle, refresh address leases and (when awake) monitor gain
   if (current_poll_index_ == 0) {
     this->broadcast_volume_and_keepalive_();
     delayMicroseconds(TURNAROUND_US);
@@ -503,8 +534,18 @@ void GenSAMHub::race_step_polling_(uint32_t now) {
 }
 
 void GenSAMHub::race_step_idle_(uint32_t now) {
-  // Periodically retry discovery if no monitors are registered and not in standby
-  if (!current_standby_ && registry_.empty() &&
+  // Periodically retry discovery while nothing on the bus is responding.
+  //
+  // Not while the system is meant to be off. Discovery now has to wake monitors to enumerate
+  // them, so retrying here would power amplifiers up and back down every DISCOVERY_RETRY_INTERVAL_MS
+  // for as long as the system stays switched off. One attempt is made at boot (via the
+  // initial_discovery_done_ path); if that finds nothing, the monitors are left alone until the
+  // user switches the system on, which runs a full wake and discovery of its own.
+  if (current_standby_) {
+    return;
+  }
+
+  if (!registry_.any_online() &&
       now - last_discovery_retry_time_ >= DISCOVERY_RETRY_INTERVAL_MS) {
     last_discovery_retry_time_ = now;
     this->rediscover_monitors();

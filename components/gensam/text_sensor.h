@@ -13,7 +13,6 @@
 ///    - "GLM Active": External GLM controller active on bus (espgensam yielded)
 ///    - "Discovering": Active RACE discovery, pinging, or device interrogation in progress
 ///    - "Configuring": Device parameter configuration phase (audio source, crossover)
-///    - "Standby": System in low-power amplifier sleep (<0.5W, bus quiet)
 ///    - "Offline": Standalone idle, no monitors discovered on the bus
 ///
 /// 2. Bidirectional & State Machine Updates:

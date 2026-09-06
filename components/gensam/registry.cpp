@@ -243,6 +243,33 @@ bool MonitorRegistry::all_online_muted(bool &any_online) const {
   return all_muted;
 }
 
+bool MonitorRegistry::any_online() const {
+  for (const auto &kv : monitors_) {
+    if (kv.second.online) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MonitorRegistry::all_online_in_standby(bool &any_reported) const {
+  any_reported = false;
+  bool all_standby = true;
+  for (const auto &kv : monitors_) {
+    // Monitors that never reported a power state say nothing about it; a Format A telemetry
+    // reply carries no power field at all, and not every TLV reply includes the 'G' tag.
+    if (!kv.second.online || !kv.second.standby_known) {
+      continue;
+    }
+    any_reported = true;
+    if (!kv.second.standby) {
+      all_standby = false;
+      break;
+    }
+  }
+  return all_standby;
+}
+
 std::vector<uint8_t> MonitorRegistry::addresses() const {
   std::vector<uint8_t> addrs;
   addrs.reserve(monitors_.size());

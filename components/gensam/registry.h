@@ -160,6 +160,21 @@ class MonitorRegistry {
   /// @return True if all online monitors are muted (meaningless when @p any_online is false).
   bool all_online_muted(bool &any_online) const;
 
+  /// @brief Whether any registered monitor is currently responding.
+  ///
+  /// Distinct from empty(): monitors that go stale are marked offline but kept, so they retain
+  /// their identity and bindings across a silence. Liveness, not registry population, is what
+  /// tells the state machine whether the bus still has anyone on it.
+  bool any_online() const;
+
+  /// @brief Determine whether every online monitor that reports a power state is in standby.
+  ///
+  /// Monitors that have never reported one are ignored: Format A telemetry carries no power
+  /// field, and not every TLV reply includes the 'G' tag.
+  /// @param[out] any_reported Set to true if at least one online monitor has reported its power state.
+  /// @return True if all such monitors are in standby (meaningless when @p any_reported is false).
+  bool all_online_in_standby(bool &any_reported) const;
+
   /// @brief Snapshot of all registered logical bus addresses, in ascending order.
   std::vector<uint8_t> addresses() const;
 

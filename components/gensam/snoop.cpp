@@ -62,11 +62,13 @@ void GenSAMHub::snoop_power_(const Frame &frame) {
   bool is_on = (frame.payload[1] == WAKEUP_VAL_ON_1 || frame.payload[1] == WAKEUP_VAL_ON_2);
   if (is_standby && !current_standby_) {
     current_standby_ = true;
+    last_standby_command_ = millis();
     ESP_LOGI(TAG, "[Sniffed] System power state updated to STANDBY (val 0x%02X)", frame.payload[1]);
     this->notify_state_callbacks_();
     this->update_bus_status_();
   } else if (is_on && current_standby_) {
     current_standby_ = false;
+    last_standby_command_ = millis();
     ESP_LOGI(TAG, "[Sniffed] System power state updated to ON (val 0x%02X)", frame.payload[1]);
     this->notify_state_callbacks_();
     this->update_bus_status_();
@@ -208,6 +210,7 @@ void GenSAMHub::snoop_host_reply_(const Frame &frame) {
       break;
     default:
       registry_.publish_telemetry(mon);
+      this->evaluate_system_standby_();
       break;
   }
   last_queried_cmd_ = 0;

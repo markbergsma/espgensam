@@ -44,6 +44,16 @@ constexpr uint32_t MIN_STALE_TIMEOUT_MS = 5000;
 /// so how often a monitor is heard from depends on the external master's polling cadence.
 constexpr uint32_t PASSIVE_STALE_TIMEOUT_MS = 15000;
 
+/// How long a commanded power change is trusted over contradicting telemetry.
+///
+/// Monitors keep reporting their previous amplifier state until the transition physically
+/// completes: send_standby() alone spends 160 ms on the wire before the DSP begins powering
+/// down, and a wakeup needs a DSP boot plus a full RACE cycle before the first poll.  Polling
+/// continues throughout, so without this window the first reply would revert the state the
+/// user just commanded.  A command that never took effect still self-corrects once the window
+/// expires and telemetry keeps disagreeing.
+constexpr uint32_t STANDBY_SETTLE_MS = 5000;
+
 }  // namespace
 
 void GenSAMHub::drive_output_pin_(int pin, bool pull_up, const char *description) {
@@ -359,6 +369,7 @@ void GenSAMHub::check_monitor_timeouts_() {
 
   if (registry_.expire_stale(now, stale_timeout_ms)) {
     this->evaluate_system_mute_();
+    this->evaluate_system_standby_();
   }
 }
 
@@ -377,6 +388,30 @@ void GenSAMHub::evaluate_system_mute_() {
   }
 }
 
+void GenSAMHub::evaluate_system_standby_() {
+  if (registry_.empty()) {
+    return;
+  }
+  if (restore_standby_after_discovery_) {
+    return;  // Amplifiers are temporarily up for discovery; that is not the user's intent
+  }
+  if (millis() - last_standby_command_ < STANDBY_SETTLE_MS) {
+    return;  // A commanded transition is still in flight; telemetry has not caught up yet
+  }
+  bool any_reported = false;
+  bool all_standby = registry_.all_online_in_standby(any_reported);
+  if (!any_reported) {
+    return;  // Nothing on the bus reports a power state; leave the commanded state alone
+  }
+
+  if (current_standby_ != all_standby) {
+    current_standby_ = all_standby;
+    ESP_LOGI(TAG, "System power state updated to %s based on monitor telemetry",
+             current_standby_ ? "STANDBY (OFF)" : "ACTIVE (ON)");
+    this->notify_state_callbacks_();
+  }
+}
+
 void GenSAMHub::notify_state_callbacks_() {
   if (volume_number_ != nullptr) {
     volume_number_->publish_state(current_volume_db_);
@@ -388,9 +423,7 @@ void GenSAMHub::notify_state_callbacks_() {
 
 void GenSAMHub::update_bus_status_() {
   std::string status;
-  if (current_standby_) {
-    status = "Standby";
-  } else if (arbiter_.is_active()) {
+  if (arbiter_.is_active()) {
     status = "GLM Active";
   } else {
     switch (race_state_) {
@@ -408,7 +441,7 @@ void GenSAMHub::update_bus_status_() {
         break;
       case RaceState::IDLE:
       default:
-        status = registry_.empty() ? "Offline" : "Active";
+        status = registry_.any_online() ? "Active" : "Offline";
         break;
     }
   }
@@ -696,19 +729,20 @@ void GenSAMHub::set_standby(bool standby) {
   }
 
   current_standby_ = standby;
+  last_standby_command_ = millis();
   ESP_LOGI(TAG, "Set system power: %s", standby ? "STANDBY" : "WAKEUP/ON");
+  for (auto &kv : registry_.monitors()) {
+    kv.second.standby = standby;
+  }
   this->notify_state_callbacks_();
   this->update_bus_status_();
 
   if (standby) {
     this->send_standby();
-    // In standby, stop polling loop and mark monitors offline
-    registry_.mark_all_offline();
     this->evaluate_system_mute_();
-    race_state_ = RaceState::IDLE;
   } else {
-    // When waking from standby, monitors power on in unaddressed state because their volatile
-    // RACE addresses are reset during <0.5W sleep. Automatically initiate RACE rediscovery.
+    // When waking from standby, monitors power on in an unaddressed state because their volatile
+    // RACE addresses are reset during DSP reboot. Automatically initiate RACE rediscovery.
     this->rediscover_monitors();
   }
 }

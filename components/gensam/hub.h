@@ -37,12 +37,23 @@
 ///    - WAKEUP (Power ON): Alternates {0x03, 0x7F} and {0x03, 0x01} repeated 3 times.
 ///    - STANDBY (Power OFF): Transmits {0x03, 0x02} twice (20 ms spacing), waits 80 ms, then
 ///      transmits {0x03, 0x00} twice (20 ms spacing).
-///    - While monitors are in standby, the Hub enters silent idle: CMD_STAY_ONLINE (0x04) heartbeats
-///      and status queries are suppressed so monitors stay in low-power sleep.
-///    - Volatile Address Reset across Standby: In <0.5W standby, Genelec monitors shut down their
-///      DSP and reset their volatile RACE address leases. When waking monitors from standby, the Hub
-///      automatically initiates a fresh RACE rediscovery cycle: waking monitors, waiting 400 ms for
-///      DSP boot, assigning dynamic addresses (0x02..), refreshing CMD_STAY_ONLINE keep-alives,
+///    - Silent Boot: The system boots into standby and stays there until explicitly commanded by
+///      Home Assistant or snooped from GLM. Discovery must still wake monitors: one whose DSP is
+///      down is not listening on the bus at all and cannot answer a RACE ping, which is why GLM
+///      also wakes before discovering. When the system is meant to remain off, the wakeup is
+///      followed immediately by a minimum-volume broadcast so nothing is audible, and monitors are
+///      returned to standby once enumeration completes - a window of roughly 1.5 s during which
+///      front LEDs are lit.
+///    - Independent RS-485 Communication: Monitors remain responsive on the RS-485 bus during standby,
+///      allowing GenSAM to poll status and monitor connectivity while amplifiers are powered down.
+///      This depends on the CMD_STAY_ONLINE (0x04) heartbeat continuing throughout standby: it
+///      refreshes the volatile RACE address leases, and without it monitors stop answering on their
+///      assigned addresses after a minute or two. Only the CMD_VOLUME broadcast is suppressed while
+///      in standby, since that is what re-establishes amplifier gain.
+///    - Volatile Address Reset across Standby Wakeup: When waking from standby, monitors reboot
+///      their DSP and reset their volatile RACE address leases. When waking monitors from standby,
+///      the Hub automatically initiates a fresh RACE rediscovery cycle: waking monitors, waiting 400 ms
+///      for DSP boot, assigning dynamic addresses (0x02..), refreshing CMD_STAY_ONLINE keep-alives,
 ///      and restoring active volume.
 ///
 /// 4. Hardware Transceiver Abstraction:
@@ -177,7 +188,7 @@ class GenSAMHub : public Component {
   /// @return Pointer to registered text sensor or nullptr.
   text_sensor::TextSensor *get_bus_status_sensor() const { return bus_status_sensor_; }
 
-  /// @brief Current bus operational status string ("Active", "GLM Active", "Discovering", "Configuring", "Standby", "Offline").
+  /// @brief Current bus operational status string ("Active", "GLM Active", "Discovering", "Configuring", "Offline").
   const std::string &get_bus_status() const { return last_bus_status_; }
 
   /// @brief Register a callback for when bus operational status changes.
@@ -416,6 +427,12 @@ class GenSAMHub : public Component {
   /// @return True if any configuration frame was sent, false if the monitor needed nothing.
   bool configure_monitor_(const GenSAMMonitor &mon);
 
+  /// @brief Return monitors to standby after a discovery cycle that woke them only to enumerate.
+  ///
+  /// No-op unless the discovery was started while the system was meant to be off. Called on both
+  /// exits from discovery, so a cycle that finds nothing does not leave amplifiers powered.
+  void finish_temporary_wake_();
+
   /// @brief Broadcast the active volume followed by a STAY_ONLINE keep-alive.
   ///
   /// Sent when entering the polling loop and at the start of every polling cycle, to
@@ -489,6 +506,9 @@ class GenSAMHub : public Component {
   /// @brief Re-evaluate whether all online monitors are muted and notify state callbacks if the state changed.
   void evaluate_system_mute_();
 
+  /// @brief Re-evaluate whether all online monitors are in standby and notify state callbacks if the state changed.
+  void evaluate_system_standby_();
+
   /// @brief Broadcast transient digital silence (-130 dBFS) to all monitors prior to input switching.
   void silence_system_volume_();
 
@@ -505,7 +525,7 @@ class GenSAMHub : public Component {
   /// @param switch_inputs Operation transmitting the source selection frames.
   void with_transient_silence_(const std::function<void()> &switch_inputs);
 
-  /// @brief Evaluate and publish operational bus status ("Active", "GLM Active", "Discovering", "Configuring", "Standby", "Offline").
+  /// @brief Evaluate and publish operational bus status ("Active", "GLM Active", "Discovering", "Configuring", "Offline").
   void update_bus_status_();
 
   int tx_pin_{-1};
@@ -561,7 +581,17 @@ class GenSAMHub : public Component {
   float startup_volume_db_{-30.0f};
   float current_volume_db_{-30.0f};
   bool current_mute_{false};
-  bool current_standby_{false};
+  bool current_standby_{true};
+
+  /// Timestamp (millis) of the last commanded power change, whether issued locally or snooped
+  /// from GLM. Telemetry is not allowed to contradict the command until it has had time to
+  /// physically take effect; see STANDBY_SETTLE_MS in hub.cpp.
+  uint32_t last_standby_command_{0};
+
+  /// True while monitors have been woken solely so they can be enumerated, with the system still
+  /// meant to be off. Suppresses telemetry-driven standby evaluation for the duration, since the
+  /// amplifiers being up does not reflect the user's intent.
+  bool restore_standby_after_discovery_{false};
   void notify_state_callbacks_();
 
   text_sensor::TextSensor *bus_status_sensor_{nullptr};

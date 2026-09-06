@@ -144,6 +144,12 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
     return false;
   }
 
+  if (len == 1 && data[0] == STATUS_STANDBY) {
+    monitor.standby = true;
+    monitor.standby_known = true;
+    return true;
+  }
+
   // Check for Tagged TLV format (modern GLMv3-v5 monitors report ASCII-tagged records)
   // Tags:
   //   'A' (0x41): Amp/DSP Temperature (°C)
@@ -177,6 +183,8 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
       found_tag = true;
       i++;
     } else if (tag == 0x47 && i + 1 < len) {  // 'G' = Power state (0x01 = Active, 0x02 = Standby)
+      monitor.standby = (data[i + 1] == 0x02);
+      monitor.standby_known = true;
       found_tag = true;
       i++;
     } else if ((tag & 0xF0) == 0x80 && i + 2 < len) {
