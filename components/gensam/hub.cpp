@@ -30,6 +30,20 @@ constexpr uint32_t SOURCE_FRAME_GAP_MS = 5;
 /// How often to emit the RX / framing statistics line.
 constexpr uint32_t STAT_LOG_INTERVAL_MS = 15000;
 
+/// How often to sweep the registry for monitors that have gone silent.
+constexpr uint32_t TIMEOUT_CHECK_INTERVAL_MS = 500;
+
+/// Polls a monitor may miss before it is considered offline.
+constexpr uint32_t STALE_POLL_CYCLES = 4;
+
+/// Floor on the staleness window, so a short poll interval cannot declare a monitor
+/// offline over a single missed reply.
+constexpr uint32_t MIN_STALE_TIMEOUT_MS = 5000;
+
+/// Floor on the staleness window while snooping.  The hub is not driving the queries then,
+/// so how often a monitor is heard from depends on the external master's polling cadence.
+constexpr uint32_t PASSIVE_STALE_TIMEOUT_MS = 15000;
+
 }  // namespace
 
 void GenSAMHub::drive_output_pin_(int pin, bool pull_up, const char *description) {
@@ -332,14 +346,14 @@ void GenSAMHub::mark_monitor_seen_(GenSAMMonitor &mon) {
 
 void GenSAMHub::check_monitor_timeouts_() {
   uint32_t now = millis();
-  if (now - last_timeout_check_ < 500) {
+  if (now - last_timeout_check_ < TIMEOUT_CHECK_INTERVAL_MS) {
     return;
   }
   last_timeout_check_ = now;
 
-  uint32_t stale_timeout_ms = std::max<uint32_t>(5000, poll_interval_ms_ * 4);
+  uint32_t stale_timeout_ms = std::max<uint32_t>(MIN_STALE_TIMEOUT_MS, poll_interval_ms_ * STALE_POLL_CYCLES);
   if (listen_only_ || arbiter_.is_active()) {
-    stale_timeout_ms = std::max<uint32_t>(stale_timeout_ms, 15000);
+    stale_timeout_ms = std::max<uint32_t>(stale_timeout_ms, PASSIVE_STALE_TIMEOUT_MS);
   }
 
   if (registry_.expire_stale(now, stale_timeout_ms)) {
