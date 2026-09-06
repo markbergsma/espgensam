@@ -22,8 +22,17 @@
 ///        * "GLM Active"  -> Amber / Orange (#FF8000): External GLM master has bus control
 ///        * "Discovering" -> Blue (#0066FF): Active RACE discovery / device interrogation
 ///        * "Configuring" -> Cyan (#00CCFF): Device parameter setup (source/crossover)
-///        * "Standby"     -> Off: Monitors in low-power sleep (<0.5W)
+///        * "Standby"     -> Very Dim Green: Amplifiers in low-power sleep, hub polling normally
 ///        * "Offline"     -> Dim White: Standalone idle, no monitors discovered
+///
+///    Bus status and amplifier power state are independent in the hub, and the LED is where they
+///    are combined, in this order of precedence:
+///      1. "GLM Active" wins outright. Not being in control of the bus is the more important
+///         thing to show, whatever the speakers are doing.
+///      2. Otherwise standby wins: amplifiers being off dims the indicator rather than
+///         extinguishing it, so a healthy hub with the speakers off stays distinguishable
+///         from a dead one.
+///      3. Otherwise the bus phase is displayed.
 ///
 /// 3. Non-Volatile Hardware Protection & Brightness Preservation:
 ///    The configured brightness (default 50%) is applied only as the initial default upon boot.
@@ -42,6 +51,7 @@
 #include "esphome/core/component.h"
 #include "esphome/components/light/light_state.h"
 #include "esphome/components/text_sensor/text_sensor.h"
+#include "hub.h"
 
 #include <string>
 
@@ -77,6 +87,12 @@ class GenSAMStatusLED : public Component {
   /// @param sensor Pointer to the TextSensor entity.
   void set_source_sensor(text_sensor::TextSensor *sensor);
 
+  /// @brief Set the parent hub, subscribing to its amplifier power state.
+  ///
+  /// Bus status alone cannot say whether the speakers are on; the hub reports that separately.
+  /// @param hub Pointer to the GenSAMHub.
+  void set_hub(GenSAMHub *hub);
+
   /// @brief Set the default output brightness (0.0 to 1.0).
   /// If the light is currently active, immediately applies the new brightness level.
   /// @param brightness Float brightness value (default 0.50).
@@ -96,6 +112,12 @@ class GenSAMStatusLED : public Component {
   /// @param status The newly published status string.
   void on_status_changed_(const std::string &status);
 
+  /// @brief Recompute and apply the LED state from the bus status and amplifier power state.
+  ///
+  /// Resolves the two inputs into a single effective status using the precedence documented at
+  /// the top of this file, and repaints only when that effective status actually changes.
+  void update_led_();
+
   /// @brief Dispatch an RGB color update to the controlled light entity.
   /// Preserves the user's current light brightness level after initial startup.
   /// @param r Red channel (0.0 to 1.0).
@@ -108,11 +130,14 @@ class GenSAMStatusLED : public Component {
 
   light::LightState *light_{nullptr};
   text_sensor::TextSensor *source_sensor_{nullptr};
+  GenSAMHub *hub_{nullptr};
   StatusLEDMode mode_{StatusLEDMode::BUS_STATUS};
   float brightness_{0.50f};
   bool brightness_initialized_{false};
   bool last_commanded_state_{false};
-  std::string last_status_{};
+  bool standby_{true};            ///< Latest amplifier power state reported by the hub.
+  std::string bus_status_{};      ///< Latest value published by the bus status text sensor.
+  std::string last_status_{};     ///< Effective status last rendered, to avoid redundant repaints.
 };
 
 }  // namespace gensam

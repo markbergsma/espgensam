@@ -491,6 +491,7 @@ async def to_code(config):
         cg.add(led_var.set_light(light_var))
         cg.add(led_var.set_mode(led_conf[CONF_MODE]))
         cg.add(led_var.set_brightness(led_conf[CONF_BRIGHTNESS]))
+        cg.add(led_var.set_hub(var))
         if bus_sens is not None:
             cg.add(led_var.set_source_sensor(bus_sens))
 
