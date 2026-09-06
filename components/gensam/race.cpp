@@ -158,7 +158,9 @@ bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
   switch (race_state_) {
     case RaceState::RACE_PING_SENT: {
       // Expecting winning unassigned monitor response with 3-byte serial
-      if (frame.payload.size() != 3) {
+      if (frame.address != HOST_ADDRESS ||
+          (frame.command != CMD_REPORT_STATUS && frame.command != CMD_ACK) ||
+          frame.payload.size() != 3) {
         return false;
       }
       current_racing_bytes_ = frame.payload;
