@@ -50,9 +50,6 @@ class MonitorRegistry {
   /// @param b The binding to append.
   void add_binding(const GenSAMMonitorBinding &b) { bindings_.push_back(b); }
 
-  /// @brief Access the configured bindings.
-  std::vector<GenSAMMonitorBinding> &bindings() { return bindings_; }
-
   /// @brief Access the configured bindings (read-only).
   const std::vector<GenSAMMonitorBinding> &bindings() const { return bindings_; }
 
