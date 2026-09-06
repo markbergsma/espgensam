@@ -486,8 +486,7 @@ void GenSAMHub::set_monitor_crossover_by_serial(const std::string &serial_or_id,
   // Store on the binding first, so the setting survives a monitor that is not (yet) on the bus.
   GenSAMMonitorBinding *binding = registry_.find_binding_by_serial_or_id(serial_or_id);
   if (binding != nullptr) {
-    binding->crossover_freq = freq_hz;
-    binding->crossover_configured = true;
+    registry_.set_binding_crossover(*binding, freq_hz);
   }
 
   GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
