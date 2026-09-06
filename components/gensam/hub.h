@@ -79,10 +79,6 @@
 #include <functional>
 
 namespace esphome {
-namespace binary_sensor {
-class BinarySensor;
-}  // namespace binary_sensor
-
 namespace number {
 class Number;
 }  // namespace number
@@ -156,11 +152,6 @@ class GenSAMHub : public Component {
 
   /// @brief Register a configured monitor binding to match discovered hardware.
   void add_monitor_binding(const GenSAMMonitorBinding &binding) { registry_.add_binding(binding); }
-
-  /// @brief Set optional binary sensor reflecting external GLM USB adapter bus occupancy.
-  void set_glm_usb_adapter_active_sensor(binary_sensor::BinarySensor *sensor) {
-    glm_usb_adapter_active_sensor_ = sensor;
-  }
 
   /// @brief Register system volume in dB number entity.
   /// @param num Pointer to the GenSAMVolumeNumber entity.
@@ -573,7 +564,6 @@ class GenSAMHub : public Component {
   bool current_standby_{false};
   void notify_state_callbacks_();
 
-  binary_sensor::BinarySensor *glm_usb_adapter_active_sensor_{nullptr};
   text_sensor::TextSensor *bus_status_sensor_{nullptr};
   std::string last_bus_status_{};
   number::Number *volume_number_{nullptr};

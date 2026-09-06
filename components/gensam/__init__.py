@@ -16,7 +16,6 @@ from esphome.const import (
     DEVICE_CLASS_CONNECTIVITY,
     DEVICE_CLASS_PROBLEM,
     DEVICE_CLASS_IDENTIFY,
-    DEVICE_CLASS_OCCUPANCY,
     STATE_CLASS_MEASUREMENT,
     ENTITY_CATEGORY_DIAGNOSTIC,
     ENTITY_CATEGORY_CONFIG,
@@ -56,7 +55,6 @@ CONF_SERIAL_NUMBER_SENSOR = "serial_number_sensor"
 CONF_FIRMWARE_VERSION = "firmware_version"
 CONF_HARDWARE_ID = "hardware_id"
 
-CONF_GLM_ADAPTER_ACTIVE = "glm_adapter_active"
 CONF_REDISCOVER_BUTTON = "rediscover_button"
 CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY = "bass_management_crossover_frequency"
 CONF_VOLUME_DB = "volume_db"
@@ -387,10 +385,6 @@ _CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_MAX_VOLUME_DB, default=0.0): cv.float_,
         cv.Optional(CONF_STARTUP_VOLUME_DB, default=-30.0): cv.float_,
         cv.Optional(CONF_MONITORS): cv.ensure_list(MONITOR_SCHEMA),
-        cv.Optional(CONF_GLM_ADAPTER_ACTIVE): binary_sensor.binary_sensor_schema(
-            device_class=DEVICE_CLASS_OCCUPANCY,
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
         cv.Optional(CONF_REDISCOVER_BUTTON): button.button_schema(
             GenSAMRediscoverButton,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
@@ -457,10 +451,6 @@ async def to_code(config):
     cg.add(var.set_min_volume_db(config[CONF_MIN_VOLUME_DB]))
     cg.add(var.set_max_volume_db(config[CONF_MAX_VOLUME_DB]))
     cg.add(var.set_startup_volume_db(config[CONF_STARTUP_VOLUME_DB]))
-
-    if CONF_GLM_ADAPTER_ACTIVE in config:
-        sens = await binary_sensor.new_binary_sensor(config[CONF_GLM_ADAPTER_ACTIVE])
-        cg.add(var.set_glm_usb_adapter_active_sensor(sens))
 
     if CONF_REDISCOVER_BUTTON in config:
         btn = await button.new_button(config[CONF_REDISCOVER_BUTTON])

@@ -78,8 +78,8 @@ gensam:
   startup_volume_db: -30.0            # Initial volume on boot
 
   # Diagnostic hub entities
-  glm_adapter_active:
-    name: "GLM USB Adapter Active"
+  bus_status:
+    name: "Bus Status"
 
   rediscover_button:
     name: "Rediscover Monitors"

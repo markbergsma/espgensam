@@ -68,9 +68,6 @@ gensam:
   max_volume_db: -30.0
   startup_volume_db: -50.0
 
-  glm_adapter_active:
-    name: "GLM USB Adapter Active"
-
   bus_status:
     name: "Bus Status"
 

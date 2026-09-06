@@ -6,7 +6,6 @@
 #include "commands.h"
 #include "crc.h"
 #include "esphome/core/log.h"
-#include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/text_sensor/text_sensor.h"
@@ -108,9 +107,6 @@ void GenSAMHub::setup() {
     return;
   }
 
-  if (glm_usb_adapter_active_sensor_ != nullptr) {
-    glm_usb_adapter_active_sensor_->publish_state(false);
-  }
   current_volume_db_ = startup_volume_db_;
   if (volume_number_ != nullptr) {
     volume_number_->publish_state(current_volume_db_);
@@ -310,9 +306,6 @@ void GenSAMHub::process_rx_() {
     BusArbiter::Verdict verdict = arbiter_.classify(frame, now);
     if (verdict == BusArbiter::Verdict::EXTERNAL_MASTER) {
       if (arbiter_.note_external_activity(now)) {
-        if (glm_usb_adapter_active_sensor_ != nullptr) {
-          glm_usb_adapter_active_sensor_->publish_state(true);
-        }
         ESP_LOGW(TAG, "External GLM master/adapter detected on bus (%s). Yielding bus control (listen-only mode)...",
                  frame.to_string().c_str());
         this->update_bus_status_();
@@ -336,9 +329,6 @@ void GenSAMHub::check_glm_cooldown_() {
     return;
   }
 
-  if (glm_usb_adapter_active_sensor_ != nullptr) {
-    glm_usb_adapter_active_sensor_->publish_state(false);
-  }
   ESP_LOGI(TAG, "No GLM master/adapter traffic observed for %u seconds. Resuming active bus control.",
            (unsigned)(glm_inactivity_cooldown_ms_ / 1000));
   // Trigger fresh wakeup and discovery when resuming active master control
