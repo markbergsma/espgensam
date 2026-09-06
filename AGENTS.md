@@ -19,8 +19,21 @@ This document defines architectural standards, hardware constraints, and coding 
 
 ---
 
+## 2. Architectural Principles & Separation of Concerns
+### Three-Tier Layering
+The codebase enforces a strict three-tier architecture to prevent coupling protocol timing with user-facing entities or physical peripherals:
+1. **Protocol Core (`hub`, `arbiter`, `registry`, `race`, `snoop`, `uart9bit`, `frame`, `commands`)**:
+   - Owns RS-485 wire protocol, 9-bit bitstream timings, transceiver direction control, state machines, and monitor tracking.
+   - **Zero UI / Entity Awareness**: The core protocol layer must NEVER import, instantiate, or reference Home Assistant entities, light states, color math, or physical UI components.
+   - **State Exposure**: Exposes internal transitions exclusively via public getters and observer callbacks (`add_state_callback()`, `add_bus_status_callback()`).
+2. **Home Assistant Integration Layer (`<platform>.h`)**:
+   - Partitioned strictly by ESPHome entity type: [`text_sensor.h`](file:///Users/mark/git/espgensam/components/gensam/text_sensor.h), [`sensor.h`](file:///Users/mark/git/espgensam/components/gensam/sensor.h), [`switch.h`](file:///Users/mark/git/espgensam/components/gensam/switch.h), [`number.h`](file:///Users/mark/git/espgensam/components/gensam/number.h), [`select.h`](file:///Users/mark/git/espgensam/components/gensam/select.h), [`button.h`](file:///Users/mark/git/espgensam/components/gensam/button.h).
+   - **Single Responsibility**: Each entity class bridges between Home Assistant and the hub (subscribing to hub callbacks or dispatching HA actions).
+   - **No Peripheral Control**: Entities do not drive physical LEDs, buzzers, or output pins directly.
 
-## 2. Hardware Constraints & Principles
+---
+
+## 3. Hardware Constraints & Principles
 
 - **Off-The-Shelf (COTS) Preference**:
   The primary aim is to make this work with unmodified, off-the-shelf development boards and modules (such as the M5Stack AtomS3 Lite + Atomic RS485 Base and LilyGO T-CAN485). Additional options requiring e.g. external pull-up resistors, custom soldering, or hardware modifications can be added only if needed.
@@ -31,7 +44,7 @@ This document defines architectural standards, hardware constraints, and coding 
 
 ---
 
-## 3. Git, Build & Verification Workflows
+## 4. Git, Build & Verification Workflows
 
 - **Git operations**
   You NEVER make any git commits wihout explicit approval from the user. While you can make suggestions for commit messages, they should be reviewed or edited by the user. Add an "Assisted-by <model name>" header if you contributed to the change, e.g. "Assisted-by: Gemini 3.8".
