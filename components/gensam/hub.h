@@ -12,7 +12,7 @@
 /// 1. Bus Arbitration & External Master Detection:
 ///    The hub yields the bus whenever an external GLM controller is transmitting, and resumes
 ///    active master control once that controller has been silent for `glm_inactivity_cooldown_ms`
-///    (default 30 s).  While yielded it keeps parsing all wire traffic (passive snooping) without
+///    (default 15 s).  While yielded it keeps parsing all wire traffic (passive snooping) without
 ///    transmitting.  The frame-origin classification rules and their timing windows live in
 ///    BusArbiter; see arbiter.h.
 ///

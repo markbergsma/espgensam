@@ -61,7 +61,7 @@ gensam:
   rx_pin: GPIO5
   rx_buffer_size: 512
   listen_only: false
-  glm_inactivity_cooldown: 30s
+  glm_inactivity_cooldown: 15s
   poll_interval: 1s
   telemetry_averaging_period: 60s
   min_volume_db: -80.0
