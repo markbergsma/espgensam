@@ -32,6 +32,14 @@ constexpr uint8_t RID_MAX_RETRIES = 3;
 /// Time to wait for a model / firmware / barcode reply before moving on.
 constexpr uint32_t DEVICE_QUERY_TIMEOUT_MS = 250;
 
+/// Retries of the same device query before giving up on it.
+///
+/// Monitors answer these in 30-60 ms, so a silent 250 ms window means the request or the reply
+/// was lost rather than delayed. Device metadata is only ever asked for once per discovery, so
+/// without a retry a single corrupted frame leaves that monitor's model or serial blank until
+/// the next rediscovery - which on a bus with a percent or so of frame errors happens readily.
+constexpr uint8_t DEVICE_QUERY_MAX_RETRIES = 2;
+
 /// Time to wait for a configuration acknowledgement before moving to the next monitor.
 constexpr uint32_t CONFIG_ACK_TIMEOUT_MS = 200;
 
@@ -100,6 +108,7 @@ void GenSAMHub::rediscover_monitors() {
   current_poll_index_ = 0;
   current_query_addr_ = 0;
   current_query_cmd_ = 0;
+  query_retries_ = 0;
   current_racing_bytes_.clear();
   current_racing_id_ = 0;
   rid_retries_ = 0;
@@ -164,6 +173,7 @@ void GenSAMHub::advance_device_query_() {
     current_poll_index_++;
   }
   current_query_addr_ = 0;
+  query_retries_ = 0;
 }
 
 void GenSAMHub::broadcast_volume_and_keepalive_() {
@@ -363,6 +373,7 @@ void GenSAMHub::race_step_ping_(uint32_t now) {
   current_poll_index_ = 0;
   current_query_addr_ = 0;
   current_query_cmd_ = CMD_SOFTWARE_QUERY;
+  query_retries_ = 0;
 }
 
 void GenSAMHub::race_step_set_rid_(uint32_t now) {
@@ -388,8 +399,20 @@ void GenSAMHub::race_step_set_rid_(uint32_t now) {
 
 void GenSAMHub::race_step_querying_(uint32_t now) {
   if (current_query_addr_ != 0 && now - race_step_time_ > DEVICE_QUERY_TIMEOUT_MS) {
-    // Query timed out; advance to next query (info -> barcode -> next monitor)
-    this->advance_device_query_();
+    if (query_retries_ < DEVICE_QUERY_MAX_RETRIES) {
+      // Re-ask the same monitor the same question: clearing the address alone leaves the poll
+      // cursor and current_query_cmd_ untouched, so the block below resends it.
+      query_retries_++;
+      ESP_LOGW(TAG, "Timeout querying monitor 0x%02X (cmd 0x%02X), attempt %u/%u; retrying...",
+               current_query_addr_, current_query_cmd_, (unsigned)query_retries_ + 1,
+               (unsigned)DEVICE_QUERY_MAX_RETRIES + 1);
+      current_query_addr_ = 0;
+    } else {
+      ESP_LOGW(TAG, "Monitor 0x%02X did not answer cmd 0x%02X after %u attempts; skipping",
+               current_query_addr_, current_query_cmd_, (unsigned)DEVICE_QUERY_MAX_RETRIES + 1);
+      // Give up on this question and advance (info -> barcode -> next monitor)
+      this->advance_device_query_();
+    }
   }
 
   if (current_query_addr_ != 0) {
@@ -489,6 +512,7 @@ void GenSAMHub::race_step_configuring_(uint32_t now) {
   current_poll_index_ = 0;
   current_query_addr_ = 0;
   current_query_cmd_ = 0;
+  query_retries_ = 0;
 }
 
 void GenSAMHub::race_step_polling_(uint32_t now) {

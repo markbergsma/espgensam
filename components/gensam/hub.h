@@ -562,6 +562,7 @@ class GenSAMHub : public Component {
   uint8_t rid_retries_{0};
   uint8_t current_query_addr_{0};
   uint8_t current_query_cmd_{0};
+  uint8_t query_retries_{0};  ///< Attempts already spent on the outstanding device query.
   uint32_t last_poll_cycle_time_{0};
   uint32_t last_poll_step_time_{0};
   uint32_t last_timeout_check_{0};
