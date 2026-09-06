@@ -70,6 +70,7 @@ void GenSAMHub::start_race_discovery() {
   initial_discovery_done_ = true;
   ESP_LOGI(TAG, "Starting GLM RACE monitor discovery...");
   race_state_ = RaceState::RACE_PING_SENT;
+  this->update_bus_status_();
   next_assign_addr_ = MONITOR_START_ADDR;
   current_racing_bytes_.clear();
   current_racing_id_ = 0;
@@ -111,6 +112,7 @@ void GenSAMHub::rediscover_monitors() {
   // Send wakeup pulse sequence to ensure sleeping monitors boot up
   this->send_wakeup();
   race_state_ = RaceState::WAKEUP_SENT;
+  this->update_bus_status_();
   race_step_time_ = millis();
 }
 
@@ -317,6 +319,7 @@ void GenSAMHub::race_step_ping_(uint32_t now) {
     ESP_LOGI(TAG, "RACE discovery complete: No monitors responded (will retry in %us)",
              (unsigned)(DISCOVERY_RETRY_INTERVAL_MS / 1000));
     race_state_ = RaceState::IDLE;
+    this->update_bus_status_();
     last_discovery_retry_time_ = now;
     return;
   }
@@ -328,6 +331,7 @@ void GenSAMHub::race_step_ping_(uint32_t now) {
 
   poll_addrs_ = registry_.addresses();
   race_state_ = RaceState::QUERYING_DEVICES;
+  this->update_bus_status_();
   race_step_time_ = now;
   current_poll_index_ = 0;
   current_query_addr_ = 0;
@@ -351,7 +355,7 @@ void GenSAMHub::race_step_set_rid_(uint32_t now) {
   // Retries exhausted. The monitor may have adopted the address despite the lost ACK, so
   // register it and probe it during the query phase rather than abandoning it.
   ESP_LOGW(TAG, "Retries exhausted for RID ACK at address 0x%02X. Registering monitor and resuming discovery...",
-           next_assign_addr_);
+            next_assign_addr_);
   this->complete_rid_assignment_(next_assign_addr_);
 }
 
@@ -374,6 +378,7 @@ void GenSAMHub::race_step_querying_(uint32_t now) {
 
   ESP_LOGI(TAG, "All discovered monitors queried. Entering device configuration phase.");
   race_state_ = RaceState::CONFIGURING_DEVICES;
+  this->update_bus_status_();
   race_step_time_ = now;
   current_poll_index_ = 0;
   current_query_addr_ = 0;
@@ -449,6 +454,7 @@ void GenSAMHub::race_step_configuring_(uint32_t now) {
   this->broadcast_volume_and_keepalive_();
 
   race_state_ = RaceState::POLLING_MONITORS;
+  this->update_bus_status_();
   last_poll_cycle_time_ = now - poll_interval_ms_;      // Start polling immediately
   last_poll_step_time_ = now - POLL_STEP_INTERVAL_MS;
   current_poll_index_ = 0;
@@ -459,6 +465,7 @@ void GenSAMHub::race_step_configuring_(uint32_t now) {
 void GenSAMHub::race_step_polling_(uint32_t now) {
   if (registry_.empty()) {
     race_state_ = RaceState::IDLE;
+    this->update_bus_status_();
     return;
   }
 

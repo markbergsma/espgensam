@@ -91,6 +91,10 @@ namespace select {
 class Select;
 }  // namespace select
 
+namespace text_sensor {
+class TextSensor;
+}  // namespace text_sensor
+
 namespace gensam {
 
 /// @brief Phases of the active RACE monitor discovery and telemetry state machine.
@@ -173,6 +177,22 @@ class GenSAMHub : public Component {
   /// @brief Get optional global audio source select entity.
   /// @return Pointer to registered select entity or nullptr.
   select::Select *get_audio_source_select() const { return audio_source_select_; }
+
+  /// @brief Set optional bus operational status diagnostic text sensor entity.
+  /// @param sensor Pointer to the TextSensor entity.
+  void set_bus_status_sensor(text_sensor::TextSensor *sensor) { bus_status_sensor_ = sensor; }
+
+  /// @brief Get optional bus operational status diagnostic text sensor entity.
+  /// @return Pointer to registered text sensor or nullptr.
+  text_sensor::TextSensor *get_bus_status_sensor() const { return bus_status_sensor_; }
+
+  /// @brief Current bus operational status string ("Active", "GLM Active", "Discovering", "Configuring", "Standby", "Offline").
+  const std::string &get_bus_status() const { return last_bus_status_; }
+
+  /// @brief Register a callback for when bus operational status changes.
+  void add_bus_status_callback(std::function<void(const std::string &)> cb) {
+    bus_status_callbacks_.push_back(std::move(cb));
+  }
 
   /// @brief Current system audio source (SOURCE_ANALOG or SOURCE_DIGITAL_AES3).
   uint8_t get_current_audio_source() const { return current_audio_source_; }
@@ -494,6 +514,9 @@ class GenSAMHub : public Component {
   /// @param switch_inputs Operation transmitting the source selection frames.
   void with_transient_silence_(const std::function<void()> &switch_inputs);
 
+  /// @brief Evaluate and publish operational bus status ("Active", "GLM Active", "Discovering", "Configuring", "Standby", "Offline").
+  void update_bus_status_();
+
   int tx_pin_{-1};
   int rx_pin_{-1};
   int de_pin_{-1};
@@ -551,11 +574,14 @@ class GenSAMHub : public Component {
   void notify_state_callbacks_();
 
   binary_sensor::BinarySensor *glm_usb_adapter_active_sensor_{nullptr};
+  text_sensor::TextSensor *bus_status_sensor_{nullptr};
+  std::string last_bus_status_{};
   number::Number *volume_number_{nullptr};
   select::Select *audio_source_select_{nullptr};
   uint8_t current_audio_source_{SOURCE_ANALOG};
   bool audio_source_configured_{false};
   std::vector<std::function<void(float, bool, bool)>> state_callbacks_;
+  std::vector<std::function<void(const std::string &)>> bus_status_callbacks_;
 };
 
 }  // namespace gensam

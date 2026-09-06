@@ -9,6 +9,7 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "driver/gpio.h"
 
 static const char *const TAG = "gensam";
@@ -121,6 +122,8 @@ void GenSAMHub::setup() {
     }
   }
 
+  this->update_bus_status_();
+
   ESP_LOGI(TAG, "GenSAM Hub initialized successfully (baud=%lu, TX=%s, RX=GPIO%d, yield_to_glm=%s, cooldown=%u ms)",
            (unsigned long)baud_rate_, listen_only_ ? "DISABLED (listen_only)" : ("GPIO" + std::to_string(tx_pin_)).c_str(),
            rx_pin_, YESNO(yield_to_glm_), (unsigned)glm_inactivity_cooldown_ms_);
@@ -137,6 +140,9 @@ void GenSAMHub::dump_config() {
   }
   if (audio_source_select_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Audio Source Select Entity: configured");
+  }
+  if (bus_status_sensor_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Bus Status Text Sensor: configured");
   }
   ESP_LOGCONFIG(TAG, "  Configured Monitor Bindings: %u", (unsigned)registry_.bindings().size());
   for (const auto &b : registry_.bindings()) {
@@ -309,6 +315,7 @@ void GenSAMHub::process_rx_() {
         }
         ESP_LOGW(TAG, "External GLM master/adapter detected on bus (%s). Yielding bus control (listen-only mode)...",
                  frame.to_string().c_str());
+        this->update_bus_status_();
       }
     } else if (verdict == BusArbiter::Verdict::LOOPBACK_ECHO && !listen_only_) {
       // Loopback echo of our own master transmission; ignore
@@ -336,6 +343,10 @@ void GenSAMHub::check_glm_cooldown_() {
            (unsigned)(glm_inactivity_cooldown_ms_ / 1000));
   // Trigger fresh wakeup and discovery when resuming active master control
   this->rediscover_monitors();
+
+  // Refresh the status here too: rediscover_monitors() returns before publishing when the hub
+  // cannot transmit (listen-only), which would otherwise latch the status at "GLM Active".
+  this->update_bus_status_();
 }
 
 void GenSAMHub::mark_monitor_seen_(GenSAMMonitor &mon) {
@@ -382,6 +393,45 @@ void GenSAMHub::notify_state_callbacks_() {
   }
   for (auto &cb : state_callbacks_) {
     cb(current_volume_db_, current_mute_, current_standby_);
+  }
+}
+
+void GenSAMHub::update_bus_status_() {
+  std::string status;
+  if (current_standby_) {
+    status = "Standby";
+  } else if (arbiter_.is_active()) {
+    status = "GLM Active";
+  } else {
+    switch (race_state_) {
+      case RaceState::WAKEUP_SENT:
+      case RaceState::RACE_PING_SENT:
+      case RaceState::RACE_SET_RID_SENT:
+      case RaceState::QUERYING_DEVICES:
+        status = "Discovering";
+        break;
+      case RaceState::CONFIGURING_DEVICES:
+        status = "Configuring";
+        break;
+      case RaceState::POLLING_MONITORS:
+        status = "Active";
+        break;
+      case RaceState::IDLE:
+      default:
+        status = registry_.empty() ? "Offline" : "Active";
+        break;
+    }
+  }
+
+  if (status != last_bus_status_) {
+    last_bus_status_ = status;
+    ESP_LOGI(TAG, "Bus operational status changed to: %s", status.c_str());
+    if (bus_status_sensor_ != nullptr) {
+      bus_status_sensor_->publish_state(status);
+    }
+    for (auto &cb : bus_status_callbacks_) {
+      cb(status);
+    }
   }
 }
 
@@ -658,6 +708,7 @@ void GenSAMHub::set_standby(bool standby) {
   current_standby_ = standby;
   ESP_LOGI(TAG, "Set system power: %s", standby ? "STANDBY" : "WAKEUP/ON");
   this->notify_state_callbacks_();
+  this->update_bus_status_();
 
   if (standby) {
     this->send_standby();

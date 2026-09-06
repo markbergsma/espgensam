@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import sensor, binary_sensor, button, text_sensor, switch, number, select
+from esphome.components import sensor, binary_sensor, button, text_sensor, switch, number, select, light
 from esphome.const import (
     CONF_ID,
     CONF_NAME,
@@ -9,6 +9,8 @@ from esphome.const import (
     CONF_FILTERS,
     CONF_RX_PIN,
     CONF_TX_PIN,
+    CONF_LIGHT,
+    CONF_BRIGHTNESS,
     UNIT_CELSIUS,
     DEVICE_CLASS_TEMPERATURE,
     DEVICE_CLASS_CONNECTIVITY,
@@ -21,9 +23,8 @@ from esphome.const import (
     CONF_DISABLED_BY_DEFAULT,
 )
 
-AUTO_LOAD = ["sensor", "binary_sensor", "button", "text_sensor", "switch", "number", "select"]
+AUTO_LOAD = ["sensor", "binary_sensor", "button", "text_sensor", "switch", "number", "select", "light"]
 MULTI_CONF = True
-
 CONF_DE_PIN = "de_pin"
 CONF_RE_PIN = "re_pin"
 CONF_POWER_PIN = "power_pin"
@@ -62,6 +63,9 @@ CONF_VOLUME_DB = "volume_db"
 CONF_AUDIO_SOURCE = "audio_source"
 CONF_AES3_CHANNEL = "aes3_channel"
 CONF_INITIAL_AES3_CHANNEL = "initial_aes3_channel"
+CONF_BUS_STATUS = "bus_status"
+CONF_STATUS_LED = "status_led"
+CONF_MODE = "mode"
 
 gensam_ns = cg.esphome_ns.namespace("gensam")
 GenSAMHub = gensam_ns.class_("GenSAMHub", cg.Component)
@@ -72,8 +76,13 @@ GenSAMCrossoverNumber = gensam_ns.class_("GenSAMCrossoverNumber", number.Number)
 GenSAMVolumeNumber = gensam_ns.class_("GenSAMVolumeNumber", number.Number)
 GenSAMSourceSelect = gensam_ns.class_("GenSAMSourceSelect", select.Select)
 GenSAMAES3ChannelSelect = gensam_ns.class_("GenSAMAES3ChannelSelect", select.Select)
+GenSAMBusStatusSensor = gensam_ns.class_("GenSAMBusStatusSensor", text_sensor.TextSensor)
+GenSAMStatusLED = gensam_ns.class_("GenSAMStatusLED", cg.Component)
+StatusLEDMode = gensam_ns.enum("StatusLEDMode", is_class=True)
+STATUS_LED_MODES = {
+    "bus_status": StatusLEDMode.BUS_STATUS,
+}
 GenSAMMonitorBinding = gensam_ns.struct("GenSAMMonitorBinding")
-
 
 def _parse_aes3_channel(val, monitor_name="", serial_number=""):
     """Parse an AES3 channel value, or infer a smart default.
@@ -325,6 +334,16 @@ def _validate_hub(config):
             icon="mdi:audio-input-xlr",
         )({CONF_NAME: "Audio Source"})
 
+    if CONF_STATUS_LED in config:
+        led_conf = config[CONF_STATUS_LED]
+        mode = led_conf.get(CONF_MODE, "bus_status")
+        if mode == "bus_status" and CONF_BUS_STATUS not in config:
+            config[CONF_BUS_STATUS] = text_sensor.text_sensor_schema(
+                GenSAMBusStatusSensor,
+                icon="mdi:information-outline",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            )({CONF_NAME: "Bus Status"})
+
     period = config.get(CONF_TELEMETRY_AVERAGING_PERIOD)
     for mon_conf in config.get(CONF_MONITORS, []):
         # 1. Temperature default filter: 1.0 degC delta + 60s heartbeat
@@ -384,6 +403,21 @@ _CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_AUDIO_SOURCE): select.select_schema(
             GenSAMSourceSelect,
             icon="mdi:audio-input-xlr",
+        ),
+        cv.Optional(CONF_BUS_STATUS): text_sensor.text_sensor_schema(
+            GenSAMBusStatusSensor,
+            icon="mdi:information-outline",
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_STATUS_LED): cv.Schema(
+            {
+                cv.GenerateID(): cv.declare_id(GenSAMStatusLED),
+                cv.Required(CONF_LIGHT): cv.use_id(light.LightState),
+                cv.Optional(CONF_MODE, default="bus_status"): cv.enum(
+                    STATUS_LED_MODES, lower=True
+                ),
+                cv.Optional(CONF_BRIGHTNESS, default=0.5): cv.percentage,
+            }
         ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -452,6 +486,23 @@ async def to_code(config):
         )
         cg.add(source_sel.set_hub(var))
         cg.add(var.set_audio_source_select(source_sel))
+
+    bus_sens = None
+    if CONF_BUS_STATUS in config:
+        bus_sens = await text_sensor.new_text_sensor(config[CONF_BUS_STATUS])
+        cg.add(bus_sens.set_hub(var))
+        cg.add(var.set_bus_status_sensor(bus_sens))
+
+    if CONF_STATUS_LED in config:
+        led_conf = config[CONF_STATUS_LED]
+        led_var = cg.new_Pvariable(led_conf[CONF_ID])
+        await cg.register_component(led_var, led_conf)
+        light_var = await cg.get_variable(led_conf[CONF_LIGHT])
+        cg.add(led_var.set_light(light_var))
+        cg.add(led_var.set_mode(led_conf[CONF_MODE]))
+        cg.add(led_var.set_brightness(led_conf[CONF_BRIGHTNESS]))
+        if bus_sens is not None:
+            cg.add(led_var.set_source_sensor(bus_sens))
 
     if CONF_MONITORS in config:
         for mon_conf in config[CONF_MONITORS]:

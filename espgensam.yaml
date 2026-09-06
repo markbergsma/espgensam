@@ -43,6 +43,17 @@ api:
 ota:
   - platform: esphome
 
+# Onboard WS2812 RGB LED (M5Stack AtomS3 Lite, GPIO35)
+light:
+  - platform: esp32_rmt_led_strip
+    id: atom_led
+    name: "Status LED"
+    pin: GPIO35
+    num_leds: 1
+    chipset: WS2812
+    channel_colors: GRB
+    rmt_symbols: 96
+
 # Genelec SAM RS485 Hub Component (M5Stack AtomS3 Lite + Atomic RS485 Base)
 gensam:
   id: gensam_hub
@@ -59,6 +70,14 @@ gensam:
 
   glm_adapter_active:
     name: "GLM USB Adapter Active"
+
+  bus_status:
+    name: "Bus Status"
+
+  status_led:
+    light: atom_led
+    mode: bus_status
+    brightness: 50%
 
   rediscover_button:
     name: "Rediscover Monitors"

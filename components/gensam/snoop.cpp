@@ -64,10 +64,12 @@ void GenSAMHub::snoop_power_(const Frame &frame) {
     current_standby_ = true;
     ESP_LOGI(TAG, "[Sniffed] System power state updated to STANDBY (val 0x%02X)", frame.payload[1]);
     this->notify_state_callbacks_();
+    this->update_bus_status_();
   } else if (is_on && current_standby_) {
     current_standby_ = false;
     ESP_LOGI(TAG, "[Sniffed] System power state updated to ON (val 0x%02X)", frame.payload[1]);
     this->notify_state_callbacks_();
+    this->update_bus_status_();
   }
 }
 
