@@ -147,10 +147,13 @@ bool parse_barcode(const uint8_t *data, size_t len, GenSAMMonitor &monitor);
 /// @brief Parse status telemetry payload from CMD_REPORT_STATUS (0x09) or CMD_QUERY_STATUS (0x08).
 ///
 /// Supports modern tagged TLV streams ('A' temp, 'B' input, 'C'/'D'/'E'/'F' driver outputs, 'G' power state)
-/// as well as legacy fixed-offset RACE payloads.
+/// as well as legacy fixed-offset RACE payloads. When waking from standby or in sleep mode, monitors may
+/// return either a bare 1-byte STATUS_STANDBY (0x07) payload or prefix the multi-byte TLV stream with 0x07.
+/// The parser strips the leading status byte so subsequent TLV records align properly while preserving the
+/// standby indication.
 /// @param data Pointer to raw unescaped payload buffer.
 /// @param len Payload length in bytes.
-/// @param[out] monitor Target monitor struct to update with temperature and signal levels.
+/// @param[out] monitor Target monitor struct to update with temperature, signal levels, and standby state.
 /// @return True if telemetry was successfully parsed, false if buffer is null/empty.
 bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor);
 

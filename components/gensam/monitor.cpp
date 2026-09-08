@@ -144,13 +144,21 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
     return false;
   }
 
-  if (len == 1 && data[0] == STATUS_STANDBY) {
+  bool has_standby_header = (data[0] == STATUS_STANDBY);
+  if (has_standby_header) {
     monitor.standby = true;
     monitor.standby_known = true;
-    return true;
+    if (len == 1) {
+      return true;
+    }
   }
 
-  // Check for Tagged TLV format (modern GLMv3-v5 monitors report ASCII-tagged records)
+  // Check for Tagged TLV format (modern GLMv3-v5 monitors report ASCII-tagged records).
+  // When waking from standby, monitors prepend STATUS_STANDBY (0x07) to the TLV stream.
+  // We advance past the 0x07 status header so subsequent tags align starting at index 0.
+  const uint8_t *tlv_data = has_standby_header ? (data + 1) : data;
+  size_t tlv_len = has_standby_header ? (len - 1) : len;
+
   // Tags:
   //   'A' (0x41): Amp/DSP Temperature (°C)
   //   'B' (0x42): Input Signal Level (signed int8 dBFS)
@@ -162,32 +170,37 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
   bool found_tag = false;
   bool found_output = false;
   int8_t max_output_db = -128;
-  for (size_t i = 0; i < len; i++) {
-    uint8_t tag = data[i];
-    if (tag == 0x41 && i + 1 < len) {  // 'A' = Temperature
-      monitor.temperature = static_cast<int8_t>(data[i + 1]);
+  for (size_t i = 0; i < tlv_len; i++) {
+    uint8_t tag = tlv_data[i];
+    if (tag == 0x41 && i + 1 < tlv_len) {  // 'A' = Temperature
+      monitor.temperature = static_cast<int8_t>(tlv_data[i + 1]);
       found_tag = true;
       i++;
-    } else if (tag == 0x42 && i + 1 < len) {  // 'B' = Input level
-      monitor.input_db = static_cast<int8_t>(data[i + 1]);
+    } else if (tag == 0x42 && i + 1 < tlv_len) {  // 'B' = Input level
+      monitor.input_db = static_cast<int8_t>(tlv_data[i + 1]);
       found_tag = true;
       i++;
-    } else if ((tag == 0x43 || tag == 0x44 || tag == 0x45 || tag == 0x46) && i + 1 < len) {
+    } else if ((tag == 0x43 || tag == 0x44 || tag == 0x45 || tag == 0x46) && i + 1 < tlv_len) {
       // 'C' = Woofer, 'D' = Midrange, 'E' = Tweeter, 'F' = Subwoofer driver level.
       // Overall monitor output level tracks the peak across all active driver channels.
-      int8_t level = static_cast<int8_t>(data[i + 1]);
+      int8_t level = static_cast<int8_t>(tlv_data[i + 1]);
       if (!found_output || level > max_output_db) {
         max_output_db = level;
       }
       found_output = true;
       found_tag = true;
       i++;
-    } else if (tag == 0x47 && i + 1 < len) {  // 'G' = Power state (0x01 = Active, 0x02 = Standby)
-      monitor.standby = (data[i + 1] == 0x02);
+    } else if (tag == 0x47 && i + 1 < tlv_len) {  // 'G' = Power state (0x01 = Active, 0x02 = Standby)
+      // Only allow Tag 'G' to clear standby if no leading STATUS_STANDBY header was present.
+      // If the monitor explicitly prepended STATUS_STANDBY (0x07), it is in the startup
+      // muting/standby state regardless of amplifier power rail status.
+      if (!has_standby_header || tlv_data[i + 1] == 0x02) {
+        monitor.standby = (tlv_data[i + 1] == 0x02);
+      }
       monitor.standby_known = true;
       found_tag = true;
       i++;
-    } else if ((tag & 0xF0) == 0x80 && i + 2 < len) {
+    } else if ((tag & 0xF0) == 0x80 && i + 2 < tlv_len) {
       // Multi-byte extended record (e.g. 0x81, 0x83, 0x84 followed by 2 payload bytes)
       i += 2;
     }
