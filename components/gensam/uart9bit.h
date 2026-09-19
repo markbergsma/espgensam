@@ -7,7 +7,7 @@
 /// ARCHITECTURE & DESIGN RATIONALE
 /// ===================================================================================
 /// The Genelec Smart Active Monitor (SAM / "GLM") proprietary bus operates over RS-485
-/// at 281,250 baud using 9 data bits (8 data bits + 1 address/data indicator) and 2 stop
+/// at 288,000 baud using 9 data bits (8 data bits + 1 address/data indicator) and 2 stop
 /// bits. A 9th bit value of 1 marks an address byte, while 0 marks data, CRC, or delimiter.
 ///
 /// Standard ESP32 hardware UARTs cannot be used directly for this protocol:
@@ -82,10 +82,10 @@ class Uart9Bit {
   /// @param tx_pin GPIO number for TX.
   /// @param rx_pin GPIO number for RX.
   /// @param de_pin Optional GPIO number for RS485 DE/RE direction control (-1 if unused).
-  /// @param baud_rate Baud rate in bps (281250 for GLM RS485 bus).
+  /// @param baud_rate Baud rate in bps (288000 for GLM RS485 bus).
   /// @param rx_buffer_size RX ring buffer capacity in Uart9BitChar units.
   void setup(int port, int tx_pin, int rx_pin, int de_pin = -1,
-             uint32_t baud_rate = 281250, size_t rx_buffer_size = 512);
+             uint32_t baud_rate = 288000, size_t rx_buffer_size = 512);
 
   /// Read up to @p max_chars 9-bit characters from the RX ring buffer.
   /// @param buf Output buffer for received characters.
@@ -154,7 +154,7 @@ class Uart9Bit {
   static constexpr size_t RMT_TX_MAX_SYMBOLS = 256;
   rmt_symbol_word_t tx_symbols_[RMT_TX_MAX_SYMBOLS];
 
-  uint32_t baud_rate_{281250};
+  uint32_t baud_rate_{288000};
   volatile uint32_t tx_echo_ticks_{0};
 
   // Diagnostic counters (updated from ISR, read from main task).

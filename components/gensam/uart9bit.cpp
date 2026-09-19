@@ -126,7 +126,7 @@ Uart9Bit::~Uart9Bit() {
 /// @param tx_pin GPIO number for TX.
 /// @param rx_pin GPIO number for RX.
 /// @param de_pin Optional GPIO number for RS-485 DE/RE direction control (-1 if unused).
-/// @param baud_rate Baud rate in bps (default 281,250 for Genelec GLM).
+/// @param baud_rate Baud rate in bps (default 288,000 for Genelec GLM).
 /// @param rx_buffer_size RX ring buffer capacity in Uart9BitChar units.
 void Uart9Bit::setup(int port, int tx_pin, int rx_pin, int de_pin,
                      uint32_t baud_rate, size_t rx_buffer_size) {
@@ -364,8 +364,8 @@ void IRAM_ATTR Uart9Bit::decode_and_push_symbols_(
   }
 
   // Q16 fixed-point arithmetic for 10 MHz tick rate (100 ns/tick)
-  // At 281,250 baud: 10,000,000 / 281,250 = 35.5555... ticks/bit
-  // In Q16: (10,000,000 * 65536) / 281,250 = 2330168
+  // At 288,000 baud: 10,000,000 / 288,000 = 34.7222... ticks/bit
+  // In Q16: (10,000,000 * 65536) / 288,000 = 2275555
   const uint32_t bit_ticks_q16 =
       static_cast<uint32_t>((10000000ULL * 65536ULL) / baud_rate_);
   const uint32_t half_bit_ticks_q16 = bit_ticks_q16 / 2;
@@ -528,7 +528,7 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
   }
 
   // Q16 fixed-point math for zero-drift bit timing at 10 MHz resolution (100 ns/tick)
-  // At 281,250 baud: 10,000,000 / 281,250 = 35.5555... ticks/bit
+  // At 288,000 baud: 10,000,000 / 288,000 = 34.7222... ticks/bit
   const uint32_t bit_ticks_q16 =
       static_cast<uint32_t>((10000000ULL * 65536ULL) / baud_rate_);
 

@@ -10,7 +10,16 @@ namespace esphome {
 namespace gensam {
 
 // --- Physical / serial parameters -----------------------------------------
-static constexpr uint32_t BAUDRATE = 281250;
+/// Genelec never published the GLM line rate. This figure was measured on a live bus by
+/// fitting the bit period to the raw RMT edge intervals: 34.74 ticks at 10 MHz, i.e. 287,773
+/// bps, which is 0.079% from 288,000 = 6 x 48 kHz (the monitor DSP sample rate). See
+/// docs/glm-protocol-comparison.md section 2 for the measurement and its caveats.
+///
+/// Earlier releases used 281,250 and worked, as does the independent HLM project at 296,296:
+/// the receiver re-synchronizes on every character's start edge and accepts the stop bit at
+/// either of two positions, so it tolerates the whole 5.35% span between those two figures.
+/// That tolerance is why decode success cannot be used to identify the rate.
+static constexpr uint32_t BAUDRATE = 288000;
 
 // --- Wire framing ---------------------------------------------------------
 static constexpr uint8_t FRAME_DELIMITER = 0x7E;  ///< End-of-frame delimiter (ASCII '~')

@@ -7,7 +7,7 @@
 /// ARCHITECTURE & DESIGN RATIONALE
 /// ===================================================================================
 /// The GenSAM Hub coordinates communication with Genelec Smart Active Monitors (SAM)
-/// over half-duplex 9-bit RS-485 at 281,250 baud.
+/// over half-duplex 9-bit RS-485 at 288,000 baud.
 ///
 /// 1. Bus Arbitration & External Master Detection:
 ///    The hub yields the bus whenever an external GLM controller is transmitting, and resumes

@@ -35,7 +35,7 @@
 /// 3. Timing Windows:
 ///    The echo window (50 ms) bounds how long our own outbound frame can still be draining
 ///    back through the receiver.  The reply window (300 ms) bounds how long a monitor may
-///    take to answer a query of ours.  Both are generous relative to the 281,250 baud wire
+///    take to answer a query of ours.  Both are generous relative to the 288,000 baud wire
 ///    rate; they trade a slightly slower external-master detection for never mistaking our
 ///    own conversation for an intruder and needlessly abandoning the bus.
 /// ===================================================================================

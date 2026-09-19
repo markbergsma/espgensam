@@ -7,7 +7,7 @@
 ## Features
 
 - **Native Home Assistant Integration**: Discovered automatically through the ESPHome Native API (encrypted, zero polling latency, no custom integration required).
-- **Direct 9-Bit RS485 Transceiver**: Uses ESP32 RMT (10 MHz pulse digitization) for RX and RMT pulse generation for TX to cleanly handle the 281,250 baud 9-bit/2-stop-bit GLM bus with zero inter-byte gaps.
+- **Direct 9-Bit RS485 Transceiver**: Uses ESP32 RMT (10 MHz pulse digitization) for RX and RMT pulse generation for TX to cleanly handle the 9-bit/2-stop-bit GLM bus with zero inter-byte gaps.
 - **Standalone Autonomy**: Controls monitors locally with zero dependency on the Home Assistant server status.
 - **Low-Latency Controls**: Direct volume, mute, power/standby, input select, and telemetry reporting.
 

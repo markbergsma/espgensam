@@ -50,16 +50,33 @@ A minor modelling difference with one downstream consequence: espgensam treats t
 | Configured | `281250` (`components/gensam/const.h:13`) | `296000` (`hlm/src/STM32F407/Core/Src/main.c:497`, `hlm/src/ESP32Common/rs485_9n2.c`) |
 | Actually generated | 281,250 exactly (RMT, Q16 fixed-point accumulator, zero drift) | **296,296** on both ports — ESP32 `ticks_per_bit = 80e6/296000 = 270` → 296,296; STM32F103 USART1 @72 MHz quantises USARTDIV to 15.1875 → 296,296 |
 
-**These differ by +5.35%, which is outside what a 12-bit UART frame tolerates.** The last sampled bit (first stop bit) sits 10.5 bit-times after the start edge, so the error budget is |err| < ~4.8%. At 5.35% skew the receiver's stop-bit sample lands inside the 9th data bit and every data byte would framing-error.
+**These differ by +5.35%, which is outside what a conventional 12-bit UART frame tolerates.** The last sampled bit (first stop bit) sits 10.5 bit-times after the start edge, so the error budget is |err| < ~4.8%. Both could not be right about the true bus rate, and the prediction was that **neither is** — the real rate lying between them, leaving each about ±2.6% off and comfortably inside budget, with **288,000 = 6 × 48,000** the attractive candidate in that gap for a device whose DSP runs at 48 kHz (and exactly representable on a 72 MHz STM32, USARTDIV = 15.625, the class of part inside the real GLM adapter).
 
-Yet both implementations demonstrably work:
+### Measured: ~288,000 baud
 
-- espgensam decodes 15.7k lines of **OEM GLM adapter traffic** with valid CRCs at 281,250.
-- HLM drives and reads real 8320A speakers at 296,296, and its STM32 port drops any frame with a framing error.
+This has now been measured directly on a live bus (espgensam `baud_sweep`, passive, against a GLM adapter running standalone). Rather than testing whether a rate decodes, the measurement fits the bit period to the raw edge timings: the interval between successive falling edges spans a whole number of bit periods, so the period is the value leaving every observed interval nearest a whole multiple.
 
-Both cannot be right about the true bus rate, and most likely **neither is** — the real rate is somewhere between, leaving each about ±2.6% off, comfortably inside budget. The midpoint is ~288.8 kbaud, and **288,000 = 6 × 48,000** is an attractive candidate for a device whose DSP runs at 48 kHz. It is also exactly representable on a 72 MHz STM32 (USARTDIV = 15.625), which is the class of part inside the real GLM adapter.
+```
+Bit period fit over 7380 pulses: 34.74 ticks (287773 bps), mean residual 0.263 ticks
+  busiest durations (ticks x count): 139x2302 278x823 174x812 104x774 209x561 208x423
+```
 
-This is the single most valuable open question the comparison surfaces, and it is cheaply testable (§8).
+At 34.74 ticks/bit every populated cluster lands within 0.016 bit of a whole multiple — 139 → 4.001 bits, 278 → 8.002, 174 → 5.009, 104 → 2.994 — and the mean residual is 0.26 ticks, i.e. 0.76% of a bit, which is line jitter. Scoring the candidates against those same clusters:
+
+| Candidate | ticks/bit | mean bit-fraction error |
+|---|---|---|
+| 281,250 (espgensam) | 35.556 | 0.128 |
+| **288,000 (6 × 48 kHz)** | **34.722** | **0.008** |
+| 296,296 (HLM) | 33.750 | 0.169 |
+| measured | 34.750 | 0.005 |
+
+The measured 287,773 bps is **0.079% from 288,000**, and 288,000 fits 16–21× better than either implementation's rate. The prediction holds: espgensam runs 2.27% low, HLM 2.88% high, and both are inside a normal UART's budget. One caveat — the measurement is relative to the ESP32's own 10 MHz RMT clock, so a small crystal offset could account for that last 0.08%; given 6 × 48 kHz is exact, 288,000 is almost certainly the intended figure.
+
+### Why decode-based testing cannot show this
+
+A first attempt scored each candidate by decode failures on identical input. It returned nothing: **every rate from 281,250 to 296,296 decoded byte-identically with zero faults**, at 3936 characters and counting.
+
+That null result is itself the explanation for how two projects 5.35% apart both work. espgensam's receiver re-synchronizes on every character's start edge, accepts the stop bit at either of two positions, and treats "past the end of the burst" as idle HIGH. Its binding constraint is the 9th-bit sample at 9.5 bit periods (9.5 × 5.35% = 0.508 bit), and even that only bites when adjacent bits differ. The receiver simply tolerates the whole disputed span — so decode success measures tolerance, not line rate. Only the edge timings measure the rate.
 
 ---
 
@@ -251,7 +268,7 @@ The two projects are close to complementary: espgensam is deeper on device topol
 
 1. **Re-examine `STATUS_STANDBY = 0x07`** (`components/gensam/const.h:85`, `monitor.cpp:147-154`, `:193-199`). Evidence in `captures/glm_v5_no_wakeup_capture.log:296,302,307` shows a `0x07` prefix alongside `47 01` (active) right after a config push. Likely fix: treat `0x06` and `0x07` identically as a busy/sequence marker, strip it, and let tag `47` be the sole authority on standby. Keep the bare-`[07]`/`[06]` single-byte case as "no telemetry this round" rather than "standby".
 2. **Swap the `0x43` / `0x45` labels** (`components/gensam/monitor.cpp:165-167`, `monitor.h` banner): `0x43` = HF/tweeter, `0x45` = LF/woofer. Confirmed by 524 subwoofer frames where `43` is permanently floored, and independently by HLM's swept-sine test. Behaviour is unchanged (`max()` across drivers) — this is a documentation/label fix.
-3. **Re-check the bus baud rate.** See §2 and §8.
+3. ~~**Re-check the bus baud rate.**~~ **Done — measured at ~288,000 baud (§2).** Remaining decision: whether to change `baud_rate` from 281,250 to 288,000. Nothing is broken at 281,250 (the receiver tolerates the offset, and monitors evidently accept our transmissions), so this is a correctness-of-intent change rather than a bug fix. HLM should hear about it too — it is 2.88% high on the other side.
 
 **Protocol knowledge worth absorbing**
 
@@ -276,10 +293,7 @@ The two projects are close to complementary: espgensam is deeper on device topol
 
 These are hardware tests.
 
-**Baud rate (highest value).** Two options, both cheap:
-
-- Scope the bus with a single-shot capture on a known frame (e.g. the recurring `F0 1F 00 00 00`, whose byte values are known) and measure the bit period directly against the 8 known data bits.
-- Or sweep it in software: espgensam's RMT clock generator is exact, so build with `BAUDRATE` at 281250 / 284000 / 288000 / 292000 / 296296 and count `FrameParser`'s `invalid_count_` and CRC-failure counters against the OEM adapter's traffic over a few minutes each. The minimum is the true rate. Confirm the hypothesis that 288,000 (= 6 × 48 kHz) sits at the bottom of the curve.
+**Baud rate — done.** Implemented as `baud_sweep` in espgensam (see `components/gensam/baud_sweep.cpp`) and measured at ~288,000 baud; result in §2. Worth noting for anyone repeating it: counting decode failures per candidate rate does **not** work, because the receiver tolerates the whole disputed span. Fit the bit period to the raw edge intervals instead, measuring edge-to-edge across a full RMT symbol so that asymmetric rise/fall on the line cancels. An independent confirmation with a scope — capturing the recurring `F0 1F 00 67 9F` heartbeat, whose byte values are known — would remove the dependence on the ESP32's own clock.
 
 **`0x07` prefix.** Re-run a capture while pushing a configuration change from GLM (source select or crossover) with the system definitely on, and confirm `0x07`-prefixed frames carry `47 01`. Then verify the HA `media_player` does not flip to standby during that burst.
 

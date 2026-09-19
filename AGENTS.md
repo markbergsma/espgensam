@@ -38,7 +38,7 @@ The codebase enforces a strict three-tier architecture to prevent coupling proto
 - **Off-The-Shelf (COTS) Preference**:
   The primary aim is to make this work with unmodified, off-the-shelf development boards and modules (such as the M5Stack AtomS3 Lite + Atomic RS485 Base and LilyGO T-CAN485). Additional options requiring e.g. external pull-up resistors, custom soldering, or hardware modifications can be added only if needed.
 - **Continuous Zero-Gap RMT Transmission**:
-  The Genelec GLM RS-485 bus operates at 281,250 baud with 9 data bits and 2 stop bits. Because  many off-the-shelf transceivers (such as the MAX13487 or Atomic RS-485 auto-direction circuit) sense TX transitions to assert Driver Enable (DE), all multi-byte frames must be transmitted via RMT as a single, uninterrupted pulse train with **0 ns inter-byte gap**.
+  The Genelec GLM RS-485 bus operates at 288,000 baud with 9 data bits and 2 stop bits. Because  many off-the-shelf transceivers (such as the MAX13487 or Atomic RS-485 auto-direction circuit) sense TX transitions to assert Driver Enable (DE), all multi-byte frames must be transmitted via RMT as a single, uninterrupted pulse train with **0 ns inter-byte gap**.
 - **Half-Duplex Echo Suppression**:
   Half-duplex RS-485 transceivers echo transmitted bytes back onto the RX line. The receiver driver must wait for the RMT RX idle threshold (50 µs) to expire post-transmission (settling window ~80 µs), then completely flush the RX ring buffer before incoming monitor replies arrive.
 
