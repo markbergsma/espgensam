@@ -800,11 +800,16 @@ void GenSAMHub::log_stats_() {
   if (uart9_.rx_char_count() == 0) {
     return;  // Nothing has been received yet; stay quiet rather than log an empty tally
   }
-  ESP_LOGD(TAG, "Stats: %lu chars (%lu addr, %lu data), %lu bursts, %lu framing errs, %lu invalid, %lu crc errs%s [Monitors: %u]",
-           (unsigned long)uart9_.rx_char_count(), (unsigned long)uart9_.rx_addr_count(),
-           (unsigned long)uart9_.rx_data_count(), (unsigned long)uart9_.rx_burst_count(),
-           (unsigned long)uart9_.rx_framing_err_count(),
-           (unsigned long)parser_.invalid_count(), (unsigned long)parser_.crc_mismatch_count(),
+  RxDecodeSnapshot rx = uart9_.rx_stats();
+  ESP_LOGD(TAG,
+           "Stats: %lu chars (%lu addr, %lu data), %lu bursts | rx: %lu start rej, %lu stop2, "
+           "%lu framing errs | frames: %lu ok, %lu invalid, %lu crc errs, %lu C0 alias%s "
+           "[Monitors: %u]",
+           (unsigned long)rx.chars, (unsigned long)rx.addr_chars, (unsigned long)rx.data_chars,
+           (unsigned long)uart9_.rx_burst_count(), (unsigned long)rx.start_rejects,
+           (unsigned long)rx.stopbit2_rescues, (unsigned long)rx.framing_errs,
+           (unsigned long)parser_.valid_count(), (unsigned long)parser_.invalid_count(),
+           (unsigned long)parser_.crc_mismatch_count(), (unsigned long)parser_.c0_alias_count(),
            arbiter_.is_active() ? " [GLM ACTIVE - YIELDING]" : "",
            (unsigned)registry_.size());
 }

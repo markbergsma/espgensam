@@ -293,7 +293,7 @@ The two projects are close to complementary: espgensam is deeper on device topol
 
 These are hardware tests.
 
-**Baud rate — done.** Implemented as `baud_sweep` in espgensam (see `components/gensam/baud_sweep.cpp`) and measured at ~288,000 baud; result in §2. Worth noting for anyone repeating it: counting decode failures per candidate rate does **not** work, because the receiver tolerates the whole disputed span. Fit the bit period to the raw edge intervals instead, measuring edge-to-edge across a full RMT symbol so that asymmetric rise/fall on the line cancels. An independent confirmation with a scope — capturing the recurring `F0 1F 00 67 9F` heartbeat, whose byte values are known — would remove the dependence on the ESP32's own clock.
+**Baud rate — done.** Implemented as `baud_sweep` in espgensam on the `baud-rate-sweep` branch (`components/gensam/baud_sweep.cpp`; kept off `main`, where it would cost ISR time and 2 KB of RAM for a one-off diagnostic) and measured at ~288,000 baud; result in §2. Worth noting for anyone repeating it: counting decode failures per candidate rate does **not** work, because the receiver tolerates the whole disputed span. Fit the bit period to the raw edge intervals instead, measuring edge-to-edge across a full RMT symbol so that asymmetric rise/fall on the line cancels. An independent confirmation with a scope — capturing the recurring `F0 1F 00 67 9F` heartbeat, whose byte values are known — would remove the dependence on the ESP32's own clock.
 
 **`0x07` prefix.** Re-run a capture while pushing a configuration change from GLM (source select or crossover) with the system definitely on, and confirm `0x07`-prefixed frames carry `47 01`. Then verify the HA `media_player` does not flip to standby during that burst.
 

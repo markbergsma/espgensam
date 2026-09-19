@@ -40,7 +40,7 @@ The codebase enforces a strict three-tier architecture to prevent coupling proto
 - **Continuous Zero-Gap RMT Transmission**:
   The Genelec GLM RS-485 bus operates at 288,000 baud with 9 data bits and 2 stop bits. Because  many off-the-shelf transceivers (such as the MAX13487 or Atomic RS-485 auto-direction circuit) sense TX transitions to assert Driver Enable (DE), all multi-byte frames must be transmitted via RMT as a single, uninterrupted pulse train with **0 ns inter-byte gap**.
 - **Half-Duplex Echo Suppression**:
-  Half-duplex RS-485 transceivers echo transmitted bytes back onto the RX line. The receiver driver must wait for the RMT RX idle threshold (50 µs) to expire post-transmission (settling window ~80 µs), then completely flush the RX ring buffer before incoming monitor replies arrive.
+  Half-duplex RS-485 transceivers echo transmitted bytes back onto the RX line. Echo is discarded by fast-forwarding the RMT symbol cursor past **exactly** the transmitted frame's own duration (`tx_echo_ticks_`, the TX bit accumulator's final value), plus a `FrameParser::clear()` after each transmission. **Never add a blind settling delay or a blanket RX ring-buffer flush after TX**: monitors answer in ~5-10 µs, so any post-TX blind window eats the start bit of the reply. An earlier implementation waited 80 µs and flushed the ring buffer, and a later one padded the skip by just 2 bit times (~7 µs); both corrupted fast replies and were removed. The skip must stay exact.
 
 ---
 

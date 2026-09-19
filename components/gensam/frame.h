@@ -154,6 +154,18 @@ class FrameParser {
   /// @brief Total count of frames that failed CRC-16/GSM checksum verification.
   uint32_t crc_mismatch_count() const { return crc_mismatch_count_; }
 
+  /// @brief Total count of frames that passed CRC-16/GSM checksum verification.
+  ///
+  /// Gives the error counters a denominator: an error tally without it cannot distinguish a
+  /// degrading bus from a busy one.
+  uint32_t valid_count() const { return valid_count_; }
+
+  /// @brief Total count of address bytes rewritten from 0xC0 to HOST_ADDRESS.
+  ///
+  /// Quantifies how often RS-485 turnaround costs a reply's start bit; see the workaround in
+  /// feed(). This is the metric to compare across a transceiver change.
+  uint32_t c0_alias_count() const { return c0_alias_count_; }
+
   /// @brief Reset internal state machine, discarding any partial frame and queued frames.
   void clear();
 
@@ -172,6 +184,8 @@ class FrameParser {
 
   uint32_t invalid_count_{0};
   uint32_t crc_mismatch_count_{0};
+  uint32_t valid_count_{0};
+  uint32_t c0_alias_count_{0};
 };
 
 }  // namespace gensam

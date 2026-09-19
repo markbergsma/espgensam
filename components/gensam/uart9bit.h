@@ -65,6 +65,56 @@ struct Uart9BitChar {
   Uart9BitChar(uint8_t d, uint8_t n) : data(d), ninth_bit(n) {}
 };
 
+/// @brief Character-level decode outcome, as a plain value.
+///
+/// The three failure counters separate causes that a single "framing error" tally conflates,
+/// which is what makes receive-path quality measurable:
+/// - @ref start_rejects  A falling edge was found but the Start bit center did not sample LOW.
+///                       Line noise, or an edge arriving while the receiver is still settling.
+/// - @ref stopbit2_rescues  Stop Bit 1 sampled LOW but Stop Bit 2 sampled HIGH — the character
+///                       was recovered only by the fallback. On a correctly matched baud rate
+///                       this fires for genuinely slow pull-up rise times, so it is the leading
+///                       indicator of transceiver quality and the metric to compare across a
+///                       hardware change. Framing errors are the lagging indicator.
+/// - @ref framing_errs   Neither stop position sampled HIGH; the character is lost outright.
+///
+/// This is the snapshot type handed to reporting code. Each counter is a naturally aligned
+/// 32-bit word so an individual read cannot tear, and copying the whole set at once means a
+/// log line's arithmetic and its printed columns describe the same instant, rather than
+/// drifting apart as the ISR keeps counting between reads.
+struct RxDecodeSnapshot {
+  uint32_t chars{0};             ///< Characters successfully decoded.
+  uint32_t addr_chars{0};        ///< Of those, characters with the 9th bit set (address bytes).
+  uint32_t data_chars{0};        ///< Of those, characters with the 9th bit clear.
+  uint32_t start_rejects{0};     ///< Falling edges rejected at the Start bit center check.
+  uint32_t stopbit2_rescues{0};  ///< Characters salvaged only by sampling Stop Bit 2.
+  uint32_t framing_errs{0};      ///< Characters lost: neither stop bit position sampled HIGH.
+};
+
+/// @brief Character-level decode tally.
+///
+/// Counters are written from the RX ISR and read from the main task, hence @c volatile.
+/// Read them through @ref snapshot() rather than field by field.
+struct RxDecodeStats {
+  volatile uint32_t chars{0};
+  volatile uint32_t addr_chars{0};
+  volatile uint32_t data_chars{0};
+  volatile uint32_t start_rejects{0};
+  volatile uint32_t stopbit2_rescues{0};
+  volatile uint32_t framing_errs{0};
+
+  RxDecodeSnapshot snapshot() const {
+    RxDecodeSnapshot s;
+    s.chars = chars;
+    s.addr_chars = addr_chars;
+    s.data_chars = data_chars;
+    s.start_rejects = start_rejects;
+    s.stopbit2_rescues = stopbit2_rescues;
+    s.framing_errs = framing_errs;
+    return s;
+  }
+};
+
 /// @brief 9-bit RS-485 transceiver driver utilizing the ESP-IDF 5.x RMT peripheral.
 class Uart9Bit {
  public:
@@ -109,19 +159,28 @@ class Uart9Bit {
   // --- Diagnostic counters ---------------------------------------------------
 
   /// Total number of 9-bit characters received.
-  uint32_t rx_char_count() const { return rx_char_count_; }
+  uint32_t rx_char_count() const { return stats_.chars; }
 
   /// Number of characters where the 9th bit was 1 (address bytes).
-  uint32_t rx_addr_count() const { return rx_addr_count_; }
+  uint32_t rx_addr_count() const { return stats_.addr_chars; }
 
   /// Number of characters where the 9th bit was 0 (data/payload/CRC/delimiter bytes).
-  uint32_t rx_data_count() const { return rx_data_count_; }
+  uint32_t rx_data_count() const { return stats_.data_chars; }
 
   /// Number of pulse burst events captured by RMT.
   uint32_t rx_burst_count() const { return rx_burst_count_; }
 
-  /// Number of character framing errors (e.g. invalid stop bit).
-  uint32_t rx_framing_err_count() const { return rx_framing_err_count_; }
+  /// Number of character framing errors (neither stop bit position sampled HIGH).
+  uint32_t rx_framing_err_count() const { return stats_.framing_errs; }
+
+  /// Number of characters salvaged only by falling back to the Stop Bit 2 center.
+  uint32_t rx_stopbit2_count() const { return stats_.stopbit2_rescues; }
+
+  /// Number of falling edges rejected because the Start bit center did not sample LOW.
+  uint32_t rx_start_reject_count() const { return stats_.start_rejects; }
+
+  /// Consistent snapshot of the full decode tally.
+  RxDecodeSnapshot rx_stats() const { return stats_.snapshot(); }
 
  private:
   /// RMT RX event callback (called from ISR when a pulse burst completes).
@@ -158,11 +217,8 @@ class Uart9Bit {
   volatile uint32_t tx_echo_ticks_{0};
 
   // Diagnostic counters (updated from ISR, read from main task).
-  volatile uint32_t rx_char_count_{0};
-  volatile uint32_t rx_addr_count_{0};
-  volatile uint32_t rx_data_count_{0};
+  RxDecodeStats stats_{};
   volatile uint32_t rx_burst_count_{0};
-  volatile uint32_t rx_framing_err_count_{0};
 };
 
 }  // namespace gensam

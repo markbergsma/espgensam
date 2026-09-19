@@ -346,7 +346,8 @@ bool IRAM_ATTR Uart9Bit::rmt_rx_done_callback_(
 /// 2. Finds falling edges and confirms the Start bit center level (LOW).
 /// 3. Center-samples 8 data bits (LSB-first).
 /// 4. Center-samples the 9th bit (1 = address, 0 = data).
-/// 5. Verifies Stop bit level (HIGH), tracking framing errors if violated.
+/// 5. Verifies Stop bit level (HIGH), falling back to the Stop Bit 2 center and recording the
+///    outcome in RxDecodeStats, so a slow-rising receive path can be told from outright loss.
 /// 6. Pushes valid characters into the FreeRTOS ring buffer via xRingbufferSendFromISR().
 /// @param symbols Pointer to RMT symbol words.
 /// @param num_symbols Number of symbol words in the buffer.
@@ -384,6 +385,7 @@ void IRAM_ATTR Uart9Bit::decode_and_push_symbols_(
     // Verify Start bit: sample at t_start + 0.5 bit
     uint32_t sample_t = t_start + (half_bit_ticks_q16 >> 16);
     if (cursor.sample_at(sample_t) != 0) {
+      stats_.start_rejects++;
       cursor.advance();
       continue;
     }
@@ -408,9 +410,12 @@ void IRAM_ATTR Uart9Bit::decode_and_push_symbols_(
     if (stop_bit != 1) {
       // Check Stop Bit 2 center in case slow passive pull-up delayed Stop Bit 1 rise
       stop_bit = cursor.sample_at((t_bit_center_q16 + bit_ticks_q16) >> 16);
+      if (stop_bit == 1) {
+        stats_.stopbit2_rescues++;
+      }
     }
     if (stop_bit != 1) {
-      rx_framing_err_count_++;
+      stats_.framing_errs++;
       // Resynchronize: advance past any continuing LOW pulse to ensure the next
       // Start bit hunt begins from a confirmed HIGH (idle) state
       while (cursor.dur > 0 && cursor.lvl == 0) {
@@ -432,11 +437,11 @@ void IRAM_ATTR Uart9Bit::decode_and_push_symbols_(
 
     xRingbufferSendFromISR(rx_ringbuf_, &c, sizeof(c), nullptr);
 
-    rx_char_count_++;
+    stats_.chars++;
     if (ninth_bit) {
-      rx_addr_count_++;
+      stats_.addr_chars++;
     } else {
-      rx_data_count_++;
+      stats_.data_chars++;
     }
   }
 }
@@ -595,7 +600,7 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
   if (half == 1) {
     uint32_t next_cursor_q16 = bit_cursor_q16 + bit_ticks_q16;
     uint16_t dur = static_cast<uint16_t>((next_cursor_q16 >> 16) - (bit_cursor_q16 >> 16));
-    if (dur == 0) dur = 36;
+    if (dur == 0) dur = static_cast<uint16_t>(bit_ticks_q16 >> 16);
     tx_symbols_[sym_idx].level1 = 1;
     tx_symbols_[sym_idx].duration1 = dur;
     sym_idx++;

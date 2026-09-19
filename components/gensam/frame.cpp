@@ -156,10 +156,19 @@ void FrameParser::feed(const Uart9BitChar &c) {
     // transceiver turnaround lag on passive-pull RS-485 modules, decoding as 0xC0'.
     // We map 0xC0' to HOST_ADDRESS. Full integrity is strictly protected by the 16-bit CRC check
     // in process_candidate_(); any corrupted noise frame will fail CRC and be dropped.
-    // NOTE: If hardware with faster active-drive direction switching (e.g. discrete DE line control)
-    // is used in the future and eliminates turnaround lag, this alias can be removed.
+    //
+    // NOTE: this is NOT caused by our own driver-enable release, and discrete DE line control
+    // will not remove it. The bus captures settle this: glm_startup_capture.log and
+    // glm_v5_no_wakeup_capture.log contain no TX frames at all and still show the alias, and in
+    // glm_source_select_capture.log 47 of 50 occurrences fall after the hub has yielded the bus
+    // and stopped transmitting entirely. The lost start edge happens at the *bus* turnaround --
+    // the previous master's driver releasing, the line coasting to its idle bias, the monitor's
+    // driver asserting -- against a passive-pull receive front end. It is a receive-path
+    // property, so removing it needs a transceiver with better slew and active fail-safe
+    // biasing, not a DE output. Track c0_alias_count() to compare hardware.
     if (addr == 0xC0) {
       addr = HOST_ADDRESS;
+      c0_alias_count_++;
     }
 
     // Only accept bytes that represent valid GLM destination addresses.
@@ -250,7 +259,9 @@ void FrameParser::process_candidate_() {
   }
 
   bool crc_ok = verify_crc(check_ptr, check_len, wire_crc);
-  if (!crc_ok) {
+  if (crc_ok) {
+    valid_count_++;
+  } else {
     crc_mismatch_count_++;
   }
 
