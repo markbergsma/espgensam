@@ -290,11 +290,32 @@ marked *upstream* are corrections to HLM's specification.
     `alpha = (sin w0 / 2)·sqrt((A + 1/A)(1/S − 1) + 2)` with S fixed at 1.0. Fitting designed
     coefficients against the captured ones instead gives `alpha = sin(w0) / (2Q)` with
     **Q = 0.3 for low shelves and Q = 0.5 for high shelves**. Both fit to four decimal places
-    and one low-shelf band is bit-exact. The two parameterisations coincide exactly at 0 dB
-    gain, which is how an analysis over near-flat shelves could conclude S = 1.0 and still
-    reproduce most traffic. Caveat: every high shelf in this setup is within 0.02 dB of flat,
-    where Q barely influences the result, so Q = 0.5 is exact on this data but thinly
-    evidenced — see §8. The low shelf is well evidenced, with gains to −4.25 dB.
+    and one low-shelf band is bit-exact.
+
+    **How strongly is each pinned?** An earlier revision of this document answered "the low
+    shelf firmly, the high shelf weakly", reasoning that the two forms coincide at 0 dB and
+    that every high shelf in the capture sits within 0.02 dB of flat. That reasoning was
+    wrong, and it is worth recording why, because it is the intuitive answer.
+
+    The two forms coincide at 0 dB in **response**, not in **coefficients**. Setting A = 1
+    makes b equal a, so H(z) = 1 whatever `alpha` is — but `alpha` does not leave the
+    normalised coefficients, which still carry it through `a0 = ... + 2·sqrt(A)·alpha`. The Q
+    form gives `alpha = sin(w0)/(2Q)` and the slope form `alpha = (sin w0/2)·sqrt(2/S)` at
+    A = 1, a fixed ratio of √2 apart for Q = 0.5, S = 1. A flat shelf therefore still reports
+    its Q, in b1/a0 and a2/a0, as plainly as a boosted one.
+
+    Fitting accordingly — frequency and gain held at the setup file's values, Q swept alone —
+    gives, against the captured −0.0199986 dB / 14999 Hz high shelf:
+
+    | model | max coefficient error |
+    |---|---|
+    | **Q = 0.5** | **1.2e-07** (float32 noise floor) |
+    | Q = 0.48 | 2.0e-02 |
+    | S = 1.0, i.e. Q = 0.7071 | 1.7e-01 |
+
+    That brackets Q = 0.5 to **±2e-07**. The low shelf is independently confirmed over gains
+    to −4.25 dB, fitting Q = 0.3 at 6e-08. Both constants are firm, and neither needs the
+    large-gain capture §8 used to ask for.
 16. *(upstream)* **`10 01 00` is per-device level compensation, not "Max Level Restriction".**
     Across the three groups its value tracked the setup file's `Level_Sensitivity` for the
     same physical subwoofer exactly: −1.9258 dB, −8.3783 dB and 0.0 dB. That setup's global
@@ -356,6 +377,6 @@ These are hardware tests.
 
 **`0x3B`.** Send `3B 00 01` to an espgensam-managed system that has the 7350A in it and observe whether bass management disengages; and send `3B 00 5A` to a sub-less pair and observe whether anything changes. That distinguishes "mode enum with Hz overlay" from two unrelated encodings.
 
-**High-shelf Q (§7.1 item 15).** Q = 0.5 reproduces every high shelf captured so far exactly, but all of them sit within 0.02 dB of flat, where the Q term has almost no influence — at 0 dB the Q and slope forms are algebraically identical, so that data cannot distinguish them. Drive a large high-shelf gain and capture the result. GLM's Sound Character Profiler is the way to do it without disturbing a calibration: it controls Low Shelf 1 and High Shelf 1 directly, takes manual frequency and gain, and is reversible. Set something unmistakable (±6 to ±10 dB), capture the `10 0E` frames for slots `02`/`03`, and fit Q. The same pass re-confirms the low shelf at a second gain. Until then `SHELF_Q_HIGH` in `components/gensam/biquad.h` is the one constant in the designer resting on weak evidence.
+**High-shelf Q — withdrawn.** This asked for a large high-shelf gain, driven through the Sound Character Profiler, to settle `SHELF_Q_HIGH`. The existing capture already settles it; see §7.1 item 15 for why the near-flat shelves are sufficient and what the earlier reasoning got wrong. Noted in passing for anyone running an SCP capture for some other purpose: GLM clamps High Shelf 1 to +3 dB, so the ±6–10 dB this entry used to suggest is not reachable from that dialog.
 
 Suggested regression coverage once fixes land: a table-driven unit test over the real capture payloads in `captures/` feeding `parse_telemetry()`, asserting standby state, per-driver levels and temperature for the `06`-prefixed, `07`-prefixed, bare and unprefixed forms, and for both the sub (`46`/`84 01`) and two-way (`81`/`84 02`) frame shapes.

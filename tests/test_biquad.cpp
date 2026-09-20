@@ -115,9 +115,14 @@ void test_peaking_twoway_48k() {
 }
 
 // --- Shelving ----------------------------------------------------------------------------
-// The gain spread here is the point. At 0 dB the Q form and the slope form of the RBJ
-// shelving filter are identical, so only a band with real gain can tell them apart; the
-// -4.25 dB case does, and rules out the S = 1.0 the specification claims.
+// These cases are what rule out the S = 1.0 slope form the specification claims, and they do
+// so at every gain present -- including the -0.02 dB high shelf. The two forms coincide in
+// *response* at 0 dB but not in *coefficients*: the gain cancels out of H(z) while alpha does
+// not cancel out of the normalised coefficients, and the forms put alpha a factor of sqrt(2)
+// apart. Concretely, against the high-shelf vector below, S = 1.0 is out by 1.7e-01 and even
+// Q = 0.48 is out by 2e-02, against a tolerance of 1e-06. So these assertions pin
+// SHELF_Q_LOW and SHELF_Q_HIGH to within about 2e-07 and will fail on any attempt to
+// "restore" the published values.
 //
 // Q is deliberately passed as an absurd value to prove the shelving paths ignore it and use
 // their own fixed SHELF_Q_LOW / SHELF_Q_HIGH.

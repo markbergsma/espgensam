@@ -50,9 +50,13 @@
 ///    Appendix A.3 of the GLM protocol specification states that shelving bands use the
 ///    cookbook slope form with S fixed at 1.0.  They do not.  Matching designed coefficients
 ///    against captured ones shows the shelves use the *Q* form, alpha = sin(w0)/(2Q), with a
-///    different fixed Q per shelf type - see SHELF_Q_LOW and SHELF_Q_HIGH.  The two
-///    parameterisations coincide only when the gain is 0 dB, which is why an analysis based
-///    on near-flat shelves could conclude S = 1.0 and still reproduce most traffic.
+///    different fixed Q per shelf type - see SHELF_Q_LOW and SHELF_Q_HIGH.
+///
+///    It is tempting to think a near-flat shelf cannot distinguish the two forms, since at
+///    0 dB both produce an identity *response*.  That is true of the response and false of the
+///    coefficients: the gain cancels out of H(z) but alpha remains in every normalised
+///    coefficient, and the two forms put alpha a factor of sqrt(2) apart at any gain.  So even
+///    a 0.02 dB shelf pins Q tightly, which is why both constants below are firm.
 /// ===================================================================================
 
 #include <cstdint>
@@ -64,7 +68,7 @@ namespace gensam {
 ///
 /// The GLM user interface calls PEAKING bands "notches", but the DSP computes a standard
 /// peaking/bell section that takes boost as readily as cut.  Shelving bands ignore @c q: the
-/// interface hides the parameter and the coefficient streams show a slope fixed at S = 1.0.
+/// interface hides the parameter and the hardware uses a fixed Q per shelf type (point 5).
 enum class PeqType : uint8_t {
   BYPASS = 0,      ///< Unused slot; always transmitted as the identity vector.
   LOW_SHELF = 1,   ///< Low-frequency shelving filter (slots 0-1 on two-way monitors).
@@ -91,18 +95,15 @@ static constexpr BiquadCoeffs BIQUAD_BYPASS{1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 ///
 /// GLM exposes no slope or Q control for the shelving bands, and the values it uses are not
 /// the ones the protocol specification documents (see point 5 above). These were recovered by
-/// fitting designed coefficients to a capture of GLM applying three calibrated groups: both
-/// land on round numbers to four decimal places, and the low-shelf fit is bit-exact on one
-/// band, so they are the real constants rather than a curve fit that happens to be close.
-///
-/// Evidence is thinner for the high shelf than the low: every high shelf in the captured
-/// setup sits within 0.02 dB of flat, where Q barely influences the result. Q = 0.5 is exact
-/// on that data, but a capture with a large high-shelf gain - most easily produced through
-/// GLM's Sound Character Profiler, which drives Low Shelf 1 and High Shelf 1 directly - would
-/// settle it properly.
+/// fitting designed coefficients to a capture of GLM applying three calibrated groups. Both
+/// land on round numbers, which is the first sign they are the real constants rather than a
+/// curve fit that happens to be close; holding frequency and gain at the values from the setup
+/// file and sweeping Q alone is the second. That fit reproduces a -4.25 dB low shelf at
+/// 6e-08, and pins the high shelf to 0.5 within +/-2e-07 - the float32 noise floor - so
+/// neither constant is a guess.
 ///@{
-static constexpr float SHELF_Q_LOW = 0.3f;   ///< Low shelf; fitted bit-exactly on two bands.
-static constexpr float SHELF_Q_HIGH = 0.5f;  ///< High shelf; exact, but only on near-flat data.
+static constexpr float SHELF_Q_LOW = 0.3f;   ///< Low shelf; fitted over gains to -4.25 dB.
+static constexpr float SHELF_Q_HIGH = 0.5f;  ///< High shelf; fitted to +/-2e-07.
 ///@}
 
 /// @brief Design one second-order section from its user-facing parameters.
