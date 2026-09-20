@@ -274,8 +274,61 @@ The two projects are close to complementary: espgensam is deeper on device topol
 
 4. ~~Add `0x03` = Automatic to the `0x40` source enum.~~ **Closed — not the right action.** Automatic is a *standalone* setting, offered by GLM only when configuring what a speaker does on its own, not in live input selection; `0x40` is accordingly titled "Standalone Config Block / Input Routing" in HLM v12 and is step 6 of the flash-store sequence, immediately before `0x15 33 00`. Neither project has observed `03` on the wire — both list the same six payload variants, all `01`/`02` — so HLM's entry is inferred from the GLM UI and the `pair_selector`/`aes3_channel` bytes are unknown. It also could not be made to stick without a flash commit, which espgensam does not implement. Belongs to a standalone-settings feature (`0x40` + `0x3A 01/02/06` + `0x15`), not the input select. Capturing a GLM standalone store would settle both the encoding and that whole sequence.
 5. Document the `0x84` first byte as a device-class field (`01` = subwoofer, `02` = two-way, `03` reported by HLM in standby) rather than leaving the whole `0x8x` family as "skip 2".
-6. Record the newly-identified opcodes from HLM in `const.h` comments even if unimplemented — `0x05` generator, `0x10` DSP (PEQ / delay / level boundaries), `0x15` flash commit, `0x17` prepare-config, `0x3A 01/02/06` ISS settings, `0x3D` input sync — so the snoop decoder can label them instead of logging raw bytes.
-7. Optional feature work, in rough order of value: ISS sleep delay / sensitivity / LED via `3A 01/02/06`; startup and max level via `10 01`; time-of-flight delay via `10 02`; PEQ via `10 0E`. Anything persisted needs `15 33 00`.
+6. Record the newly-identified opcodes from HLM in `const.h` comments even if unimplemented — `0x05` generator, `0x10` DSP (PEQ / delay / level boundaries), `0x15` flash commit, `0x17` prepare-config, `0x3A 01/02/06` ISS settings, `0x3D` input sync — so the snoop decoder can label them instead of logging raw bytes. **Partly done:** `0x10` with its `01`/`02`/`0E` sub-commands and `0x17` are named and documented in `const.h`. `0x05`, `0x15` and `0x3A 01/02/06` are still unnamed.
+7. Optional feature work, in rough order of value: ISS sleep delay / sensitivity / LED via `3A 01/02/06`; startup and max level via `10 01`; time-of-flight delay via `10 02`; PEQ via `10 0E`. Anything persisted needs `15 33 00`. **PEQ, level and delay done** — see §7.1; the group preset feature transmits `17 01`, `10 02`, `10 01 00`, `10 0E` ×20, `3B` and `0x40` per speaker. ISS settings and flash commit are not implemented.
+
+### 7.1 Findings from the group-switch capture (2026-09-20)
+
+A fourth capture was taken specifically to settle the DSP encodings: GLM switching a
+calibrated 7350A + 2×8330A between the three groups of a GLM 5.2 setup file, with espgensam
+listening only. It contains 37 distinct non-bypass PEQ coefficient sets, and all 37 are
+reproduced to within **2.4e-7** — float32 epsilon near unity — by the implementation in
+`components/gensam/biquad.cpp`. The items below are what that capture established; those
+marked *upstream* are corrections to HLM's specification.
+
+15. *(upstream)* **Shelving filters use the Q form, not the slope form.** Appendix A.3 gives
+    `alpha = (sin w0 / 2)·sqrt((A + 1/A)(1/S − 1) + 2)` with S fixed at 1.0. Fitting designed
+    coefficients against the captured ones instead gives `alpha = sin(w0) / (2Q)` with
+    **Q = 0.3 for low shelves and Q = 0.5 for high shelves**. Both fit to four decimal places
+    and one low-shelf band is bit-exact. The two parameterisations coincide exactly at 0 dB
+    gain, which is how an analysis over near-flat shelves could conclude S = 1.0 and still
+    reproduce most traffic. Caveat: every high shelf in this setup is within 0.02 dB of flat,
+    where Q barely influences the result, so Q = 0.5 is exact on this data but thinly
+    evidenced — see §8. The low shelf is well evidenced, with gains to −4.25 dB.
+16. *(upstream)* **`10 01 00` is per-device level compensation, not "Max Level Restriction".**
+    Across the three groups its value tracked the setup file's `Level_Sensitivity` for the
+    same physical subwoofer exactly: −1.9258 dB, −8.3783 dB and 0.0 dB. That setup's global
+    volume limit is −20 dB, nowhere near any of them, and −8.38 dB is far too large for a
+    plausible output ceiling. The scale is also **2²³ − 1, not 2²³**: 0 dB is transmitted as
+    `7F FF FF`, and 2²³ does not fit the 24-bit field.
+    `round(10^(dB/20) × 8388607)` reproduces every observed value exactly.
+17. *(upstream)* **`10 02` is in 48 kHz samples on every device class**, which settles
+    Appendix B item 8's 4× ambiguity for subwoofers. On a subwoofer the value is the AutoPhase
+    angle expressed as a delay:
+    `round(((phase mod 360) / 360) / crossover_Hz × 48000)` predicted all three groups exactly
+    — 289, 267 and 67 samples for phases −165°, 180° and 45° at a 90 Hz crossover. The setup
+    file's `Time-of-flight_Compensation` was zero throughout and is *not* the source, which is
+    worth stating because it is the field the name suggests.
+18. *(upstream)* **The bypass vector is used only at exactly 0 dB**, for every filter type.
+    `generate_peq_48_payload()` treats `fabsf(gain_db) < 1e-4f` as flat, which would bypass
+    bands GLM designs: the capture has a peaking band at −3.9e-14 dB and a shelf at
+    −3.1e-05 dB, both transmitted as honestly computed near-identity sections rather than as
+    `{1, 0, 0, 0, 0}`.
+19. *(upstream)* **PEQ slot layout differs by device class.** A two-way monitor uses slots
+    0–1 for low shelves, 2–3 for high shelves and 4–19 for peaking bands; a **subwoofer uses
+    all twenty as peaking bands and has no shelves**. `on_peq_48()`'s index-to-name mapping
+    assumes the two-way layout for every device, so it would decode a subwoofer's first four
+    bands as shelves.
+20. *(upstream)* **`generate_peq_48_payload()` hardcodes 48 kHz** (`glm_library.c:39`). With
+    the subwoofer rate now confirmed on the wire rather than only in the config file, a
+    subwoofer's bands designed through it land 4× high — a 40 Hz notch at 160 Hz.
+21. *(upstream)* **The `.sam` `Input:` field is the complete routing enum** — 1 = AES3 A,
+    2 = AES3 B, 3 = AES3 A+B sum, 4 = analog — which resolves the source and sub-channel bytes
+    of `0x40` together. Verified across all three groups including one that runs the subwoofer
+    on AES3 sum while both mains are analog, so **routing is per device, not per group**;
+    `Group_Audio` is not the authority.
+22. **Subwoofer PEQ design rate of 12 kHz is now confirmed on the wire**, not only inferred
+    from the setup file (§4 of HLM v12 cites the config file). Two-way at 48 kHz likewise.
 
 **Worth sending upstream to HLM**
 
@@ -302,5 +355,7 @@ These are hardware tests.
 **`0x2B` LED bits.** Send `2B 00`, `2B 02`, `2B 04`, `2B 06`, `2B 08` to one monitor and record the front LED colour and steady/pulsing behaviour. This settles the espgensam bitfield vs. HLM enum question in one pass.
 
 **`0x3B`.** Send `3B 00 01` to an espgensam-managed system that has the 7350A in it and observe whether bass management disengages; and send `3B 00 5A` to a sub-less pair and observe whether anything changes. That distinguishes "mode enum with Hz overlay" from two unrelated encodings.
+
+**High-shelf Q (§7.1 item 15).** Q = 0.5 reproduces every high shelf captured so far exactly, but all of them sit within 0.02 dB of flat, where the Q term has almost no influence — at 0 dB the Q and slope forms are algebraically identical, so that data cannot distinguish them. Drive a large high-shelf gain and capture the result. GLM's Sound Character Profiler is the way to do it without disturbing a calibration: it controls Low Shelf 1 and High Shelf 1 directly, takes manual frequency and gain, and is reversible. Set something unmistakable (±6 to ±10 dB), capture the `10 0E` frames for slots `02`/`03`, and fit Q. The same pass re-confirms the low shelf at a second gain. Until then `SHELF_Q_HIGH` in `components/gensam/biquad.h` is the one constant in the designer resting on weak evidence.
 
 Suggested regression coverage once fixes land: a table-driven unit test over the real capture payloads in `captures/` feeding `parse_telemetry()`, asserting standby state, per-driver levels and temperature for the `06`-prefixed, `07`-prefixed, bare and unprefixed forms, and for both the sub (`46`/`84 01`) and two-way (`81`/`84 02`) frame shapes.
