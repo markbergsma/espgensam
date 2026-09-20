@@ -80,6 +80,7 @@
 #include "arbiter.h"
 #include "const.h"
 #include "frame.h"
+#include "groups.h"
 #include "monitor.h"
 #include "registry.h"
 #include "uart9bit.h"
@@ -163,6 +164,37 @@ class GenSAMHub : public Component {
 
   /// @brief Register a configured monitor binding to match discovered hardware.
   void add_monitor_binding(const GenSAMMonitorBinding &binding) { registry_.add_binding(binding); }
+
+  /// @brief Point the hub at the generated, flash-resident group preset table.
+  ///
+  /// The table outlives the hub and is never copied or freed; see groups.h.
+  /// @param groups First element of the generated GroupPreset array, or nullptr for none.
+  /// @param count Number of presets in the array.
+  void set_group_table(const GroupPreset *groups, uint8_t count) {
+    groups_ = groups;
+    group_count_ = count;
+  }
+
+  /// @brief Number of configured group presets; 0 when the feature is unused.
+  uint8_t get_group_count() const { return group_count_; }
+
+  /// @brief Look up a group preset by index.
+  /// @param index Preset index, 0..get_group_count()-1.
+  /// @return Pointer into the generated table, or nullptr if out of range.
+  const GroupPreset *get_group(uint8_t index) const {
+    return (groups_ != nullptr && index < group_count_) ? &groups_[index] : nullptr;
+  }
+
+  /// @brief Find a group preset by its configured name.
+  /// @param name Name to match, compared exactly.
+  /// @return Preset index, or -1 if no group carries that name.
+  int find_group_index(const std::string &name) const;
+
+  /// @brief Find the entry for a monitor within a group preset.
+  /// @param group The preset to search.
+  /// @param unique_id GLM hardware id to match.
+  /// @return Pointer into the generated table, or nullptr if the monitor is not in the group.
+  static const GroupDevice *find_group_device(const GroupPreset &group, uint32_t unique_id);
 
   /// @brief Register system volume in dB number entity.
   /// @param num Pointer to the GenSAMVolumeNumber entity.
@@ -552,6 +584,10 @@ class GenSAMHub : public Component {
 
   // Monitor registry, configured bindings, and all Home Assistant entity publishing
   MonitorRegistry registry_;
+
+  // Generated group preset table; flash-resident and read-only, see groups.h.
+  const GroupPreset *groups_{nullptr};
+  uint8_t group_count_{0};
 
   // Active RACE & query state machine
   RaceState race_state_{RaceState::IDLE};

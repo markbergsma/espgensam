@@ -135,6 +135,24 @@ void GenSAMHub::setup() {
            rx_pin_, YESNO(yield_to_glm_), (unsigned)glm_inactivity_cooldown_ms_);
 }
 
+int GenSAMHub::find_group_index(const std::string &name) const {
+  for (uint8_t i = 0; i < group_count_; i++) {
+    if (groups_[i].name != nullptr && name == groups_[i].name) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+const GroupDevice *GenSAMHub::find_group_device(const GroupPreset &group, uint32_t unique_id) {
+  for (uint8_t i = 0; i < group.device_count; i++) {
+    if (group.devices[i].unique_id == unique_id) {
+      return &group.devices[i];
+    }
+  }
+  return nullptr;
+}
+
 void GenSAMHub::dump_config() {
   ESP_LOGCONFIG(TAG, "GenSAM Hub:");
   ESP_LOGCONFIG(TAG, "  TX Pin: GPIO%d", tx_pin_);
@@ -153,6 +171,28 @@ void GenSAMHub::dump_config() {
   ESP_LOGCONFIG(TAG, "  Configured Monitor Bindings: %u", (unsigned)registry_.bindings().size());
   for (const auto &b : registry_.bindings()) {
     ESP_LOGCONFIG(TAG, "    - Name: '%s' (SN: '%s')", b.name.c_str(), b.serial_number.c_str());
+  }
+  ESP_LOGCONFIG(TAG, "  Group Presets: %u", (unsigned)group_count_);
+  for (uint8_t g = 0; g < group_count_; g++) {
+    const GroupPreset &grp = groups_[g];
+    ESP_LOGCONFIG(TAG, "    - '%s' (%u devices)", grp.name, (unsigned)grp.device_count);
+    for (uint8_t d = 0; d < grp.device_count; d++) {
+      const GroupDevice &dev = grp.devices[d];
+      // Report the bands that will actually be transmitted as filters rather than as the
+      // bypass vector, since a generated table is mostly empty slots and the count is the
+      // quickest way to see that a group carries the calibration it should.
+      unsigned active = 0;
+      for (uint8_t b = 0; b < dev.band_count; b++) {
+        if (dev.bands[b].type != PeqType::BYPASS && dev.bands[b].gain_db != 0.0f) {
+          active++;
+        }
+      }
+      ESP_LOGCONFIG(TAG, "        id %lu: %s, %s, %u Hz, %.2f dB, %lu samples, %u/%u bands",
+                    (unsigned long)dev.unique_id, dev.enabled ? "on" : "off",
+                    (dev.source == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : aes3_channel_to_str(dev.aes3_channel),
+                    (unsigned)dev.crossover_hz, dev.level_db, (unsigned long)dev.delay_samples, active,
+                    (unsigned)dev.band_count);
+    }
   }
   if (de_pin_ >= 0) {
     ESP_LOGCONFIG(TAG, "  Hardware DE (Direction) Pin: GPIO%d", de_pin_);

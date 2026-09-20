@@ -65,6 +65,48 @@ CONF_BUS_STATUS = "bus_status"
 CONF_STATUS_LED = "status_led"
 CONF_MODE = "mode"
 
+CONF_GROUPS = "groups"
+CONF_DEVICES = "devices"
+CONF_ENABLED = "enabled"
+CONF_SOURCE = "source"
+CONF_CROSSOVER = "crossover"
+CONF_LEVEL_DB = "level_db"
+CONF_DELAY_SAMPLES = "delay_samples"
+CONF_FREQUENCY = "frequency"
+CONF_GAIN = "gain"
+CONF_Q = "q"
+CONF_TYPE = "type"
+
+# Number of parametric EQ slots per device; mirrors PEQ_BAND_COUNT in const.h.
+PEQ_BAND_COUNT = 20
+
+# Bass management crossover bounds; mirror the *_CROSSOVER_HZ constants in const.h.
+DEFAULT_CROSSOVER_HZ = 85
+MIN_CROSSOVER_HZ = 50
+MAX_CROSSOVER_HZ = 120
+
+# YAML `source:` -> (C++ source constant, C++ AES3 channel constant).
+#
+# One key covers both bytes because that is how a GLM setup file expresses it, as a single
+# `Input:` enum, and because the pair is never usefully mixed: an analog device has no
+# sub-channel. The .sam numbering is 1=A, 2=B, 3=A+B sum, 4=analog.
+GROUP_SOURCES = {
+    "analog": ("gensam::SOURCE_ANALOG", "gensam::AES3_CHANNEL_A"),
+    "aes3_a": ("gensam::SOURCE_DIGITAL_AES3", "gensam::AES3_CHANNEL_A"),
+    "aes3_b": ("gensam::SOURCE_DIGITAL_AES3", "gensam::AES3_CHANNEL_B"),
+    "aes3_sum": ("gensam::SOURCE_DIGITAL_AES3", "gensam::AES3_CHANNEL_SUM"),
+}
+
+# YAML `type:` -> C++ PeqType. "notch" is GLM's name for what the DSP computes as a peaking
+# filter, and is accepted under both names.
+PEQ_TYPES = {
+    "notch": "gensam::PeqType::PEAKING",
+    "peaking": "gensam::PeqType::PEAKING",
+    "low_shelf": "gensam::PeqType::LOW_SHELF",
+    "high_shelf": "gensam::PeqType::HIGH_SHELF",
+    "bypass": "gensam::PeqType::BYPASS",
+}
+
 gensam_ns = cg.esphome_ns.namespace("gensam")
 GenSAMHub = gensam_ns.class_("GenSAMHub", cg.Component)
 GenSAMMuteSwitch = gensam_ns.class_("GenSAMMuteSwitch", switch.Switch)
@@ -325,6 +367,94 @@ MONITOR_SCHEMA = cv.All(
     _validate_monitor,
 )
 
+def _validate_peq_band(conf):
+    """A peaking band needs a Q; the shelving types have a fixed one and must not carry it."""
+    kind = conf[CONF_TYPE]
+    if kind in ("notch", "peaking"):
+        if CONF_Q not in conf:
+            raise cv.Invalid(f"A '{kind}' filter requires 'q'")
+    elif CONF_Q in conf:
+        raise cv.Invalid(
+            f"A '{kind}' filter must not specify 'q': GLM exposes no slope control for the "
+            f"shelving bands and uses a fixed value per type"
+        )
+    return conf
+
+
+PEQ_BAND_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_TYPE): cv.one_of(*PEQ_TYPES, lower=True),
+            cv.Required(CONF_FREQUENCY): cv.positive_float,
+            cv.Required(CONF_GAIN): cv.float_,
+            cv.Optional(CONF_Q): cv.positive_float,
+        }
+    ),
+    _validate_peq_band,
+)
+
+GROUP_DEVICE_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_UNIQUE_ID): cv.positive_int,
+        cv.Optional(CONF_ENABLED, default=True): cv.boolean,
+        cv.Optional(CONF_SOURCE, default="analog"): cv.one_of(*GROUP_SOURCES, lower=True),
+        cv.Optional(CONF_CROSSOVER): cv.int_range(min=MIN_CROSSOVER_HZ, max=MAX_CROSSOVER_HZ),
+        # Attenuation only. A GLM setup file writes -999 for "not calibrated", and anything
+        # at or below -130 dB encodes as digital silence, so the floor is deliberately well
+        # above both: a sentinel leaking through here would mute the speaker.
+        cv.Optional(CONF_LEVEL_DB, default=0.0): cv.float_range(min=-60.0, max=0.0),
+        cv.Optional(CONF_DELAY_SAMPLES, default=0): cv.int_range(min=0, max=48000),
+        cv.Optional(CONF_FILTERS, default=[]): cv.All(
+            cv.ensure_list(PEQ_BAND_SCHEMA), cv.Length(max=PEQ_BAND_COUNT)
+        ),
+    }
+)
+
+GROUP_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_NAME): cv.string_strict,
+        cv.Optional(CONF_CROSSOVER, default=DEFAULT_CROSSOVER_HZ): cv.int_range(
+            min=MIN_CROSSOVER_HZ, max=MAX_CROSSOVER_HZ
+        ),
+        cv.Required(CONF_DEVICES): cv.All(cv.ensure_list(GROUP_DEVICE_SCHEMA), cv.Length(min=1)),
+    }
+)
+
+
+def _validate_groups(config):
+    """Cross-check the group table against the monitors it refers to."""
+    groups = config.get(CONF_GROUPS)
+    if not groups:
+        return config
+
+    known = {m.get(CONF_UNIQUE_ID) for m in config.get(CONF_MONITORS, []) if m.get(CONF_UNIQUE_ID)}
+    seen_names = set()
+    for group in groups:
+        name = group[CONF_NAME]
+        if name in seen_names:
+            raise cv.Invalid(
+                f"Duplicate group name '{name}'. Names are the Home Assistant select options "
+                f"and are how a group is looked up, so they must be unique."
+            )
+        seen_names.add(name)
+
+        seen_ids = set()
+        for dev in group[CONF_DEVICES]:
+            uid = dev[CONF_UNIQUE_ID]
+            if uid in seen_ids:
+                raise cv.Invalid(f"Group '{name}' lists unique_id {uid} more than once")
+            seen_ids.add(uid)
+            if known and uid not in known:
+                raise cv.Invalid(
+                    f"Group '{name}' refers to unique_id {uid}, which is not one of the "
+                    f"configured monitors ({', '.join(str(k) for k in sorted(known))}). "
+                    f"In a GLM setup file this is the device's 'Serial:' field."
+                )
+            # Inherit the group crossover so the generated table is always explicit.
+            dev.setdefault(CONF_CROSSOVER, group[CONF_CROSSOVER])
+    return config
+
+
 def _validate_hub(config):
     if CONF_AUDIO_SOURCE not in config:
         config[CONF_AUDIO_SOURCE] = select.select_schema(
@@ -385,6 +515,7 @@ _CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_MAX_VOLUME_DB, default=0.0): cv.float_,
         cv.Optional(CONF_STARTUP_VOLUME_DB, default=-30.0): cv.float_,
         cv.Optional(CONF_MONITORS): cv.ensure_list(MONITOR_SCHEMA),
+        cv.Optional(CONF_GROUPS): cv.All(cv.ensure_list(GROUP_SCHEMA), cv.Length(min=1)),
         cv.Optional(CONF_REDISCOVER_BUTTON): button.button_schema(
             GenSAMRediscoverButton,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
@@ -416,12 +547,95 @@ _CONFIG_SCHEMA = cv.Schema(
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
-CONFIG_SCHEMA = cv.All(_CONFIG_SCHEMA, _validate_hub)
+CONFIG_SCHEMA = cv.All(_CONFIG_SCHEMA, _validate_hub, _validate_groups)
+
+
+def _cpp_float(value):
+    """Render a Python float as a C++ float literal without losing a representable digit.
+
+    %.9g is the shortest form that round-trips through float32, which is what the literal
+    becomes. Truncating matters here: -8.37833 dB and -8.3783 dB encode to level words 11
+    counts apart.
+
+    A whole number formats without a decimal point, and `20f` is not a float literal -- it
+    parses as a user-defined literal suffix and fails to compile -- so one is added back.
+    """
+    text = f"{value:.9g}"
+    if "." not in text and "e" not in text and "E" not in text and "inf" not in text:
+        text += ".0"
+    return f"{text}f"
+
+
+def _cpp_string(value):
+    """Render a Python string as a C++ string literal."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _emit_group_table(config):
+    """Emit the generated GroupPreset table and return the C++ expression naming it.
+
+    Written as one raw global rather than through constructor arguments: a group holds a few
+    hundred filter parameters, which is far past what is readable as a positional initialiser
+    and would be brittle to reorder. Everything is `static const` so it lands in flash and
+    keeps internal linkage.
+    """
+    groups = config.get(CONF_GROUPS)
+    if not groups:
+        return None
+
+    lines = ["", "// Generated from the gensam `groups:` configuration. See groups.h.", ""]
+
+    for gi, group in enumerate(groups):
+        for di, dev in enumerate(group[CONF_DEVICES]):
+            bands = dev[CONF_FILTERS]
+            array = f"gensam_g{gi}_d{di}_bands"
+            lines.append(f"static const esphome::gensam::PeqBand {array}[] = {{")
+            for band in bands:
+                kind = PEQ_TYPES[band[CONF_TYPE]]
+                q = band.get(CONF_Q, 0.0)
+                lines.append(
+                    f"    {{{kind}, {_cpp_float(band[CONF_FREQUENCY])}, "
+                    f"{_cpp_float(band[CONF_GAIN])}, {_cpp_float(q)}}},"
+                )
+            if not bands:
+                # A zero-length array is ill-formed in C++; an explicit bypass slot keeps the
+                # generated code valid and means the same thing.
+                lines.append("    {esphome::gensam::PeqType::BYPASS, 0.0f, 0.0f, 0.0f},")
+            lines.append("};")
+
+    for gi, group in enumerate(groups):
+        lines.append(f"static const esphome::gensam::GroupDevice gensam_g{gi}_devices[] = {{")
+        for di, dev in enumerate(group[CONF_DEVICES]):
+            source, channel = GROUP_SOURCES[dev[CONF_SOURCE]]
+            count = len(dev[CONF_FILTERS])
+            lines.append(
+                f"    {{{dev[CONF_UNIQUE_ID]}u, {str(dev[CONF_ENABLED]).lower()}, "
+                f"{dev[CONF_CROSSOVER]}u, {source}, {channel}, "
+                f"{_cpp_float(dev[CONF_LEVEL_DB])}, {dev[CONF_DELAY_SAMPLES]}u, "
+                f"gensam_g{gi}_d{di}_bands, {count}u}},"
+            )
+        lines.append("};")
+
+    lines.append("static const esphome::gensam::GroupPreset gensam_group_table[] = {")
+    for gi, group in enumerate(groups):
+        lines.append(
+            f"    {{{_cpp_string(group[CONF_NAME])}, gensam_g{gi}_devices, "
+            f"{len(group[CONF_DEVICES])}u}},"
+        )
+    lines.append("};")
+
+    cg.add_global(cg.RawStatement("\n".join(lines)))
+    return len(groups)
 
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+
+    group_count = _emit_group_table(config)
+    if group_count:
+        cg.add(var.set_group_table(cg.RawExpression("gensam_group_table"), group_count))
 
     tx_pin = await cg.gpio_pin_expression(config[CONF_TX_PIN])
     rx_pin = await cg.gpio_pin_expression(config[CONF_RX_PIN])
