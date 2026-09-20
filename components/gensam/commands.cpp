@@ -98,6 +98,21 @@ Frame make_peq_band(uint8_t addr, uint8_t index, const BiquadCoeffs &c) {
   return Frame(addr, CMD_DSP, std::move(payload));
 }
 
+Frame make_level(uint8_t addr, float db) {
+  // Deliberately the same conversion CMD_VOLUME uses: the two fields share an encoding, and
+  // a private copy here could drift out of step with it after a correction to one of them.
+  uint8_t level[3];
+  encode_int24(volume_db_to_int24(db), level);
+  return Frame(addr, CMD_DSP, {DSP_SUB_LEVEL, DSP_LEVEL_COMPENSATION, level[0], level[1], level[2]});
+}
+
+Frame make_delay(uint8_t addr, uint32_t samples) {
+  return Frame(addr, CMD_DSP,
+               {DSP_SUB_DELAY, static_cast<uint8_t>((samples >> 24) & 0xFF),
+                static_cast<uint8_t>((samples >> 16) & 0xFF),
+                static_cast<uint8_t>((samples >> 8) & 0xFF), static_cast<uint8_t>(samples & 0xFF)});
+}
+
 Frame make_audio_source(uint8_t addr, uint8_t input_idx, uint8_t source, uint8_t channel) {
   if (source == SOURCE_DIGITAL_AES3) {
     // Byte 2 is unused for AES3; the sub-channel in byte 3 applies to the primary input only.

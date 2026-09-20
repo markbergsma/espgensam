@@ -85,29 +85,33 @@ static constexpr uint8_t VOLUME_PAYLOAD_SILENCE[3] = {0x00, 0x00, 0x02};
 // --- CMD_DSP (0x10) sub-commands -------------------------------------------
 /// @name DSP parameter sub-commands
 ///
-/// Only the PEQ sub-command is implemented. The other two are named here because they appear
-/// in this project's captures during every OEM enumeration and group apply, so a reader
-/// decoding a log needs them - but neither is transmitted, because the meaning of their
-/// payloads is not settled:
+/// 0x01 and 0x02 were both settled by capturing GLM switching a calibrated system between
+/// three groups; see docs/glm-protocol-comparison.md.
 ///
-///  - 0x01 carries [sub, 3-byte level] in the same 2^23 linear-gain encoding as CMD_VOLUME.
-///    The protocol specification labels sub-command 0x00 "max level restriction", but its
-///    observed values (0x7A3957 = -0.40 dB, 0x748C42 = -0.81 dB) sit in the range of a GLM
-///    setup file's per-device Level_Sensitivity trim rather than anywhere near a typical max
-///    level. Our own captures show 0x7FFFFF = 0.0 dB on an uncalibrated system, which is
-///    consistent with either reading. Sub-command 0x09 is undocumented and observed only as
-///    0x000000.
-///  - 0x02 carries a 4-byte time-of-flight delay as a sample count. Confirmed at 48 kHz for
-///    two-way monitors; whether a subwoofer's count is at 48 kHz or its 12 kHz design rate is
-///    unresolved, and the two differ by 4x.
-///
-/// Sending either on a guess would write a wrong parameter into a calibrated speaker, so both
-/// wait on a capture of GLM applying a calibrated group. See docs/glm-protocol-comparison.md.
+///  - 0x01 carries [sub-command, 3-byte level] in the same linear-gain encoding as
+///    CMD_VOLUME. Sub-command 0x00 is the **per-device level compensation**, not the "max
+///    level restriction" the protocol specification labels it: across the three captured
+///    groups its value tracked the setup file's Level_Sensitivity exactly, at -1.9258 dB,
+///    -8.3783 dB and 0.0 dB, nowhere near that setup's global -20 dB volume limit.
+///    Sub-command 0x09 is emitted by GLM on every device with a constant 0x000000 payload;
+///    its meaning is unknown and this component does not send it.
+///  - 0x02 carries a 4-byte big-endian time-of-flight delay as a sample count **at 48 kHz on
+///    every device class**, which resolves the 4x ambiguity the specification flags for
+///    subwoofers. On a subwoofer the value is the AutoPhase result expressed as a delay:
+///    round(((phase_degrees mod 360) / 360) / crossover_hz * 48000) reproduced all three
+///    captured groups exactly (289, 267 and 67 samples). The setup file's
+///    Time-of-flight_Compensation field was zero throughout and is not the source.
 ///@{
-static constexpr uint8_t DSP_SUB_LEVEL = 0x01;  ///< Level compensation / boundaries (not sent).
-static constexpr uint8_t DSP_SUB_DELAY = 0x02;  ///< Time-of-flight delay (not sent).
+static constexpr uint8_t DSP_SUB_LEVEL = 0x01;  ///< Level compensation / boundaries.
+static constexpr uint8_t DSP_SUB_DELAY = 0x02;  ///< Time-of-flight delay, samples at 48 kHz.
 static constexpr uint8_t DSP_SUB_PEQ = 0x0E;    ///< Parametric EQ band coefficients.
 ///@}
+
+/// DSP_SUB_LEVEL sub-command selecting the per-device level compensation.
+static constexpr uint8_t DSP_LEVEL_COMPENSATION = 0x00;
+
+/// Timebase of a DSP_SUB_DELAY sample count, independent of the device's PEQ design rate.
+static constexpr uint32_t DSP_DELAY_RATE_HZ = 48000;
 
 /// Number of parametric EQ slots per device; wire indices run 0x00..PEQ_MAX_INDEX.
 static constexpr uint8_t PEQ_BAND_COUNT = 20;

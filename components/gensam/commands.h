@@ -132,5 +132,31 @@ Frame make_prepare_config(uint8_t addr);
 ///         default-constructed Frame if @p index exceeds PEQ_MAX_INDEX.
 Frame make_peq_band(uint8_t addr, uint8_t index, const BiquadCoeffs &c);
 
+/// @brief Build a per-device level compensation frame (CMD_DSP 0x10, DSP_SUB_LEVEL 0x01).
+///
+/// This is the trim AutoCal derives to match a speaker's output to the rest of the group -
+/// the setup file's Level_Sensitivity - and it changes between groups, so it has to be
+/// re-sent whenever the active group changes.  Despite the name the protocol specification
+/// gives sub-command 0x00, it is not a maximum-level limit; see const.h.
+///
+/// The level shares CMD_VOLUME's encoding, so volume_db_to_int24() applies unchanged: its
+/// scale of 2^23-1 reproduces every captured value exactly, including 0 dB as 0x7FFFFF.
+///
+/// @param addr Target monitor bus address.
+/// @param db Attenuation in decibels; 0.0 is unity and positive values clamp to it.  Levels
+///           at or below -130 dB encode as digital silence, so callers must filter sentinel
+///           values - a GLM setup file writes Calibration_Level: -999 for "not calibrated",
+///           and passing that through would mute the speaker.
+/// @return CMD_DSP frame carrying [0x01, 0x00, level(3, big-endian)].
+Frame make_level(uint8_t addr, float db);
+
+/// @brief Build a time-of-flight delay frame (CMD_DSP 0x10, DSP_SUB_DELAY 0x02).
+/// @param addr Target monitor bus address.
+/// @param samples Delay in samples at 48 kHz (DSP_DELAY_RATE_HZ) on every device class,
+///                including subwoofers, whose PEQ is designed at 12 kHz but whose delay is
+///                not.  0 means no added delay.
+/// @return CMD_DSP frame carrying [0x02, samples(4, big-endian)].
+Frame make_delay(uint8_t addr, uint32_t samples);
+
 }  // namespace gensam
 }  // namespace esphome
