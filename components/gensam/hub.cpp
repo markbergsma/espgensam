@@ -135,6 +135,37 @@ void GenSAMHub::setup() {
            rx_pin_, YESNO(yield_to_glm_), (unsigned)glm_inactivity_cooldown_ms_);
 }
 
+void GenSAMHub::set_active_group(uint8_t index) {
+  const GroupPreset *group = this->get_group(index);
+  if (group == nullptr) {
+    ESP_LOGW(TAG, "Ignoring group preset %u: only %u are configured", (unsigned) index,
+             (unsigned) group_count_);
+    return;
+  }
+
+  // Record the request rather than transmitting here. The push is hundreds of frames and has
+  // to be paced, and this is called from a Home Assistant callback which must return promptly.
+  // Overwriting any earlier request is deliberate: flicking through the select in the user
+  // interface should settle on the last choice, not play every group in turn.
+  pending_group_ = index;
+  ESP_LOGD(TAG, "Group preset '%s' queued for application", group->name);
+
+  // Reflect the choice immediately so the entity does not sit on the old value for the
+  // second or so the push takes; finish_group_apply_() publishes it again on completion.
+  if (group_select_ != nullptr) {
+    group_select_->publish_state(group->name);
+  }
+}
+
+void GenSAMHub::set_active_group_by_name(const std::string &name) {
+  const int index = this->find_group_index(name);
+  if (index < 0) {
+    ESP_LOGW(TAG, "Ignoring unknown group preset '%s'", name.c_str());
+    return;
+  }
+  this->set_active_group(static_cast<uint8_t>(index));
+}
+
 int GenSAMHub::find_group_index(const std::string &name) const {
   for (uint8_t i = 0; i < group_count_; i++) {
     if (groups_[i].name != nullptr && name == groups_[i].name) {

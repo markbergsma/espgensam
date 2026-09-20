@@ -87,6 +87,11 @@ struct GenSAMMonitorBinding {
   select::Select *aes3_channel_select{nullptr};        ///< AES3 input sub-channel select entity (Channel A, B, Sum).
   uint8_t aes3_channel{AES3_CHANNEL_A};                ///< Configured / active AES3 channel (default: AES3_CHANNEL_A).
   bool aes3_channel_configured{false};                 ///< True if an AES3 channel was set by user or sniffed from GLM.
+
+  /// Override for the rate this speaker's PEQ bands are designed at, or 0 to derive it from
+  /// the discovered model (PEQ_RATE_SUBWOOFER_HZ for a 7xxx, PEQ_RATE_DEFAULT_HZ otherwise).
+  /// Only needed for a model whose rate is not yet known; see const.h.
+  uint32_t peq_design_rate{0};
 };
 
 /// @brief Represents a single Genelec SAM monitor or subwoofer discovered on the RS-485 bus.

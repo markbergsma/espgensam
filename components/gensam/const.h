@@ -117,6 +117,21 @@ static constexpr uint32_t DSP_DELAY_RATE_HZ = 48000;
 static constexpr uint8_t PEQ_BAND_COUNT = 20;
 static constexpr uint8_t PEQ_MAX_INDEX = PEQ_BAND_COUNT - 1;  ///< 0x13.
 
+/// @name PEQ design sample rates
+///
+/// A biquad only means anything relative to the rate it was designed at, and Genelec does not
+/// use one rate across the range. Both values are confirmed: from a setup file, where every
+/// subwoofer band carries SR:12000 and every two-way band SR:48000, and from a bus capture in
+/// which coefficients designed at those rates reproduce GLM's exactly. Designing at the wrong
+/// one shifts every filter by the ratio, so a 40 Hz notch lands at 160 Hz.
+///
+/// The 83x1 series is reported to run a 96 kHz DSP path and has never been captured. Rather
+/// than guess, monitors carry an optional override; see GenSAMMonitorBinding::peq_design_rate.
+///@{
+static constexpr uint32_t PEQ_RATE_SUBWOOFER_HZ = 12000;
+static constexpr uint32_t PEQ_RATE_DEFAULT_HZ = 48000;
+///@}
+
 /// Trailing type/flag byte of a CMD_DSP PEQ frame. Only 0x00 has ever been observed.
 static constexpr uint8_t PEQ_TYPE_FLAG_ACTIVE = 0x00;
 

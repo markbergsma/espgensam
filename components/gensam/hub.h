@@ -113,7 +113,26 @@ enum class RaceState : uint8_t {
   RACE_SET_RID_SENT,  ///< Address assignment (0xF0 0x02) sent; awaiting monitor ACK.
   QUERYING_DEVICES,    ///< Querying model and firmware metadata for all discovered monitors.
   CONFIGURING_DEVICES, ///< Transmitting device configuration (e.g. crossover frequency) to discovered monitors.
+  APPLYING_GROUP,      ///< Pushing a group preset's DSP block to each monitor in turn.
   POLLING_MONITORS,    ///< Periodic round-robin polling of monitor status and telemetry.
+};
+
+/// @brief Cursor over an in-progress group preset push.
+///
+/// Applying a group is the longest transmission this component performs: about 25 frames per
+/// speaker, which for a modest system is over 200 ms of bus time even before any monitor
+/// hesitates.  Doing that inside one loop() call would trip ESPHome's loop watchdog, so it is
+/// driven one frame at a time from the state machine, with @ref step naming the position
+/// within a device's block and @ref device_idx the device.  Nothing here is persistent state:
+/// it is scratch for the duration of the push.
+struct GroupApplyState {
+  bool active{false};          ///< Whether a push is in progress.
+  uint8_t group_idx{0};        ///< Index into the group table being applied.
+  size_t device_idx{0};        ///< Position within that group's device list.
+  uint8_t step{0};             ///< Position within the current device's frame sequence.
+  uint32_t last_tx_ms{0};      ///< millis() of the last frame sent, for pacing.
+  uint32_t started_ms{0};      ///< millis() at entry, for the stall timeout.
+  bool ducked{false};          ///< Whether volume was lowered and still needs restoring.
 };
 
 /// @brief Hub component managing the 9-bit RS-485 physical bus, framing,
@@ -195,6 +214,28 @@ class GenSAMHub : public Component {
   /// @param unique_id GLM hardware id to match.
   /// @return Pointer into the generated table, or nullptr if the monitor is not in the group.
   static const GroupDevice *find_group_device(const GroupPreset &group, uint32_t unique_id);
+
+  /// @brief Index of the group last applied, or -1 if none has been.
+  int get_active_group_index() const { return active_group_; }
+
+  /// @brief Make a group preset the active one and push it to every monitor.
+  ///
+  /// The push is asynchronous: this records the request and returns, and the state machine
+  /// transmits it over the following few hundred milliseconds.  Requesting a group while one
+  /// is already being pushed replaces the request rather than queueing, so rapid switching in
+  /// Home Assistant settles on the last choice instead of playing every intermediate group.
+  /// @param index Preset index; out-of-range values are ignored with a warning.
+  void set_active_group(uint8_t index);
+
+  /// @brief Make a group preset active by its configured name.
+  /// @param name Name to match, as it appears in the select entity.
+  void set_active_group_by_name(const std::string &name);
+
+  /// @brief Register the optional group preset select entity.
+  void set_group_select(select::Select *sel) { group_select_ = sel; }
+
+  /// @brief Get the optional group preset select entity.
+  select::Select *get_group_select() const { return group_select_; }
 
   /// @brief Register system volume in dB number entity.
   /// @param num Pointer to the GenSAMVolumeNumber entity.
@@ -454,6 +495,26 @@ class GenSAMHub : public Component {
   /// @brief IDLE: periodically retry discovery while no monitors are registered.
   void race_step_idle_(uint32_t now);
 
+  /// @brief APPLYING_GROUP: transmit one frame of the active group's DSP block per call.
+  void race_step_applying_group_(uint32_t now);
+
+  /// @brief Begin pushing @ref pending_group_, ducking the volume for the duration.
+  /// @return True if a push was started; false if there is nothing to apply.
+  bool start_group_apply_(uint32_t now);
+
+  /// @brief End a push, restore the volume if it was ducked, and resume polling.
+  void finish_group_apply_();
+
+  /// @brief Send the frame at the current cursor position for one monitor.
+  /// @param mon The monitor being configured.
+  /// @param dev Its entry in the group being applied.
+  /// @param step Position within the device's frame sequence.
+  /// @return True if a frame was sent; false once the device's sequence is exhausted.
+  bool send_group_step_(const GenSAMMonitor &mon, const GroupDevice &dev, uint8_t step);
+
+  /// @brief Resolve the sample rate a monitor's PEQ bands must be designed at.
+  static uint32_t peq_design_rate_for(const GenSAMMonitor &mon);
+
   /// @brief Transmit one monitor's audio source and crossover configuration.
   /// @param mon The monitor to configure.
   /// @return True if any configuration frame was sent, false if the monitor needed nothing.
@@ -588,6 +649,18 @@ class GenSAMHub : public Component {
   // Generated group preset table; flash-resident and read-only, see groups.h.
   const GroupPreset *groups_{nullptr};
   uint8_t group_count_{0};
+  select::Select *group_select_{nullptr};
+
+  /// Group last pushed to the monitors, or -1 if none. Re-applied after every rediscovery,
+  /// because a monitor loses its DSP state passing through standby.
+  int active_group_{-1};
+
+  /// Group waiting to be pushed, or -1 if none. Separate from active_group_ so that a switch
+  /// requested while the bus is unavailable is not lost, and so a second request during a
+  /// push simply replaces the first.
+  int pending_group_{-1};
+
+  GroupApplyState apply_{};
 
   // Active RACE & query state machine
   RaceState race_state_{RaceState::IDLE};

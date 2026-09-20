@@ -77,6 +77,30 @@ class GenSAMSourceSelect : public select::Select {
   GenSAMHub *hub_{nullptr};
 };
 
+/// @brief Select entity that chooses the active GLM group preset.
+///
+/// A group preset is a whole calibrated monitoring configuration - per-speaker room EQ, level
+/// trim, alignment delay, crossover and input routing - so selecting one pushes several
+/// hundred frames.  That happens asynchronously: control() only records the choice, and the
+/// hub's state machine transmits it over the following few hundred milliseconds.
+class GenSAMGroupSelect : public select::Select {
+ public:
+  /// @brief Set the parent GenSAMHub instance.
+  /// @param hub Pointer to the GenSAMHub.
+  void set_hub(GenSAMHub *hub) { hub_ = hub; }
+
+ protected:
+  /// @brief Action executed when the user picks a group in Home Assistant.
+  /// @param value Selected group name, as declared in the `groups:` configuration.
+  void control(const std::string &value) override {
+    if (hub_ != nullptr) {
+      hub_->set_active_group_by_name(value);
+    }
+  }
+
+  GenSAMHub *hub_{nullptr};
+};
+
 /// @brief Select entity that configures the AES3 channel routing for a specific monitor.
 class GenSAMAES3ChannelSelect : public select::Select {
  public:

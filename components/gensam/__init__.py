@@ -66,6 +66,8 @@ CONF_STATUS_LED = "status_led"
 CONF_MODE = "mode"
 
 CONF_GROUPS = "groups"
+CONF_GROUP_SELECT = "group_select"
+CONF_PEQ_DESIGN_RATE = "peq_design_rate"
 CONF_DEVICES = "devices"
 CONF_ENABLED = "enabled"
 CONF_SOURCE = "source"
@@ -116,6 +118,7 @@ GenSAMCrossoverNumber = gensam_ns.class_("GenSAMCrossoverNumber", number.Number)
 GenSAMVolumeNumber = gensam_ns.class_("GenSAMVolumeNumber", number.Number)
 GenSAMSourceSelect = gensam_ns.class_("GenSAMSourceSelect", select.Select)
 GenSAMAES3ChannelSelect = gensam_ns.class_("GenSAMAES3ChannelSelect", select.Select)
+GenSAMGroupSelect = gensam_ns.class_("GenSAMGroupSelect", select.Select)
 GenSAMBusStatusSensor = gensam_ns.class_("GenSAMBusStatusSensor", text_sensor.TextSensor)
 GenSAMStatusLED = gensam_ns.class_("GenSAMStatusLED", cg.Component)
 StatusLEDMode = gensam_ns.enum("StatusLEDMode", is_class=True)
@@ -354,6 +357,9 @@ MONITOR_SCHEMA = cv.All(
                 unit_of_measurement="Hz",
                 entity_category=ENTITY_CATEGORY_CONFIG,
             ),
+            # Only needed for a model whose PEQ design rate is not yet known; otherwise it
+            # is derived from the discovered model. See PEQ_RATE_* in const.h.
+            cv.Optional(CONF_PEQ_DESIGN_RATE): cv.int_range(min=8000, max=192000),
             cv.Optional(CONF_AES3_CHANNEL): cv.Any(
                 cv.string,
                 select.select_schema(
@@ -425,6 +431,11 @@ def _validate_groups(config):
     """Cross-check the group table against the monitors it refers to."""
     groups = config.get(CONF_GROUPS)
     if not groups:
+        if CONF_GROUP_SELECT in config:
+            raise cv.Invalid(
+                "'group_select' needs a 'groups' block to choose from; the entity would have "
+                "no options."
+            )
         return config
 
     known = {m.get(CONF_UNIQUE_ID) for m in config.get(CONF_MONITORS, []) if m.get(CONF_UNIQUE_ID)}
@@ -516,6 +527,10 @@ _CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_STARTUP_VOLUME_DB, default=-30.0): cv.float_,
         cv.Optional(CONF_MONITORS): cv.ensure_list(MONITOR_SCHEMA),
         cv.Optional(CONF_GROUPS): cv.All(cv.ensure_list(GROUP_SCHEMA), cv.Length(min=1)),
+        cv.Optional(CONF_GROUP_SELECT): select.select_schema(
+            GenSAMGroupSelect,
+            icon="mdi:tune-variant",
+        ),
         cv.Optional(CONF_REDISCOVER_BUTTON): button.button_schema(
             GenSAMRediscoverButton,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
@@ -636,6 +651,14 @@ async def to_code(config):
     group_count = _emit_group_table(config)
     if group_count:
         cg.add(var.set_group_table(cg.RawExpression("gensam_group_table"), group_count))
+
+    if CONF_GROUP_SELECT in config:
+        group_sel = await select.new_select(
+            config[CONF_GROUP_SELECT],
+            options=[g[CONF_NAME] for g in config[CONF_GROUPS]],
+        )
+        cg.add(group_sel.set_hub(var))
+        cg.add(var.set_group_select(group_sel))
 
     tx_pin = await cg.gpio_pin_expression(config[CONF_TX_PIN])
     rx_pin = await cg.gpio_pin_expression(config[CONF_RX_PIN])
@@ -762,7 +785,10 @@ async def to_code(config):
                 cg.add(xo_var.set_serial_or_id(target_id))
                 xo_num = f"{xo_var}"
 
-            # 11. AES3 channel select
+            # 11. Optional PEQ design rate override; 0 means derive it from the model
+            design_rate = mon_conf.get(CONF_PEQ_DESIGN_RATE, 0)
+
+            # 12. AES3 channel select
             aes3_ch_conf = mon_conf[CONF_AES3_CHANNEL]
             initial_ch = mon_conf.get(CONF_INITIAL_AES3_CHANNEL)
             ch_num = _parse_aes3_channel(initial_ch, name, serial)
@@ -783,7 +809,7 @@ async def to_code(config):
                         f"{mute_sw}, "
                         f"{model_sens}, {serial_sens}, {fw_sens}, {hw_id_sens}, "
                         f"{xo_num}, 85U, false, "
-                        f"{aes3_sel}, {ch_num}U, false}}"
+                        f"{aes3_sel}, {ch_num}U, false, {design_rate}U}}"
                     )
                 )
             )
