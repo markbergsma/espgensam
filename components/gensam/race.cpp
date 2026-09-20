@@ -608,10 +608,27 @@ void GenSAMHub::finish_group_apply_() {
   if (apply_.ducked) {
     this->restore_system_volume_();
   }
-  active_group_ = apply_.group_idx;
+
+  // Only count the group as active if at least one speaker actually received it. A push that
+  // reached nobody - every monitor offline, which happens when a wake from standby reboots
+  // the DSPs and discovery runs before they answer - would otherwise leave Home Assistant
+  // reporting a group the bus has never been told about. Leaving active_group_ alone instead
+  // means the next discovery re-applies, and re-publishing keeps the entity honest until it
+  // does.
+  const uint8_t attempted = apply_.group_idx;
+  const bool reached_anyone = apply_.configured > 0;
   apply_ = GroupApplyState{};
 
-  const GroupPreset *group = this->get_group(static_cast<uint8_t>(active_group_));
+  if (reached_anyone) {
+    active_group_ = attempted;
+  } else {
+    const GroupPreset *wanted = this->get_group(attempted);
+    ESP_LOGW(TAG, "Group preset '%s' reached no monitors; leaving it unapplied",
+             wanted != nullptr ? wanted->name : "?");
+  }
+
+  const GroupPreset *group =
+      (active_group_ >= 0) ? this->get_group(static_cast<uint8_t>(active_group_)) : nullptr;
   if (group != nullptr && group_select_ != nullptr) {
     group_select_->publish_state(group->name);
   }
@@ -715,9 +732,11 @@ void GenSAMHub::race_step_applying_group_(uint32_t now) {
 
     if (mon == nullptr || !mon->online) {
       // Not discovered, or not answering. Skipping is right rather than retrying: the group
-      // is re-applied after every rediscovery, which is when such a monitor comes back.
-      ESP_LOGD(TAG, "Group '%s': monitor %lu is not online; skipped", group->name,
-               (unsigned long) dev.unique_id);
+      // is re-applied after every rediscovery, which is when such a monitor comes back. It
+      // is a warning rather than a debug line because until then that speaker is running
+      // some other group's calibration while the rest of the system has moved on.
+      ESP_LOGW(TAG, "Group '%s': monitor %lu is not online; it keeps its previous settings",
+               group->name, (unsigned long) dev.unique_id);
       apply_.device_idx++;
       apply_.step = 0;
       continue;
@@ -735,11 +754,13 @@ void GenSAMHub::race_step_applying_group_(uint32_t now) {
       registry_.set_binding_crossover(*mon->binding, dev.crossover_hz);
       registry_.set_binding_aes3_channel(*mon->binding, dev.aes3_channel);
     }
+    apply_.configured++;
     apply_.device_idx++;
     apply_.step = 0;
   }
 
-  ESP_LOGI(TAG, "Group preset '%s' applied", group->name);
+  ESP_LOGI(TAG, "Group preset '%s' applied to %u of %u monitors", group->name,
+           (unsigned) apply_.configured, (unsigned) group->device_count);
   this->finish_group_apply_();
 }
 
