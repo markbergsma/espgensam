@@ -1,15 +1,17 @@
 # espgensam
 
-**espgensam** is an [ESPHome](https://esphome.io/) component and firmware that turns an ESP32 with an RS-485 transceiver into a standalone **Genelec SAM (Smart Active Monitor)** controller, communicating natively over the Genelec "GLM" bus and exposing monitor control directly to **Home Assistant**.
+**espgensam** is an **unofficial** [ESPHome](https://esphome.io/) component and firmware that turns an ESP32 with an RS-485 transceiver into a standalone controller for [**Genelec SAM (Smart Active Monitor) speakers**](https://www.genelec.com/sam-studio-monitors-subwoofers), communicating natively over the Genelec "GLM" bus and exposing monitor control directly to **Home Assistant**.
 
 ---
 
 ## Features
 
-- **Native Home Assistant Integration**: Discovered automatically through the ESPHome Native API (encrypted, zero polling latency, no custom integration required).
-- **Direct 9-Bit RS485 Transceiver**: Uses ESP32 RMT (10 MHz pulse digitization) for RX and RMT pulse generation for TX to cleanly handle the 9-bit/2-stop-bit GLM bus with zero inter-byte gaps.
-- **Standalone Autonomy**: Controls monitors locally with zero dependency on the Home Assistant server status.
-- **Low-Latency Controls**: Direct volume, mute, power/standby, input select, and telemetry reporting.
+- **Native Home Assistant Integration**: Discovered automatically through the ESPHome Native API
+- **Standalone Autonomy**: Controls monitors locally with zero dependency on the GLM network adapter, the GLM software or the Home Assistant server status.
+- **Speaker Controls**: Direct volume, mute, power/standby, input select, and telemetry reporting.
+- **Direct 9-Bit RS485 Transceiver**: Uses ESP32 RMT (10 MHz pulse digitization) for RX and RMT pulse generation for TX to cleanly handle the 9-bit/2-stop-bit GLM bus.
+
+You may also want to take a look at [HLM, the Homebrew Loudspeaker Manager](https://github.com/robcazzaro/hlm), which is a similar project to control Genelec SAM monitors from a (STM32/ESP32) microcontroller. It already implements most of the protocol's functionality. We have started collaborating to better understand the underlying GLM protocol.
 
 ---
 
@@ -21,6 +23,8 @@
 - **RS485 RX**: `GPIO5`
 - **Direction Control**: Automatic (Atomic RS-485 pulse-sensing circuit)
 - **Status RGB LED**: `GPIO35` (WS2812)
+
+While this hardware does work fine in practice, it has proven not to be ideal hardware for this use case due to the auto-direction circuit, and alternative hardware is currently under investigation.
 
 ---
 
@@ -123,11 +127,6 @@ Edit `secrets.yaml` with your Wi-Fi credentials and ESPHome API key.
 For **M5Stack AtomS3 Lite**:
 ```bash
 esphome run espgensam.yaml
-```
-
-For **LilyGO T-CAN485**:
-```bash
-esphome run espgensam-tcan485.yaml
 ```
 
 ---
