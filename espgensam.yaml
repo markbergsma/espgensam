@@ -82,8 +82,6 @@ gensam:
   volume_db:
     name: "Volume (dB)"
 
-  audio_source:
-    name: "Audio Source"
 
   monitors:
     - serial_number: "7350APM88123456"

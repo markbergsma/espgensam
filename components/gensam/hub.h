@@ -80,6 +80,7 @@
 #include "arbiter.h"
 #include "const.h"
 #include "frame.h"
+#include "input.h"
 #include "groups.h"
 #include "monitor.h"
 #include "registry.h"
@@ -91,6 +92,10 @@
 #include <functional>
 
 namespace esphome {
+namespace binary_sensor {
+class BinarySensor;
+}  // namespace binary_sensor
+
 namespace number {
 class Number;
 }  // namespace number
@@ -267,14 +272,6 @@ class GenSAMHub : public Component {
   /// @return Pointer to registered number entity or nullptr.
   number::Number *get_volume_number() const { return volume_number_; }
 
-  /// @brief Set optional global audio source select entity.
-  /// @param sel Pointer to the GenSAMSourceSelect entity.
-  void set_audio_source_select(select::Select *sel) { audio_source_select_ = sel; }
-
-  /// @brief Get optional global audio source select entity.
-  /// @return Pointer to registered select entity or nullptr.
-  select::Select *get_audio_source_select() const { return audio_source_select_; }
-
   /// @brief Set optional bus operational status diagnostic text sensor entity.
   /// @param sensor Pointer to the TextSensor entity.
   void set_bus_status_sensor(text_sensor::TextSensor *sensor) { bus_status_sensor_ = sensor; }
@@ -291,11 +288,9 @@ class GenSAMHub : public Component {
     bus_status_callbacks_.push_back(std::move(cb));
   }
 
-  /// @brief Current system audio source (SOURCE_ANALOG or SOURCE_DIGITAL_AES3).
-  uint8_t get_current_audio_source() const { return current_audio_source_; }
-
-  /// @brief Whether system audio source has been configured by user or snooped from GLM.
-  bool is_audio_source_configured() const { return audio_source_configured_; }
+  /// @brief Set the optional diagnostic sensor reporting deviation from the active group.
+  /// @param sensor Pointer to the binary sensor entity.
+  void set_group_modified_sensor(binary_sensor::BinarySensor *sensor) { group_modified_sensor_ = sensor; }
 
   /// @brief Register a callback for when volume, mute, or power changes (from commands or passive snooping).
   void add_state_callback(std::function<void(float, bool, bool)> cb) {
@@ -350,28 +345,34 @@ class GenSAMHub : public Component {
   /// @param freq_hz Crossover filter frequency in Hz (typically 50..120 Hz, step 5 Hz).
   void set_monitor_crossover_by_serial(const std::string &serial_or_id, uint16_t freq_hz);
 
-  /// @brief Set global audio source (Analog vs Digital AES3) across all monitors.
-  /// @param source SOURCE_ANALOG (0x01) or SOURCE_DIGITAL_AES3 (0x02).
-  void set_global_source(uint8_t source);
-
-  /// @brief Set global audio source by option string ("Analog" or "Digital (AES3)").
-  /// @param source_name Option name string.
-  void set_global_source_by_name(const std::string &source_name);
-
-  /// @brief Set AES3 channel routing for an individual monitor by logical RS-485 address.
+  /// @brief Set input routing for an individual monitor by logical RS-485 address.
+  ///
+  /// Transmits immediately, wrapped in a transient silence, and marks the system as deviating
+  /// from the active group: nothing about the group itself changes, so the next group push
+  /// restores its routing.
   /// @param address Logical bus address (0x02..0x7F).
-  /// @param channel AES3_CHANNEL_A (0x01), AES3_CHANNEL_B (0x02), or AES3_CHANNEL_SUM (0x03).
-  void set_monitor_aes3_channel(uint8_t address, uint8_t channel);
+  /// @param source SOURCE_ANALOG (0x01) or SOURCE_DIGITAL_AES3 (0x02).
+  /// @param channel AES3 sub-channel; ignored when @p source is analog.
+  void set_monitor_input(uint8_t address, uint8_t source, uint8_t channel);
 
-  /// @brief Set AES3 channel routing for an individual monitor by serial number or unique ID string.
+  /// @brief Set input routing for an individual monitor by serial number or unique ID string.
   /// @param serial_or_id Serial number string (e.g. "7350APM88123456") or decimal unique ID string.
-  /// @param channel AES3_CHANNEL_A (0x01), AES3_CHANNEL_B (0x02), or AES3_CHANNEL_SUM (0x03).
-  void set_monitor_aes3_channel_by_serial(const std::string &serial_or_id, uint8_t channel);
+  /// @param source SOURCE_ANALOG (0x01) or SOURCE_DIGITAL_AES3 (0x02).
+  /// @param channel AES3 sub-channel; ignored when @p source is analog.
+  void set_monitor_input_by_serial(const std::string &serial_or_id, uint8_t source, uint8_t channel);
 
-  /// @brief Set AES3 channel routing for an individual monitor by option name string.
+  /// @brief Set input routing for an individual monitor by select option string.
   /// @param serial_or_id Serial number string or decimal unique ID string.
-  /// @param channel_name Option string ("Channel A (Left)", "Channel B (Right)", or "Channel A+B (Sum)").
-  void set_monitor_aes3_channel_by_name(const std::string &serial_or_id, const std::string &channel_name);
+  /// @param input_name One of the INPUT_STR_* option strings.
+  void set_monitor_input_by_name(const std::string &serial_or_id, const std::string &input_name);
+
+  /// @brief Record that a device setting no longer matches the active group, and publish it.
+  ///
+  /// Set by a hand override or a snooped GLM change to anything a group push owns - input
+  /// routing and crossover. Cleared when a group is applied, which is what makes an override
+  /// temporary. Purely informational: nothing in the hub behaves differently because of it.
+  /// @param modified True when deviating, false when a group push has just re-established it.
+  void set_group_modified(bool modified);
 
   /// @brief Send audio source frame(s) to a specific monitor.
   /// Standard monitors receive 1 frame (input 0); subwoofers (7xxx) receive 2 frames (inputs 0 and 1).
@@ -732,9 +733,8 @@ class GenSAMHub : public Component {
   text_sensor::TextSensor *bus_status_sensor_{nullptr};
   std::string last_bus_status_{};
   number::Number *volume_number_{nullptr};
-  select::Select *audio_source_select_{nullptr};
-  uint8_t current_audio_source_{SOURCE_ANALOG};
-  bool audio_source_configured_{false};
+  binary_sensor::BinarySensor *group_modified_sensor_{nullptr};
+  bool group_modified_{false};
   std::vector<std::function<void(float, bool, bool)>> state_callbacks_;
   std::vector<std::function<void(const std::string &)>> bus_status_callbacks_;
 };

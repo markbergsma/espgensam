@@ -84,9 +84,14 @@ struct GenSAMMonitorBinding {
   number::Number *crossover_number{nullptr};           ///< Bass management crossover frequency number entity (Hz).
   uint16_t crossover_freq{DEFAULT_CROSSOVER_HZ};       ///< Configured / active crossover frequency in Hz (default: 85 Hz).
   bool crossover_configured{false};                    ///< True if a custom crossover was set by user or sniffed from GLM.
-  select::Select *aes3_channel_select{nullptr};        ///< AES3 input sub-channel select entity (Channel A, B, Sum).
-  uint8_t aes3_channel{AES3_CHANNEL_A};                ///< Configured / active AES3 channel (default: AES3_CHANNEL_A).
-  bool aes3_channel_configured{false};                 ///< True if an AES3 channel was set by user or sniffed from GLM.
+  select::Select *input_select{nullptr};               ///< Input routing select entity (analog / AES3 A, B, Sum).
+  uint8_t source{SOURCE_ANALOG};                       ///< Configured / active input source.
+  uint8_t aes3_channel{AES3_CHANNEL_A};                ///< Configured / active AES3 sub-channel; ignored when analog.
+
+  /// True once the input has been chosen deliberately - by a group push, by Home Assistant, or
+  /// snooped from GLM. While false nothing is transmitted, so a monitor keeps whatever routing
+  /// its own flash holds; see the non-destructive boot note in select.h.
+  bool input_configured{false};
 
   /// Override for the rate this speaker's PEQ bands are designed at, or 0 to derive it from
   /// the discovered model (PEQ_RATE_SUBWOOFER_HZ for a 7xxx, PEQ_RATE_DEFAULT_HZ otherwise).

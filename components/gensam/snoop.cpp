@@ -111,6 +111,10 @@ void GenSAMHub::snoop_crossover_(const Frame &frame) {
   }
   uint16_t freq = (static_cast<uint16_t>(frame.payload[0]) << 8) | frame.payload[1];
 
+  // An external controller has moved the crossover off what the active group specified; the
+  // same deviation a hand override creates. See set_group_modified().
+  this->set_group_modified(true);
+
   if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
     for (auto &kv : registry_.monitors()) {
       registry_.set_crossover(kv.second, freq);
@@ -138,55 +142,64 @@ void GenSAMHub::snoop_audio_source_(const Frame &frame) {
   if (frame.command != CMD_SELECT_AUDIO_SOURCE || frame.payload.size() < 4) {
     return;
   }
-  uint8_t input_idx = frame.payload[0];
-  uint8_t src = frame.payload[1];
-  uint8_t ch = frame.payload[3];
+  const uint8_t input_idx = frame.payload[0];
+  const uint8_t src = frame.payload[1];
+  const uint8_t ch = frame.payload[3];
 
-  // Only the primary input carries the system-wide source and the AES3 sub-channel.
+  // Only the primary input carries the routing this component models. A subwoofer's secondary
+  // frame repeats the same source with a zero channel and would otherwise overwrite it.
   if (input_idx != 0x00) {
     return;
   }
 
   if (src != SOURCE_ANALOG && src != SOURCE_DIGITAL_AES3) {
-    // An external controller selected something this component cannot name -- 0x03 (Automatic,
-    // a standalone setting we do not implement) or a value nobody has documented.  Stop claiming
-    // to know the source: configure_monitor_() re-pushes current_audio_source_ to every monitor
-    // after a standby / rediscovery cycle, so leaving the flag set would later revert the bus to
-    // the last source we did understand, silently undoing a change we watched go past.
+    // An external controller selected something this component cannot name -- 0x03
+    // (Automatic, a standalone setting we do not implement) or an undocumented value. Stop
+    // asserting this monitor's input: configure_monitor_() re-transmits it after a standby
+    // cycle, so leaving the flag set would later revert the bus to the last routing we did
+    // understand, silently undoing a change we watched go past.
     //
     // The entity keeps displaying its last value; an ESPHome select cannot be returned to
-    // Unknown once published.  Only transmission stops.
-    if (audio_source_configured_) {
-      audio_source_configured_ = false;
-      ESP_LOGW(TAG, "[Sniffed] Audio source set to unrecognised value 0x%02X; no longer asserting "
-                    "a source (entity still shows its last known value)", src);
+    // Unknown once published. Only transmission stops.
+    GenSAMMonitor *known = registry_.find(frame.address);
+    if (known != nullptr && known->binding != nullptr && known->binding->input_configured) {
+      known->binding->input_configured = false;
+      ESP_LOGW(TAG, "[Sniffed] Monitor 0x%02X input set to unrecognised source 0x%02X; no longer "
+                    "asserting its routing (entity still shows its last known value)",
+               frame.address, src);
     }
-  } else if (!audio_source_configured_ || current_audio_source_ != src) {
-    current_audio_source_ = src;
-    audio_source_configured_ = true;
-    const char *name = (src == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3;
-    if (audio_source_select_ != nullptr) {
-      audio_source_select_->publish_state(name);
-    }
-    ESP_LOGI(TAG, "[Sniffed] System audio source set to %s", name);
-  }
-
-  if (src != SOURCE_DIGITAL_AES3 || ch < AES3_CHANNEL_A || ch > AES3_CHANNEL_SUM) {
     return;
   }
 
-  GenSAMMonitor *known = registry_.find(frame.address);
-  if (known != nullptr) {
-    registry_.set_aes3_channel(*known, ch);
-    ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X AES3 channel set to 0x%02X", frame.address, ch);
-  } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
-    GenSAMMonitor &mon = registry_.get_or_create(frame.address);
-    this->mark_monitor_seen_(mon);
-    registry_.bind_if_matched(mon);
-    registry_.set_aes3_channel(mon, ch);
-    ESP_LOGI(TAG, "[Sniffed] Discovered monitor 0x%02X AES3 channel set to 0x%02X", frame.address, ch);
+  if (src == SOURCE_DIGITAL_AES3 && (ch < AES3_CHANNEL_A || ch > AES3_CHANNEL_SUM)) {
+    ESP_LOGW(TAG, "[Sniffed] Monitor 0x%02X AES3 sub-channel 0x%02X is not one this component "
+                  "recognises; routing left as it was", frame.address, ch);
+    return;
+  }
+
+  GenSAMMonitor *mon = registry_.find(frame.address);
+  if (mon == nullptr) {
+    if (frame.address < MONITOR_START_ADDR || frame.address >= 0x80) {
+      return;
+    }
+    mon = &registry_.get_or_create(frame.address);
+    this->mark_monitor_seen_(*mon);
+    registry_.bind_if_matched(*mon);
+  }
+
+  const bool changed = mon->binding == nullptr || !mon->binding->input_configured ||
+                       mon->binding->source != src ||
+                       (src == SOURCE_DIGITAL_AES3 && mon->binding->aes3_channel != ch);
+  registry_.set_input(*mon, src, ch);
+  if (changed) {
+    // Someone else moved a speaker off what the active group specified, the same deviation a
+    // hand override creates; see set_group_modified().
+    this->set_group_modified(true);
+    ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X input set to %s", frame.address,
+             input_to_str(src, ch));
   }
 }
+
 
 void GenSAMHub::snoop_host_reply_(const Frame &frame) {
   if (frame.address != HOST_ADDRESS || frame.command != CMD_REPORT_STATUS || last_queried_addr_ == 0) {

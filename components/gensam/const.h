@@ -62,22 +62,6 @@ static constexpr uint8_t AES3_CHANNEL_A = 0x01;       ///< Sub-channel A (Left)
 static constexpr uint8_t AES3_CHANNEL_B = 0x02;       ///< Sub-channel B (Right)
 static constexpr uint8_t AES3_CHANNEL_SUM = 0x03;     ///< Sub-channel A+B summed mono (Subwoofer)
 
-// Entity option strings
-static constexpr const char *SOURCE_STR_ANALOG = "Analog";
-static constexpr const char *SOURCE_STR_DIGITAL_AES3 = "Digital (AES3)";
-
-static constexpr const char *AES3_CHANNEL_STR_A = "Channel A (Left)";
-static constexpr const char *AES3_CHANNEL_STR_B = "Channel B (Right)";
-static constexpr const char *AES3_CHANNEL_STR_SUM = "Channel A+B (Sum)";
-
-/// @brief Map AES3 channel byte value to its display string.
-/// @param ch AES3_CHANNEL_A (0x01), AES3_CHANNEL_B (0x02), or AES3_CHANNEL_SUM (0x03).
-/// @return Corresponding entity option string; defaults to AES3_CHANNEL_STR_A for unknown values.
-inline const char *aes3_channel_to_str(uint8_t ch) {
-  return (ch == AES3_CHANNEL_B) ? AES3_CHANNEL_STR_B :
-         (ch == AES3_CHANNEL_SUM) ? AES3_CHANNEL_STR_SUM : AES3_CHANNEL_STR_A;
-}
-
 // --- Audio source switching transient volume parameters -------------------
 /// GLM minimum volume payload bytes (digital silence / -130 dBFS during source switching).
 static constexpr uint8_t VOLUME_PAYLOAD_SILENCE[3] = {0x00, 0x00, 0x02};

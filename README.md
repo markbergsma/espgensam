@@ -95,6 +95,10 @@ gensam:
       unique_id: 1842915
       name: "Subwoofer"
       device_id: dev_subwoofer
+      # Optional. Fixes this speaker's routing at boot; omit it and the speaker keeps
+      # whatever its own flash holds until a group is applied or you pick an option in
+      # Home Assistant. One of: analog | aes3_a | aes3_b | aes3_sum
+      input: aes3_sum
 
     - serial_number: "8330AP99234567"
       unique_id: 1654321
@@ -111,6 +115,11 @@ media_player:
   - platform: gensam
     name: "Genelec SAM System"
 ```
+
+Each monitor gets an **Input** select listing `Analog`, `AES3 Channel A (Left)`,
+`AES3 Channel B (Right)` and `AES3 Channel A+B (Sum)`. Routing is per speaker because that is
+how the hardware works: a GLM group can perfectly well run the subwoofer on AES3 while both
+main monitors are analog, so there is no single system-wide input to select.
 
 ### 3. Group Presets (`gensam: groups:`)
 
@@ -156,6 +165,11 @@ Filter order is the order the speaker's own filter slots run in, which differs b
 two-way monitor takes two low shelves, two high shelves and then up to sixteen notches, while
 a subwoofer takes twenty notches and no shelves. The converter below gets this right; if you
 write a group by hand, follow the same order.
+
+Applying a group sets every speaker's Input select, so they always show what the speakers were
+last told. Changing one by hand takes effect immediately but does not alter the group, so the
+next group push - switching group, waking from standby, or a rediscovery - puts the group's own
+routing back. While the two disagree, the hub's **Group Modified** diagnostic sensor is on.
 
 ### 4. Converting an existing GLM setup
 

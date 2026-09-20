@@ -98,8 +98,8 @@ void MonitorRegistry::bind_if_matched(GenSAMMonitor &mon) {
     if (b.crossover_number != nullptr && b.crossover_configured) {
       b.crossover_number->publish_state(b.crossover_freq);
     }
-    if (b.aes3_channel_select != nullptr) {
-      b.aes3_channel_select->publish_state(aes3_channel_to_str(b.aes3_channel));
+    if (b.input_select != nullptr && b.input_configured) {
+      b.input_select->publish_state(input_to_str(b.source, b.aes3_channel));
     }
     break;
   }
@@ -208,11 +208,12 @@ void MonitorRegistry::set_binding_crossover(GenSAMMonitorBinding &b, uint16_t fr
   }
 }
 
-void MonitorRegistry::set_binding_aes3_channel(GenSAMMonitorBinding &b, uint8_t channel) {
+void MonitorRegistry::set_binding_input(GenSAMMonitorBinding &b, uint8_t source, uint8_t channel) {
+  b.source = source;
   b.aes3_channel = channel;
-  b.aes3_channel_configured = true;
-  if (b.aes3_channel_select != nullptr) {
-    b.aes3_channel_select->publish_state(aes3_channel_to_str(channel));
+  b.input_configured = true;
+  if (b.input_select != nullptr) {
+    b.input_select->publish_state(input_to_str(source, channel));
   }
 }
 
@@ -222,9 +223,9 @@ void MonitorRegistry::set_crossover(GenSAMMonitor &mon, uint16_t freq_hz) {
   }
 }
 
-void MonitorRegistry::set_aes3_channel(GenSAMMonitor &mon, uint8_t channel) {
+void MonitorRegistry::set_input(GenSAMMonitor &mon, uint8_t source, uint8_t channel) {
   if (mon.binding != nullptr) {
-    this->set_binding_aes3_channel(*mon.binding, channel);
+    this->set_binding_input(*mon.binding, source, channel);
   }
 }
 

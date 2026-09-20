@@ -469,21 +469,20 @@ bool GenSAMHub::configure_monitor_(const GenSAMMonitor &mon) {
   uint8_t addr = mon.address;
   bool configured_anything = false;
 
-  // 1. Audio source and AES3 channel configuration
+  // 1. Input routing
   // Note: Transient volume silencing (silence_system_volume_ / restore_system_volume_) is
   // intentionally omitted here.  Monitors are waking from amplifier standby with internal
   // amplifiers already muted, so there is no listening signal to protect from switching
   // transients.  Volume is restored later by the normal post-wakeup volume command.
-  if (audio_source_configured_) {
-    uint8_t ch = AES3_CHANNEL_A;
-    if (mon.binding != nullptr) {
-      ch = mon.binding->aes3_channel;
-    } else if (mon.is_subwoofer()) {
-      ch = AES3_CHANNEL_SUM;
-    }
-    ESP_LOGI(TAG, "Configuring audio source for monitor 0x%02X: %s (ch 0x%02X)", addr,
-             (current_audio_source_ == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3, ch);
-    this->send_audio_source_frame(addr, current_audio_source_, ch, mon.is_subwoofer());
+  //
+  // Gated on the binding alone: routing is per device, so there is no system-wide source to
+  // fall back on, and a monitor whose input nobody has chosen keeps whatever its own flash
+  // holds rather than being pushed a default.
+  if (mon.binding != nullptr && mon.binding->input_configured) {
+    const uint8_t src = mon.binding->source;
+    const uint8_t ch = mon.binding->aes3_channel;
+    ESP_LOGI(TAG, "Configuring input for monitor 0x%02X: %s", addr, input_to_str(src, ch));
+    this->send_audio_source_frame(addr, src, ch, mon.is_subwoofer());
     configured_anything = true;
   }
 
@@ -621,6 +620,9 @@ void GenSAMHub::finish_group_apply_() {
 
   if (reached_anyone) {
     active_group_ = attempted;
+    // Every reachable speaker has just been re-sent this group's routing, crossover and DSP
+    // block, so whatever deviation a hand override or a GLM frame introduced is gone.
+    this->set_group_modified(false);
   } else {
     const GroupPreset *wanted = this->get_group(attempted);
     ESP_LOGW(TAG, "Group preset '%s' reached no monitors; leaving it unapplied",
@@ -752,7 +754,7 @@ void GenSAMHub::race_step_applying_group_(uint32_t now) {
     // show the active group's values, and so a later rediscovery re-sends the same thing.
     if (mon->binding != nullptr && dev.enabled) {
       registry_.set_binding_crossover(*mon->binding, dev.crossover_hz);
-      registry_.set_binding_aes3_channel(*mon->binding, dev.aes3_channel);
+      registry_.set_binding_input(*mon->binding, dev.source, dev.aes3_channel);
     }
     apply_.configured++;
     apply_.device_idx++;

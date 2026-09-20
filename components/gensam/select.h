@@ -1,51 +1,62 @@
 #pragma once
 
 /// @file select.h
-/// @brief ESPHome Select entity implementations for Genelec SAM audio source and AES3 channel configuration.
+/// @brief ESPHome Select entities for per-monitor input routing and group preset selection.
 ///
 /// ===================================================================================
 /// ARCHITECTURAL DESIGN RATIONALE
 /// ===================================================================================
-/// 1. Audio Source Selection (GenSAMSourceSelect):
-///    Genelec SAM monitors and subwoofers support dynamic selection between Analog audio
-///    inputs and Digital AES3 (AES/EBU) stereo streams via RS-485 opcode CMD_SELECT_AUDIO_SOURCE
-///    (0x40).
-///    - The wire payload is a 4-byte descriptor: [input_index, source_type, mode, channel].
-///    - For Analog: source_type = 0x01. Input 0 uses mode 0x02, channel 0x00.
-///      Subwoofers (7xxx series) require a secondary frame for Input 1 with mode 0x01, channel 0x00.
-///    - For Digital (AES3): source_type = 0x02, mode = 0x00.
-///      Input 0 specifies the routed sub-channel (0x01 = Channel A/Left, 0x02 = Channel B/Right,
-///      0x03 = Channel A+B Summed Mono).
-///      Subwoofers (7xxx series) require a secondary frame for Input 1 with mode 0x00, channel 0x00.
-///    - Non-Destructive Boot: Monitors store persistent input routing in internal flash memory.
-///      To prevent overwriting stored presets at boot, the source select entity starts unconfigured
-///      (Unknown state in Home Assistant) and does not transmit until explicitly commanded or
-///      snooped from an external GLM controller.
-///    - Two options, not three: source_type 0x03 ("Automatic") is listed by the HLM project's
-///      protocol spec, but it is a *standalone* setting - GLM exposes it only when configuring what
-///      a speaker should do on its own, not in live input selection - and neither project has ever
-///      observed it on the wire, so its pair_selector and channel bytes are unknown. It would also
-///      have to be persisted with a flash commit (0x15), which this component does not implement.
-///      Adding it here would ship a guess that cannot be made to stick; it belongs to a standalone
-///      settings feature instead. A snooped 0x03 is handled defensively in snoop_audio_source_().
+/// 1. Per-Monitor Input Routing (GenSAMInputSelect):
+///    SAM monitors and subwoofers choose between an analog line input and one sub-channel of
+///    an AES3 (AES/EBU) stream, via CMD_SELECT_AUDIO_SOURCE (0x40).  The wire payload is a
+///    4-byte descriptor, [input_index, source, pair_selector, aes3_channel]:
+///    - Analog: source 0x01.  Input 0 uses pair selector 0x02; a 7xxx subwoofer needs a
+///      second frame for input 1 with pair selector 0x01.
+///    - AES3: source 0x02, pair selector 0x00, sub-channel in the last byte - 0x01 channel A
+///      (left), 0x02 channel B (right), 0x03 A+B summed, which is what a subwoofer takes.
+///      A subwoofer again needs a second frame for input 1.
 ///
-/// 2. Per-Monitor AES3 Sub-Channel Assignment (GenSAMAES3ChannelSelect):
-///    A digital AES3 stream carries two audio sub-channels (Channel A and Channel B).
-///    Each SAM speaker must know which channel to decode and reproduce:
-///    - "Channel A (Left)" (0x01)
-///    - "Channel B (Right)" (0x02)
-///    - "Channel A+B (Sum)" (0x03) - typically used by SAM subwoofers to sum stereo low frequencies.
-///    - The per-monitor AES3 channel configuration entity allows setting each speaker's sub-channel
-///      independently.
+///    Source and sub-channel are presented as *one* select per monitor rather than two,
+///    because they are not independent settings: a speaker is fed from one place, and the
+///    sub-channel means nothing unless that place is the AES3 receiver.  Genelec's own setup
+///    file stores exactly this, as a single per-device `Input:` enum with four values.  Two
+///    entities would also permit displaying contradictory pairs such as analog with channel B.
 ///
-/// 3. Volatile Persistence & Standby Wakeup Retransmission:
-///    When monitors enter amplifier sleep (<0.5W standby), volatile DSP state is powered down.
-///    Upon wake from standby, the GenSAM hub automatically rediscovery-cycles and re-transmits the
-///    configured audio source and AES3 channel assignments during the CONFIGURING_DEVICES state.
+///    Routing is per monitor, not per system.  That is a requirement rather than a refinement:
+///    a captured GLM group runs its subwoofer on AES3 sum while both main monitors are analog,
+///    so no single system-wide source can describe it.  An earlier version of this component
+///    had one global source select, which could not represent that setup; it was removed.
 ///
-/// 4. Passive Bus Snooping:
-///    External GLM software or GLM network adapters transmitting 0x40 frames are snooped in real
-///    time, immediately updating the Home Assistant select states without bus contention.
+///    "Automatic" (source 0x03) is deliberately absent.  The HLM protocol specification lists
+///    it, but it is a *standalone* setting - what a speaker does on its own, not live input
+///    selection - neither project has observed it on the wire, so its pair selector and
+///    channel bytes are unknown, and it would need a flash commit (0x15) to stick, which this
+///    component does not implement.  A snooped 0x03 is handled defensively in
+///    snoop_audio_source_().
+///
+/// 2. Group Preset Selection (GenSAMGroupSelect):
+///    Selecting a group re-pushes a whole calibrated DSP block - filters, levels, delays,
+///    crossover and input routing - to every speaker, which is what GLM does.  A group push
+///    also drives the input selects above, so they show what the speakers were last told.
+///
+/// 3. Manual Overrides Are Temporary By Construction:
+///    Changing a monitor's input by hand transmits immediately and updates its binding, but
+///    nothing about the active group changes, so the next group push - a group switch, a
+///    standby cycle, or a rediscovery - restores that group's routing.  The deviation is
+///    visible meanwhile through the hub's "Group Modified" binary sensor.
+///
+/// 4. Non-Destructive Boot:
+///    Monitors hold their input routing in their own flash.  A binding starts unconfigured and
+///    transmits nothing until a group is applied, Home Assistant selects something, or a GLM
+///    frame is snooped, so powering this component up never overwrites what the speakers had.
+///
+/// 5. Volatile Persistence & Standby Wakeup Retransmission:
+///    Monitors lose volatile DSP state in amplifier sleep, so the configured routing is
+///    re-transmitted during CONFIGURING_DEVICES after every rediscovery.
+///
+/// 6. Passive Bus Snooping:
+///    0x40 frames from external GLM software are snooped, updating the owning monitor's select
+///    without bus contention.
 /// ===================================================================================
 
 #include "esphome/core/component.h"
@@ -57,25 +68,6 @@
 
 namespace esphome {
 namespace gensam {
-
-/// @brief Select entity that configures global audio input source (Analog vs Digital AES3).
-class GenSAMSourceSelect : public select::Select {
- public:
-  /// @brief Set the parent GenSAMHub instance.
-  /// @param hub Pointer to the GenSAMHub.
-  void set_hub(GenSAMHub *hub) { hub_ = hub; }
-
- protected:
-  /// @brief Action executed when user selects an option in Home Assistant.
-  /// @param value Selected option string ("Analog" or "Digital (AES3)").
-  void control(const std::string &value) override {
-    if (hub_ != nullptr) {
-      hub_->set_global_source_by_name(value);
-    }
-  }
-
-  GenSAMHub *hub_{nullptr};
-};
 
 /// @brief Select entity that chooses the active GLM group preset.
 ///
@@ -101,8 +93,8 @@ class GenSAMGroupSelect : public select::Select {
   GenSAMHub *hub_{nullptr};
 };
 
-/// @brief Select entity that configures the AES3 channel routing for a specific monitor.
-class GenSAMAES3ChannelSelect : public select::Select {
+/// @brief Select entity that routes one monitor's input: analog, or an AES3 sub-channel.
+class GenSAMInputSelect : public select::Select {
  public:
   /// @brief Set the parent GenSAMHub instance.
   /// @param hub Pointer to the GenSAMHub.
@@ -113,11 +105,11 @@ class GenSAMAES3ChannelSelect : public select::Select {
   void set_serial_or_id(const std::string &id) { serial_or_id_ = id; }
 
  protected:
-  /// @brief Action executed when user selects an AES3 channel option in Home Assistant.
-  /// @param value Selected option string ("Channel A (Left)", "Channel B (Right)", or "Channel A+B (Sum)").
+  /// @brief Action executed when the user selects an input option in Home Assistant.
+  /// @param value One of the INPUT_STR_* option strings.
   void control(const std::string &value) override {
     if (hub_ != nullptr) {
-      hub_->set_monitor_aes3_channel_by_name(serial_or_id_, value);
+      hub_->set_monitor_input_by_name(serial_or_id_, value);
     }
   }
 

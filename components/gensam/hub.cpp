@@ -4,6 +4,8 @@
 
 #include "hub.h"
 #include "commands.h"
+
+#include "esphome/components/binary_sensor/binary_sensor.h"
 #include "crc.h"
 #include "esphome/core/log.h"
 #include "esphome/components/number/number.h"
@@ -123,8 +125,8 @@ void GenSAMHub::setup() {
   }
 
   for (auto &b : registry_.bindings()) {
-    if (b.aes3_channel_select != nullptr) {
-      b.aes3_channel_select->publish_state(aes3_channel_to_str(b.aes3_channel));
+    if (b.input_select != nullptr && b.input_configured) {
+      b.input_select->publish_state(input_to_str(b.source, b.aes3_channel));
     }
   }
 
@@ -203,8 +205,8 @@ void GenSAMHub::dump_config() {
   if (volume_number_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Volume dB Number Entity: configured");
   }
-  if (audio_source_select_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  Audio Source Select Entity: configured");
+  if (group_modified_sensor_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Group Modified Binary Sensor: configured");
   }
   if (bus_status_sensor_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Bus Status Text Sensor: configured");
@@ -230,7 +232,7 @@ void GenSAMHub::dump_config() {
       }
       ESP_LOGCONFIG(TAG, "        id %lu: %s, %s, %u Hz, %.2f dB, %lu samples, %u/%u bands",
                     (unsigned long)dev.unique_id, dev.enabled ? "on" : "off",
-                    (dev.source == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : aes3_channel_to_str(dev.aes3_channel),
+                    input_to_str(dev.source, dev.aes3_channel),
                     (unsigned)dev.crossover_hz, dev.level_db, (unsigned long)dev.delay_samples, active,
                     (unsigned)dev.band_count);
     }
@@ -629,6 +631,9 @@ void GenSAMHub::set_monitor_mute_by_serial(const std::string &serial_or_id, bool
 }
 
 void GenSAMHub::set_monitor_crossover(uint8_t address, uint16_t freq_hz) {
+  // A hand-picked crossover deviates from the active group, the same as an input override.
+  this->set_group_modified(true);
+
   GenSAMMonitor *mon = registry_.find(address);
   if (mon == nullptr) {
     ESP_LOGW(TAG, "Cannot set crossover for unknown monitor 0x%02X", address);
@@ -706,101 +711,70 @@ void GenSAMHub::with_transient_silence_(const std::function<void()> &switch_inpu
   }
 }
 
-// TODO: This function blocks the main loop for ~130 ms + 5 ms per monitor (silence ramp-down,
-//       per-monitor source frames, PLL/SRC settling, volume restore).  Consider converting to a
-//       non-blocking state machine if the number of monitors grows significantly.
-void GenSAMHub::set_global_source(uint8_t source) {
-  if (source != SOURCE_ANALOG && source != SOURCE_DIGITAL_AES3) {
-    ESP_LOGW(TAG, "Unknown global audio source value: 0x%02X", source);
+void GenSAMHub::set_group_modified(bool modified) {
+  if (group_modified_ == modified) {
     return;
   }
+  group_modified_ = modified;
+  if (group_modified_sensor_ != nullptr) {
+    group_modified_sensor_->publish_state(modified);
+  }
+}
 
-  current_audio_source_ = source;
-  audio_source_configured_ = true;
-
-  const char *name = (source == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3;
-  if (audio_source_select_ != nullptr) {
-    audio_source_select_->publish_state(name);
+// TODO: This blocks the main loop for ~130 ms (silence ramp-down, PLL/SRC relock, volume
+//       restore). Acceptable for a one-off manual change; a group push, which touches every
+//       speaker, uses the non-blocking state machine in race.cpp instead.
+void GenSAMHub::set_monitor_input(uint8_t address, uint8_t source, uint8_t channel) {
+  GenSAMMonitor *mon = registry_.find(address);
+  if (mon != nullptr) {
+    registry_.set_input(*mon, source, channel);
   }
 
+  // A hand-picked input is a deviation from whatever the active group specified. The group is
+  // deliberately left alone, so the next push - a group switch, a standby cycle, a
+  // rediscovery - puts its own routing back; this flag is how that shows until then.
+  this->set_group_modified(true);
+
+  const char *name = input_to_str(source, channel);
   if (!can_transmit()) {
-    ESP_LOGW(TAG, "Audio source set to %s (bus not ready for TX)", name);
+    ESP_LOGW(TAG, "Monitor 0x%02X input set to %s (stored; bus not ready for TX)", address, name);
     return;
   }
 
-  ESP_LOGI(TAG, "Setting global audio source to %s across %u monitor(s)...", name, (unsigned)registry_.size());
-  this->with_transient_silence_([this, source]() {
-    for (const auto &kv : registry_.monitors()) {
-      const GenSAMMonitor &mon = kv.second;
-      uint8_t ch = AES3_CHANNEL_A;
-      if (mon.binding != nullptr) {
-        ch = mon.binding->aes3_channel;
-      } else if (mon.is_subwoofer()) {
-        ch = AES3_CHANNEL_SUM;
-      }
-      this->send_audio_source_frame(mon.address, source, ch, mon.is_subwoofer());
-      delay(SOURCE_FRAME_GAP_MS);
-    }
+  const bool is_sub = (mon != nullptr) && mon->is_subwoofer();
+  ESP_LOGI(TAG, "Setting monitor 0x%02X input to %s", address, name);
+  this->with_transient_silence_([this, address, source, channel, is_sub]() {
+    this->send_audio_source_frame(address, source, channel, is_sub);
   });
 }
 
-void GenSAMHub::set_global_source_by_name(const std::string &source_name) {
-  if (source_name == SOURCE_STR_ANALOG) {
-    this->set_global_source(SOURCE_ANALOG);
-  } else if (source_name == SOURCE_STR_DIGITAL_AES3) {
-    this->set_global_source(SOURCE_DIGITAL_AES3);
-  } else {
-    ESP_LOGW(TAG, "Unknown audio source option: '%s'", source_name.c_str());
-  }
-}
-
-// TODO: When the system is actively playing digital audio, this function blocks ~130 ms
-//       (silence ramp-down + PLL settling + volume restore).  Same consideration as set_global_source().
-void GenSAMHub::set_monitor_aes3_channel(uint8_t address, uint8_t channel) {
-  GenSAMMonitor *mon = registry_.find(address);
-  if (mon != nullptr) {
-    registry_.set_aes3_channel(*mon, channel);
-  }
-
-  if (audio_source_configured_ && current_audio_source_ == SOURCE_DIGITAL_AES3) {
-    bool is_sub = (mon != nullptr) ? mon->is_subwoofer() : false;
-    this->with_transient_silence_([this, address, channel, is_sub]() {
-      this->send_audio_source_frame(address, SOURCE_DIGITAL_AES3, channel, is_sub);
-    });
-  }
-
-  ESP_LOGI(TAG, "Set monitor 0x%02X AES3 channel: 0x%02X", address, channel);
-}
-
-void GenSAMHub::set_monitor_aes3_channel_by_serial(const std::string &serial_or_id, uint8_t channel) {
+void GenSAMHub::set_monitor_input_by_serial(const std::string &serial_or_id, uint8_t source,
+                                            uint8_t channel) {
   // Store on the binding first, so the setting survives a monitor that is not (yet) on the bus.
   GenSAMMonitorBinding *binding = registry_.find_binding_by_serial_or_id(serial_or_id);
   if (binding != nullptr) {
-    registry_.set_binding_aes3_channel(*binding, channel);
+    registry_.set_binding_input(*binding, source, channel);
   }
 
   GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
   if (mon == nullptr) {
-    ESP_LOGW(TAG, "AES3 channel set for '%s' to 0x%02X (stored; monitor not currently discovered on bus)",
-             serial_or_id.c_str(), channel);
+    this->set_group_modified(true);
+    ESP_LOGW(TAG, "Input for '%s' set to %s (stored; monitor not currently discovered on bus)",
+             serial_or_id.c_str(), input_to_str(source, channel));
     return;
   }
-  this->set_monitor_aes3_channel(mon->address, channel);
+  this->set_monitor_input(mon->address, source, channel);
 }
 
-void GenSAMHub::set_monitor_aes3_channel_by_name(const std::string &serial_or_id, const std::string &channel_name) {
-  uint8_t ch = AES3_CHANNEL_A;
-  if (channel_name == AES3_CHANNEL_STR_B) {
-    ch = AES3_CHANNEL_B;
-  } else if (channel_name == AES3_CHANNEL_STR_SUM) {
-    ch = AES3_CHANNEL_SUM;
-  } else if (channel_name == AES3_CHANNEL_STR_A) {
-    ch = AES3_CHANNEL_A;
-  } else {
-    ESP_LOGW(TAG, "Unknown AES3 channel option '%s' for '%s'", channel_name.c_str(), serial_or_id.c_str());
+void GenSAMHub::set_monitor_input_by_name(const std::string &serial_or_id,
+                                          const std::string &input_name) {
+  uint8_t source = SOURCE_ANALOG;
+  uint8_t channel = AES3_CHANNEL_A;
+  if (!str_to_input(input_name.c_str(), source, channel)) {
+    ESP_LOGW(TAG, "Unknown input option '%s' for '%s'", input_name.c_str(), serial_or_id.c_str());
     return;
   }
-  this->set_monitor_aes3_channel_by_serial(serial_or_id, ch);
+  this->set_monitor_input_by_serial(serial_or_id, source, channel);
 }
 
 void GenSAMHub::set_standby(bool standby) {

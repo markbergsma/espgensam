@@ -38,6 +38,7 @@
 #include <string>
 #include <vector>
 
+#include "input.h"
 #include "monitor.h"
 
 namespace esphome {
@@ -140,20 +141,22 @@ class MonitorRegistry {
   /// @param freq_hz Crossover filter frequency in Hz.
   void set_binding_crossover(GenSAMMonitorBinding &b, uint16_t freq_hz);
 
-  /// @brief Store an AES3 sub-channel on a binding and publish it to the bound select entity.
+  /// @brief Store an input routing on a binding and publish it to the bound select entity.
   /// @param b The binding to update.
-  /// @param channel AES3_CHANNEL_A, _B, or _SUM.
-  void set_binding_aes3_channel(GenSAMMonitorBinding &b, uint8_t channel);
+  /// @param source SOURCE_ANALOG or SOURCE_DIGITAL_AES3.
+  /// @param channel AES3 sub-channel; ignored when @p source is analog.
+  void set_binding_input(GenSAMMonitorBinding &b, uint8_t source, uint8_t channel);
 
   /// @brief Store a monitor's crossover frequency on its binding and publish it.
   /// @param mon The monitor to update; no-op if unbound.
   /// @param freq_hz Crossover filter frequency in Hz.
   void set_crossover(GenSAMMonitor &mon, uint16_t freq_hz);
 
-  /// @brief Store a monitor's AES3 sub-channel on its binding and publish it.
+  /// @brief Store a monitor's input routing on its binding and publish it.
   /// @param mon The monitor to update; no-op if unbound.
-  /// @param channel AES3_CHANNEL_A, _B, or _SUM.
-  void set_aes3_channel(GenSAMMonitor &mon, uint8_t channel);
+  /// @param source SOURCE_ANALOG or SOURCE_DIGITAL_AES3.
+  /// @param channel AES3 sub-channel; ignored when @p source is analog.
+  void set_input(GenSAMMonitor &mon, uint8_t source, uint8_t channel);
 
   /// @brief Determine whether every online monitor is muted.
   /// @param[out] any_online Set to true if at least one monitor is online.
