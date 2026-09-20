@@ -9,6 +9,7 @@
 - **Native Home Assistant Integration**: Discovered automatically through the ESPHome Native API
 - **Standalone Autonomy**: Controls monitors locally with zero dependency on the GLM network adapter, the GLM software or the Home Assistant server status.
 - **Speaker Controls**: Direct volume, mute, power/standby, input select, and telemetry reporting.
+- **Group Presets**: Switch between named calibrations (GLM's "groups") from Home Assistant, each with its own room EQ, level, delay, crossover and input routing per speaker. Convert an existing GLM setup file with the included tool.
 - **Direct 9-Bit RS485 Transceiver**: Uses ESP32 RMT (10 MHz pulse digitization) for RX and RMT pulse generation for TX to cleanly handle the 9-bit/2-stop-bit GLM bus.
 
 You may also want to take a look at [HLM, the Homebrew Loudspeaker Manager](https://github.com/robcazzaro/hlm), which is a similar project to control Genelec SAM monitors from a (STM32/ESP32) microcontroller. It already implements most of the protocol's functionality. We have started collaborating to better understand the underlying GLM protocol.
@@ -110,6 +111,73 @@ media_player:
   - platform: gensam
     name: "Genelec SAM System"
 ```
+
+### 3. Group Presets (`gensam: groups:`)
+
+A group preset is a named monitoring configuration, just like the Group buttons in GLM: which
+speakers take part, how each is fed, and the room calibration for each of them at one listening
+position. Switching between groups from Home Assistant re-sends the whole DSP
+block to every speaker.
+
+Because a group carries twenty EQ bands per speaker, groups live in their own file:
+
+```yaml
+gensam:
+  groups: !include gensam_groups.yaml
+
+  # Applied once the speakers have been found, so they are never left in a state
+  # you did not choose. Defaults to the first group; use `none` to apply nothing.
+  default_group: "Main Listening Position"
+
+  group_select:
+    name: "Group Preset"
+```
+
+```yaml
+# gensam_groups.yaml
+- name: "Main Listening Position"
+  devices:
+    - unique_id: 1842915          # matches a monitor's unique_id above
+      source: aes3_sum            # analog | aes3_a | aes3_b | aes3_sum
+      crossover: 90               # Hz
+      level_db: -1.9258           # per-speaker trim from AutoCal
+      delay_samples: 289          # alignment delay, 48 kHz samples
+      filters:                    # up to 20; the rest are left flat
+        - {type: notch, frequency: 56.1739, gain: -6.05847, q: 4.68839}
+        - {type: low_shelf, frequency: 118.711, gain: -0.177536}
+        - {type: high_shelf, frequency: 14999, gain: -0.0199986}
+```
+
+`type` is `notch` (a peaking filter, as GLM labels it), `low_shelf`, `high_shelf` or `bypass`.
+Only `notch` takes a `q`. Set `enabled: false` on a device to mute it in that group rather
+than configure it.
+
+Filter order is the order the speaker's own filter slots run in, which differs by model: a
+two-way monitor takes two low shelves, two high shelves and then up to sixteen notches, while
+a subwoofer takes twenty notches and no shelves. The converter below gets this right; if you
+write a group by hand, follow the same order.
+
+### 4. Converting an existing GLM setup
+
+`tools/sam2yaml.py` reads a GLM 5 `.sam` setup file and writes the groups file, so an
+existing AutoCal calibration does not have to be retyped:
+
+```bash
+python3 tools/sam2yaml.py "My Setup.sam" \
+    --monitors 1842915,1654321,1987654 \
+    -o gensam_groups.yaml
+```
+
+`--monitors` lists the `unique_id`s from your `monitors:` block. Devices outside that list are
+skipped with a warning — a GLM setup file can retain a speaker that is no longer connected, or
+one that was never really there.
+
+Anything the tool cannot carry across is reported on stderr rather than dropped quietly. Read
+those warnings: they are the difference between the group sounding as GLM calibrated it and
+sounding close.
+
+The tool needs PyYAML. If your system Python lacks it, `pip install pyyaml`, or run it with
+ESPHome's own interpreter.
 
 ---
 
