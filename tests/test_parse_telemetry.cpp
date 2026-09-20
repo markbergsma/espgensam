@@ -110,6 +110,17 @@ void test_marker_is_transparent() {
         "marker is transparent: marked frame parses as its unmarked sibling");
 }
 
+/// A live 7350A frame with signal present. 0x43 sits at the floor because a subwoofer has no
+/// tweeter; 0x45 carries the level. Pins that output_db follows whichever channel is active
+/// rather than a particular tag, which is why the 0x43/0x45 assignment is a labelling question
+/// and not a behavioural one.
+void test_subwoofer_output_follows_active_channel() {
+  GenSAMMonitor m = parse({0x07, 0x41, 0x18, 0x83, 0x00, 0x1A, 0x42, 0xF5, 0x46, 0x8F,
+                           0x43, 0x80, 0x45, 0xE5, 0x47, 0x01, 0x84, 0x01, 0x66});
+  check(m.output_db == static_cast<int8_t>(0xE5), "subwoofer: output_db takes the peak (0x45)");
+  check(m.standby_known && !m.standby, "subwoofer: ACTIVE");
+}
+
 // --- The 0x47 paths the three capture files happen not to contain ------------------------------
 
 /// A genuine standby reply, observed live on 2026-09-20 with the system powered down: tag 47 02,
@@ -166,6 +177,7 @@ int main() {
   test_bare_marker_touches_nothing();
   test_bare_07_is_not_standby();
   test_marker_is_transparent();
+  test_subwoofer_output_follows_active_channel();
   test_tag_47_standby();
   test_tag_47_standby_truncated();
   test_tag_47_invalid_operand_ignored();

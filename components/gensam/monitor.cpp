@@ -167,13 +167,23 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
   }
 
   // Tags:
-  //   'A' (0x41): Amp/DSP Temperature (°C)
-  //   'B' (0x42): Input Signal Level (signed int8 dBFS)
-  //   'C' (0x43): Woofer (LF) Driver Output Level (signed int8 dBFS)
-  //   'D' (0x44): Midrange (MF) Driver Output Level (signed int8 dBFS, 3-way monitors)
-  //   'E' (0x45): Tweeter (HF) Driver Output Level (signed int8 dBFS)
-  //   'F' (0x46): Subwoofer Driver Output Level (signed int8 dBFS)
-  //   'G' (0x47): Power State (0x01 = Active, 0x02 = Standby / ISS)
+  //   0x41: Amp/DSP Temperature (°C)
+  //   0x42: Input Signal Level, pre-volume (signed int8 dBFS)
+  //   0x43: HF / tweeter channel output level (signed int8 dBFS)
+  //   0x44: Midrange channel output level (3-way models; never yet observed)
+  //   0x45: LF / woofer channel output level (signed int8 dBFS)
+  //   0x46: Subwoofer-only meter, exact meaning unresolved (signed int8 dBFS)
+  //   0x47: Power State (0x01 = Active, 0x02 = Standby / ISS)
+  //
+  // 0x43 is HF and 0x45 is LF, not the other way round. The tags are consecutive and it is
+  // tempting to read them as ascending driver order, which is how they were originally labelled
+  // here -- but a 7350A subwoofer, which has no tweeter, reports 0x43 pinned to the 0x80 floor in
+  // every single frame (164/164 with music playing) while 0x45 swings across 0x80-0xF1. Both are
+  // active on a two-way. HLM reached the same assignment independently from a frequency sweep.
+  //
+  // 0x46 is emitted only by the subwoofer, but it is not simply "the subwoofer's output": it has
+  // been seen dominating while 0x45 sat at the floor, and floored while 0x45 swung widely, in
+  // different sessions. Left deliberately vague rather than guessed at.
   bool found_tag = false;
   bool found_output = false;
   int8_t max_output_db = -128;
@@ -188,8 +198,9 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
       found_tag = true;
       i++;
     } else if ((tag == 0x43 || tag == 0x44 || tag == 0x45 || tag == 0x46) && i + 1 < tlv_len) {
-      // 'C' = Woofer, 'D' = Midrange, 'E' = Tweeter, 'F' = Subwoofer driver level.
-      // Overall monitor output level tracks the peak across all active driver channels.
+      // Per-channel output meters (see the tag table above). The monitor's overall output level
+      // tracks the peak across whichever channels this model reports, so the individual
+      // assignments do not affect it -- they matter only for reading the raw frames.
       int8_t level = static_cast<int8_t>(tlv_data[i + 1]);
       if (!found_output || level > max_output_db) {
         max_output_db = level;

@@ -146,7 +146,7 @@ bool parse_barcode(const uint8_t *data, size_t len, GenSAMMonitor &monitor);
 
 /// @brief Parse status telemetry payload from CMD_REPORT_STATUS (0x09) or CMD_QUERY_STATUS (0x08).
 ///
-/// Supports modern tagged TLV streams ('A' temp, 'B' input, 'C'/'D'/'E'/'F' driver outputs, 'G' power state)
+/// Supports modern tagged TLV streams (0x41 temp, 0x42 input, 0x43-0x46 channel outputs, 0x47 power state)
 /// as well as legacy fixed-offset RACE payloads.
 ///
 /// Tag 'G' (0x47) is the only field in a reply that reports power state, and only its documented
