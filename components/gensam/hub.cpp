@@ -128,6 +128,16 @@ void GenSAMHub::setup() {
     }
   }
 
+  // Show the group that discovery is about to apply, rather than leaving the entity unknown
+  // for the ten seconds or so until it lands. Suppressed in listen-only mode, where nothing
+  // will be transmitted and naming a group would assert something untrue about the bus.
+  if (!listen_only_ && default_group_ >= 0 && group_select_ != nullptr) {
+    const GroupPreset *group = this->get_group(static_cast<uint8_t>(default_group_));
+    if (group != nullptr) {
+      group_select_->publish_state(group->name);
+    }
+  }
+
   this->update_bus_status_();
 
   ESP_LOGI(TAG, "GenSAM Hub initialized successfully (baud=%lu, TX=%s, RX=GPIO%d, yield_to_glm=%s, cooldown=%u ms)",

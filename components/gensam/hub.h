@@ -218,6 +218,27 @@ class GenSAMHub : public Component {
   /// @brief Index of the group last applied, or -1 if none has been.
   int get_active_group_index() const { return active_group_; }
 
+  /// @brief Set the group applied automatically once discovery completes.
+  ///
+  /// Configuring groups but applying none would leave the speakers in whatever state they
+  /// were last left in - by GLM, by a previous group, or by their stored flash settings -
+  /// with the select entity reading "unknown" and no way to tell which.  Picking one by
+  /// default makes the state on the bus match what Home Assistant shows.
+  ///
+  /// There is also little to preserve by not doing it.  A monitor left to itself applies the
+  /// settings in its own flash, but that is documented as what happens when it is powered up
+  /// *without* a host; enumerating it hands its DSP to whoever is managing the bus.  GLM
+  /// behaves accordingly, pushing a complete DSP block after every enumeration rather than
+  /// only after a power cycle, and waking a monitor out of standby reboots its DSP and takes
+  /// the volatile settings with it.  By the time discovery here has finished, what the
+  /// filters hold is not something to rely on, and programming them is the only way to know.
+  ///
+  /// This is still deliberately unlike the audio source select, which stays unconfigured at
+  /// boot so it cannot overwrite a monitor's stored routing.  Callers who want that same
+  /// caution applied to the calibration can leave this unset.
+  /// @param index Preset index to apply on startup.
+  void set_default_group(uint8_t index) { default_group_ = index; }
+
   /// @brief Make a group preset the active one and push it to every monitor.
   ///
   /// The push is asynchronous: this records the request and returns, and the state machine
@@ -654,6 +675,9 @@ class GenSAMHub : public Component {
   /// Group last pushed to the monitors, or -1 if none. Re-applied after every rediscovery,
   /// because a monitor loses its DSP state passing through standby.
   int active_group_{-1};
+
+  /// Group to apply once discovery first completes, or -1 to apply none.
+  int default_group_{-1};
 
   /// Group waiting to be pushed, or -1 if none. Separate from active_group_ so that a switch
   /// requested while the bus is unavailable is not lost, and so a second request during a

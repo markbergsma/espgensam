@@ -67,6 +67,7 @@ CONF_MODE = "mode"
 
 CONF_GROUPS = "groups"
 CONF_GROUP_SELECT = "group_select"
+CONF_DEFAULT_GROUP = "default_group"
 CONF_PEQ_DESIGN_RATE = "peq_design_rate"
 CONF_DEVICES = "devices"
 CONF_ENABLED = "enabled"
@@ -463,6 +464,15 @@ def _validate_groups(config):
                 )
             # Inherit the group crossover so the generated table is always explicit.
             dev.setdefault(CONF_CROSSOVER, group[CONF_CROSSOVER])
+
+    chosen = config.get(CONF_DEFAULT_GROUP)
+    if chosen is None:
+        config[CONF_DEFAULT_GROUP] = groups[0][CONF_NAME]
+    elif chosen.lower() != "none" and chosen not in seen_names:
+        raise cv.Invalid(
+            f"default_group '{chosen}' is not one of the configured groups "
+            f"({', '.join(sorted(seen_names))}). Use 'none' to apply no group at startup."
+        )
     return config
 
 
@@ -527,6 +537,11 @@ _CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_STARTUP_VOLUME_DB, default=-30.0): cv.float_,
         cv.Optional(CONF_MONITORS): cv.ensure_list(MONITOR_SCHEMA),
         cv.Optional(CONF_GROUPS): cv.All(cv.ensure_list(GROUP_SCHEMA), cv.Length(min=1)),
+        # Which group to apply once discovery completes. Defaults to the first one: having
+        # configured groups but applied none leaves the speakers in a state nothing here
+        # chose, and the select entity reading "unknown". Set to 'none' to keep the older
+        # behaviour of not touching a monitor's stored settings at boot.
+        cv.Optional(CONF_DEFAULT_GROUP): cv.string,
         cv.Optional(CONF_GROUP_SELECT): select.select_schema(
             GenSAMGroupSelect,
             icon="mdi:tune-variant",
@@ -651,6 +666,11 @@ async def to_code(config):
     group_count = _emit_group_table(config)
     if group_count:
         cg.add(var.set_group_table(cg.RawExpression("gensam_group_table"), group_count))
+
+    chosen = config.get(CONF_DEFAULT_GROUP)
+    if group_count and chosen and chosen.lower() != "none":
+        names = [g[CONF_NAME] for g in config[CONF_GROUPS]]
+        cg.add(var.set_default_group(names.index(chosen)))
 
     if CONF_GROUP_SELECT in config:
         group_sel = await select.new_select(

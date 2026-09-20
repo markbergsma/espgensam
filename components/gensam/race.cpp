@@ -536,9 +536,11 @@ void GenSAMHub::race_step_configuring_(uint32_t now) {
 
   // A monitor loses its DSP state passing through standby, so whatever group was active has
   // to be pushed again now rather than only when the user next picks one. pending_group_ may
-  // already hold a different choice made while the system was down; that one wins.
-  if (pending_group_ < 0 && active_group_ >= 0) {
-    pending_group_ = active_group_;
+  // already hold a different choice made while the system was down; that one wins. Falling
+  // back to the default covers the first discovery after boot, so the speakers are never
+  // left in a state nothing here chose; see set_default_group().
+  if (pending_group_ < 0) {
+    pending_group_ = (active_group_ >= 0) ? active_group_ : default_group_;
   }
   if (pending_group_ >= 0 && this->start_group_apply_(now)) {
     return;
