@@ -46,6 +46,8 @@ static constexpr uint8_t CMD_VOLUME = 0x1F;           ///< Volume control (24-bi
 static constexpr uint8_t CMD_BAR_CODE = 0x19;         ///< Serial number / barcode query
 static constexpr uint8_t CMD_HARDWARE_QUERY = 0x22;   ///< Hardware ID query
 static constexpr uint8_t CMD_BYPASS = 0x2B;           ///< Bypass / Mute / LED control
+static constexpr uint8_t CMD_DSP = 0x10;              ///< DSP parameter update (PEQ, delay, level)
+static constexpr uint8_t CMD_PREPARE_CONFIG = 0x17;   ///< Prepare for a block of DSP settings
 static constexpr uint8_t CMD_SOFTWARE_QUERY = 0x39;   ///< Firmware version query
 static constexpr uint8_t CMD_WAKEUP = 0x3A;           ///< Wakeup / standby control (0x3A)
 static constexpr uint8_t CMD_BASS_MANAGE_XO = 0x3B;   ///< Bass management crossover frequency configuration
@@ -79,6 +81,43 @@ inline const char *aes3_channel_to_str(uint8_t ch) {
 // --- Audio source switching transient volume parameters -------------------
 /// GLM minimum volume payload bytes (digital silence / -130 dBFS during source switching).
 static constexpr uint8_t VOLUME_PAYLOAD_SILENCE[3] = {0x00, 0x00, 0x02};
+
+// --- CMD_DSP (0x10) sub-commands -------------------------------------------
+/// @name DSP parameter sub-commands
+///
+/// Only the PEQ sub-command is implemented. The other two are named here because they appear
+/// in this project's captures during every OEM enumeration and group apply, so a reader
+/// decoding a log needs them - but neither is transmitted, because the meaning of their
+/// payloads is not settled:
+///
+///  - 0x01 carries [sub, 3-byte level] in the same 2^23 linear-gain encoding as CMD_VOLUME.
+///    The protocol specification labels sub-command 0x00 "max level restriction", but its
+///    observed values (0x7A3957 = -0.40 dB, 0x748C42 = -0.81 dB) sit in the range of a GLM
+///    setup file's per-device Level_Sensitivity trim rather than anywhere near a typical max
+///    level. Our own captures show 0x7FFFFF = 0.0 dB on an uncalibrated system, which is
+///    consistent with either reading. Sub-command 0x09 is undocumented and observed only as
+///    0x000000.
+///  - 0x02 carries a 4-byte time-of-flight delay as a sample count. Confirmed at 48 kHz for
+///    two-way monitors; whether a subwoofer's count is at 48 kHz or its 12 kHz design rate is
+///    unresolved, and the two differ by 4x.
+///
+/// Sending either on a guess would write a wrong parameter into a calibrated speaker, so both
+/// wait on a capture of GLM applying a calibrated group. See docs/glm-protocol-comparison.md.
+///@{
+static constexpr uint8_t DSP_SUB_LEVEL = 0x01;  ///< Level compensation / boundaries (not sent).
+static constexpr uint8_t DSP_SUB_DELAY = 0x02;  ///< Time-of-flight delay (not sent).
+static constexpr uint8_t DSP_SUB_PEQ = 0x0E;    ///< Parametric EQ band coefficients.
+///@}
+
+/// Number of parametric EQ slots per device; wire indices run 0x00..PEQ_MAX_INDEX.
+static constexpr uint8_t PEQ_BAND_COUNT = 20;
+static constexpr uint8_t PEQ_MAX_INDEX = PEQ_BAND_COUNT - 1;  ///< 0x13.
+
+/// Trailing type/flag byte of a CMD_DSP PEQ frame. Only 0x00 has ever been observed.
+static constexpr uint8_t PEQ_TYPE_FLAG_ACTIVE = 0x00;
+
+/// Payload byte accompanying CMD_PREPARE_CONFIG, always 0x01 in captured OEM traffic.
+static constexpr uint8_t PREPARE_CONFIG_PAYLOAD = 0x01;
 
 // --- Bass management crossover parameters ----------------------------------
 static constexpr uint16_t DEFAULT_CROSSOVER_HZ = 85;  ///< Factory default bass management crossover frequency (Hz)

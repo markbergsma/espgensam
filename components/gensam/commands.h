@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "biquad.h"
 #include "const.h"
 #include "frame.h"
 
@@ -101,6 +102,35 @@ Frame make_crossover(uint8_t addr, uint16_t freq_hz);
 /// @param channel AES3_CHANNEL_A / _B / _SUM; ignored for analog and for input 1.
 /// @return CMD_SELECT_AUDIO_SOURCE frame carrying the 4-byte selection record.
 Frame make_audio_source(uint8_t addr, uint8_t input_idx, uint8_t source, uint8_t channel);
+
+/// @brief Build a "prepare for configuration" frame (CMD_PREPARE_CONFIG 0x17).
+///
+/// GLM sends this once per speaker immediately before a block of DSP settings, both during
+/// enumeration and when re-applying a group.  What the monitor does with it is not known -
+/// the protocol specification marks its meaning unresolved - but the exact frame
+/// (`02' 17 01 1B 5A 7E`) appears in this project's own bus captures, so emitting it
+/// reproduces observed OEM behaviour rather than inventing one.
+/// @param addr Target monitor bus address.
+/// @return CMD_PREPARE_CONFIG frame carrying its single {0x01} payload byte.
+Frame make_prepare_config(uint8_t addr);
+
+/// @brief Build one parametric EQ band frame (CMD_DSP 0x10, sub-command DSP_SUB_PEQ 0x0E).
+///
+/// Monitors carry a 20-slot cascade of second-order sections and accept only finished
+/// coefficients; design them with design_biquad() in biquad.h, which also applies the
+/// normalisation and feedback sign inversion the DSP expects.
+///
+/// The five floats go on the wire as IEEE-754 float32 in **little-endian** byte order, which
+/// is the one place in this protocol that is not big-endian.  Coefficient bytes routinely
+/// collide with the framing tokens 0x7E and 0x7D; that is handled correctly because
+/// Frame::to_9bit() computes the CRC over the raw payload and escapes only afterwards.
+///
+/// @param addr Target monitor bus address.
+/// @param index Filter slot, 0x00..0x13.  Frames for an out-of-range index are not built.
+/// @param c The five normalised, sign-inverted coefficients, in transmission order.
+/// @return CMD_DSP frame carrying [0x0E, index, b0, b1, b2, a1, a2, type], or an empty
+///         default-constructed Frame if @p index exceeds PEQ_MAX_INDEX.
+Frame make_peq_band(uint8_t addr, uint8_t index, const BiquadCoeffs &c);
 
 }  // namespace gensam
 }  // namespace esphome

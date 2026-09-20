@@ -3,6 +3,8 @@
 /// See commands.h for the protocol command vocabulary and complete API documentation.
 
 #include "commands.h"
+
+#include <cstring>
 #include "util.h"
 
 namespace esphome {
@@ -54,6 +56,46 @@ Frame make_bypass(uint8_t addr, bool mute, bool pulsing) {
 Frame make_crossover(uint8_t addr, uint16_t freq_hz) {
   return Frame(addr, CMD_BASS_MANAGE_XO,
                {static_cast<uint8_t>((freq_hz >> 8) & 0xFF), static_cast<uint8_t>(freq_hz & 0xFF)});
+}
+
+Frame make_prepare_config(uint8_t addr) {
+  return Frame(addr, CMD_PREPARE_CONFIG, {PREPARE_CONFIG_PAYLOAD});
+}
+
+/// @brief Append one IEEE-754 float32 to @p out in little-endian byte order.
+///
+/// memcpy into an integer rather than a reinterpret_cast: type-punning a float through a
+/// uint32_t pointer is undefined behaviour and real compilers do miscompile it under -O2.
+/// Shifting out of the integer then makes the byte order explicit, so the result does not
+/// depend on the host's endianness -- the ESP32 is little-endian and a raw memcpy of the
+/// float would happen to be correct there, but silently wrong in a host test on a big-endian
+/// machine, which is precisely where this would go unnoticed.
+static void append_float_le(std::vector<uint8_t> &out, float value) {
+  uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  out.push_back(static_cast<uint8_t>(bits & 0xFF));
+  out.push_back(static_cast<uint8_t>((bits >> 8) & 0xFF));
+  out.push_back(static_cast<uint8_t>((bits >> 16) & 0xFF));
+  out.push_back(static_cast<uint8_t>((bits >> 24) & 0xFF));
+}
+
+Frame make_peq_band(uint8_t addr, uint8_t index, const BiquadCoeffs &c) {
+  if (index > PEQ_MAX_INDEX) {
+    return Frame();
+  }
+
+  std::vector<uint8_t> payload;
+  payload.reserve(23);
+  payload.push_back(DSP_SUB_PEQ);
+  payload.push_back(index);
+  append_float_le(payload, c.b0);
+  append_float_le(payload, c.b1);
+  append_float_le(payload, c.b2);
+  append_float_le(payload, c.a1);
+  append_float_le(payload, c.a2);
+  payload.push_back(PEQ_TYPE_FLAG_ACTIVE);
+
+  return Frame(addr, CMD_DSP, std::move(payload));
 }
 
 Frame make_audio_source(uint8_t addr, uint8_t input_idx, uint8_t source, uint8_t channel) {
