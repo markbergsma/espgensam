@@ -55,6 +55,15 @@ The codebase enforces a strict three-tier architecture to prevent coupling proto
   esphome compile espgensam.yaml
   ```
   Ensure builds complete with zero compiler errors or unhandled warnings.
+- **Host Unit Tests**:
+  Protocol parsers that are pure functions over a byte buffer are tested on the host, against
+  verbatim payloads from `captures/`. No framework and no build system — compile the test
+  together with the translation unit under test:
+  ```bash
+  c++ -std=c++17 -Wall -o /tmp/test_parse_telemetry \
+      tests/test_parse_telemetry.cpp components/gensam/monitor.cpp && /tmp/test_parse_telemetry
+  ```
+  A new test must be shown to fail against the unfixed code before it is trusted.
 - **Credential Safety**:
   Never commit private network credentials or keys. Always keep sensitive parameters in `secrets.yaml` (which is excluded by `.gitignore`) and provide sanitized templates in `secrets.yaml.example`.
 

@@ -135,7 +135,7 @@ Both projects saw an extra byte between the `09` reply opcode and the `41` telem
 - **HLM** handles `0x06`: a settings-write/persistence marker, appearing ~0.6–1.1 s after config pushes, also seen bare as `09 06`. It does **not** handle `0x07` — such a frame falls through to `unknown_message()` and is dropped.
 - **espgensam** handles `0x07` as `STATUS_STANDBY` (commit `968fdc4`), forcing `monitor.standby = true` and explicitly refusing to let tag `47` clear it (`components/gensam/monitor.cpp:193-199`). It has no notion of `0x06` (the scan-based TLV walk skips it harmlessly, and a bare `[06]` is silently ignored).
 
-The captures contain both, and they argue against the standby reading. All three `0x07`-prefixed frames carry **`47 01` — active** — and arrive in a single poll round, ~0.4 s after a configuration burst (`3D`, `2B`, `19` queries), which is exactly the context HLM documents for `0x06`:
+The captures contain both, and they show the original observation was right while its conclusion was backwards. The marker does follow a wake — in all three captures it appears **~1.6 s after a `3A 03 7F` / `3A 03 01` burst** (1.57 s in `glm_startup`, 1.57 s in `glm_v5_no_wakeup`, 1.60 s in `glm_source_select`). But every marker-bearing frame carries **`47 01` — active**: the monitor has *finished* waking. Nor is the byte positional — 10 frames carry it leading, 5 carry it trailing (`41 29 … 47 01 84 01 6C 06`, all from the 7350A), and 2 consist of nothing else. No capture contains `47 02` anywhere.
 
 ```
 [21:11:14.768] addr=0x01 cmd=0x09 payload=[07 41 13 83 00 25 42 00 46 FA 43 80 45 9D 47 01 84 01 6C]
@@ -145,7 +145,7 @@ The captures contain both, and they argue against the standby reading. All three
 
 (`captures/glm_v5_no_wakeup_capture.log:296,302,307`.) One second later the same monitors send byte-identical frames **without** the prefix. Meanwhile the media_player entity is `ON` and mute snooping is live — the system is not in standby.
 
-Consequence: a `0x07` prefix on an active frame sets `standby = true` and blocks tag `47 01` from clearing it. In this capture all three monitors got the prefix in the same round, which is enough for `evaluate_system_standby_()` to flip the whole system to standby in Home Assistant. This looks like a live false-standby bug, and `0x06`/`0x07` are most likely the same field (a busy/sequence marker) with two values.
+Consequence: a `0x07` prefix on an active frame sets `standby = true` and blocks tag `47 01` from clearing it. In this capture all three monitors got the prefix in the same round, which is enough for `evaluate_system_standby_()` to flip the whole system to standby in Home Assistant. A false standby is expensive rather than cosmetic: `set_volume_db` keeps publishing to Home Assistant while transmitting nothing, so the slider moves and the speakers do not; and the next `rediscover_monitors()` escalates it into a genuine `send_standby()` on the wire.
 
 ### 4.4 `0x40` — espgensam's model is a strict superset
 
@@ -266,7 +266,7 @@ The two projects are close to complementary: espgensam is deeper on device topol
 
 **Correctness — espgensam**
 
-1. **Re-examine `STATUS_STANDBY = 0x07`** (`components/gensam/const.h:85`, `monitor.cpp:147-154`, `:193-199`). Evidence in `captures/glm_v5_no_wakeup_capture.log:296,302,307` shows a `0x07` prefix alongside `47 01` (active) right after a config push. Likely fix: treat `0x06` and `0x07` identically as a busy/sequence marker, strip it, and let tag `47` be the sole authority on standby. Keep the bare-`[07]`/`[06]` single-byte case as "no telemetry this round" rather than "standby".
+1. ~~**Re-examine `STATUS_STANDBY = 0x07`.**~~ **Done (§4.3).** `STATUS_STANDBY` is replaced by `is_telemetry_marker()`; `0x06`/`0x07` are stripped at either end without touching power state, tag `0x47` is the sole authority with its operand validated, and a marker-only payload updates nothing. Regression cover in `tests/test_parse_telemetry.cpp`, which fails six checks against the pre-fix code.
 2. **Swap the `0x43` / `0x45` labels** (`components/gensam/monitor.cpp:165-167`, `monitor.h` banner): `0x43` = HF/tweeter, `0x45` = LF/woofer. Confirmed by 524 subwoofer frames where `43` is permanently floored, and independently by HLM's swept-sine test. Behaviour is unchanged (`max()` across drivers) — this is a documentation/label fix.
 3. ~~**Re-check the bus baud rate.**~~ **Done — measured at ~288,000 baud (§2).** Remaining decision: whether to change `baud_rate` from 281,250 to 288,000. Nothing is broken at 281,250 (the receiver tolerates the offset, and monitors evidently accept our transmissions), so this is a correctness-of-intent change rather than a bug fix. HLM should hear about it too — it is 2.88% high on the other side.
 

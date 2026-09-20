@@ -271,9 +271,9 @@ bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
       registry_.bind_if_matched(mon);
       registry_.publish_telemetry(mon);
       this->evaluate_system_standby_();
-      if (frame.payload.size() == 1 && frame.payload[0] == STATUS_STANDBY) {
-        ESP_LOGD(TAG, "[0x%02X %s] Telemetry: Monitor in standby (0x%02X)",
-                 current_query_addr_, mon.model.c_str(), STATUS_STANDBY);
+      if (frame.payload.size() == 1 && is_telemetry_marker(frame.payload[0])) {
+        ESP_LOGD(TAG, "[0x%02X %s] Telemetry: marker-only reply (0x%02X); no fields reported",
+                 current_query_addr_, mon.model.c_str(), frame.payload[0]);
       } else {
         ESP_LOGI(TAG, "[0x%02X %s] Telemetry: %s Temp=%d°C In=%d dBFS Out=%d dBFS",
                  current_query_addr_, mon.model.c_str(),

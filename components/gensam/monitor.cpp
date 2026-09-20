@@ -144,20 +144,27 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
     return false;
   }
 
-  bool has_standby_header = (data[0] == STATUS_STANDBY);
-  if (has_standby_header) {
-    monitor.standby = true;
-    monitor.standby_known = true;
-    if (len == 1) {
-      return true;
-    }
+  // Check for Tagged TLV format (modern GLMv3-v5 monitors report ASCII-tagged records).
+  //
+  // A reply may carry a lone 0x06/0x07 marker byte alongside its records. It is not a power
+  // state (see is_telemetry_marker() in const.h) and must never touch standby. Strip a leading
+  // one so the records align at index 0. A trailing marker -- which the captures also show --
+  // needs no handling here: it matches no tag, and the scan below simply steps over it. Do not
+  // "improve" this into positional handling; the byte has been observed at either end.
+  const uint8_t *tlv_data = data;
+  size_t tlv_len = len;
+  if (is_telemetry_marker(tlv_data[0])) {
+    tlv_data++;
+    tlv_len--;
   }
 
-  // Check for Tagged TLV format (modern GLMv3-v5 monitors report ASCII-tagged records).
-  // When waking from standby, monitors prepend STATUS_STANDBY (0x07) to the TLV stream.
-  // We advance past the 0x07 status header so subsequent tags align starting at index 0.
-  const uint8_t *tlv_data = has_standby_header ? (data + 1) : data;
-  size_t tlv_len = has_standby_header ? (len - 1) : len;
+  // A marker on its own is the whole payload: the monitor answered, but reported nothing this
+  // round. Update no fields. standby_known in particular is sticky -- nothing ever clears it --
+  // so arming it here would enrol this monitor in MonitorRegistry::all_online_in_standby() for
+  // the rest of the session on the strength of a byte that carries no power information.
+  if (tlv_len == 0) {
+    return false;
+  }
 
   // Tags:
   //   'A' (0x41): Amp/DSP Temperature (°C)
@@ -190,13 +197,17 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
       found_output = true;
       found_tag = true;
       i++;
-    } else if (tag == 0x47 && i + 1 < tlv_len) {  // 'G' = Power state (0x01 = Active, 0x02 = Standby)
-      // Only allow Tag 'G' to clear standby if no leading STATUS_STANDBY header was present.
-      // If the monitor explicitly prepended STATUS_STANDBY (0x07), it is in the startup
-      // muting/standby state regardless of amplifier power rail status.
-      if (!has_standby_header || tlv_data[i + 1] == 0x02) {
-        monitor.standby = (tlv_data[i + 1] == 0x02);
-      }
+    } else if (tag == 0x47 && i + 1 < tlv_len &&
+               (tlv_data[i + 1] == 0x01 || tlv_data[i + 1] == 0x02)) {
+      // 'G' = Power state, and the sole authority on it (0x01 = Active, 0x02 = Standby / ISS).
+      //
+      // The operand is validated in the branch condition rather than the body because this loop
+      // is a scan, not a length-driven parse: a 0x47 that is really someone else's operand (a
+      // temperature of 71 degC, say) can reach here. Rejecting it in the condition means it is
+      // treated as the coincidental data byte it almost certainly is -- no byte consumed, no
+      // found_tag, no suppression of the Format A fallback -- rather than arming standby_known,
+      // which is sticky and would make this monitor a permanent standby voter.
+      monitor.standby = (tlv_data[i + 1] == 0x02);
       monitor.standby_known = true;
       found_tag = true;
       i++;
@@ -218,6 +229,10 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
   // Byte 1: Temperature (deg C)
   // Byte 6: Input level (dBFS)
   // Byte 12: Output level (dBFS)
+  //
+  // Deliberately reads raw data/len, not tlv_data/tlv_len: these offsets are absolute, so the
+  // marker strip above must not shift them. The two pointers look interchangeable here and are
+  // not. Format A carries no power field, which is why standby is left untouched below.
   if (len >= 7) {
     monitor.temperature = static_cast<int8_t>(data[1]);
     monitor.input_db = static_cast<int8_t>(data[6]);
