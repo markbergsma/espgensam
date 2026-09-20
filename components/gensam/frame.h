@@ -50,7 +50,7 @@
 #include <vector>
 
 #include "const.h"
-#include "uart9bit.h"
+#include "uart9bit_char.h"
 
 namespace esphome {
 namespace gensam {

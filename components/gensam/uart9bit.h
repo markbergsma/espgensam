@@ -53,17 +53,12 @@
 #include "freertos/ringbuf.h"
 #include "soc/soc_caps.h"
 
+#include "uart9bit_char.h"
+
 namespace esphome {
 namespace gensam {
 
-/// @brief A single 9-bit character received from or to be transmitted on the bus.
-struct Uart9BitChar {
-  uint8_t data;       ///< 8-bit data value (D0–D7).
-  uint8_t ninth_bit;  ///< 9th bit: 1 = address byte, 0 = data byte.
-
-  Uart9BitChar() : data(0), ninth_bit(0) {}
-  Uart9BitChar(uint8_t d, uint8_t n) : data(d), ninth_bit(n) {}
-};
+// Uart9BitChar now lives in uart9bit_char.h so that frame.h can be compiled without ESP-IDF.
 
 /// @brief Character-level decode outcome, as a plain value.
 ///
