@@ -147,8 +147,21 @@ void GenSAMHub::snoop_audio_source_(const Frame &frame) {
     return;
   }
 
-  if ((src == SOURCE_ANALOG || src == SOURCE_DIGITAL_AES3) &&
-      (!audio_source_configured_ || current_audio_source_ != src)) {
+  if (src != SOURCE_ANALOG && src != SOURCE_DIGITAL_AES3) {
+    // An external controller selected something this component cannot name -- 0x03 (Automatic,
+    // a standalone setting we do not implement) or a value nobody has documented.  Stop claiming
+    // to know the source: configure_monitor_() re-pushes current_audio_source_ to every monitor
+    // after a standby / rediscovery cycle, so leaving the flag set would later revert the bus to
+    // the last source we did understand, silently undoing a change we watched go past.
+    //
+    // The entity keeps displaying its last value; an ESPHome select cannot be returned to
+    // Unknown once published.  Only transmission stops.
+    if (audio_source_configured_) {
+      audio_source_configured_ = false;
+      ESP_LOGW(TAG, "[Sniffed] Audio source set to unrecognised value 0x%02X; no longer asserting "
+                    "a source (entity still shows its last known value)", src);
+    }
+  } else if (!audio_source_configured_ || current_audio_source_ != src) {
     current_audio_source_ = src;
     audio_source_configured_ = true;
     const char *name = (src == SOURCE_ANALOG) ? SOURCE_STR_ANALOG : SOURCE_STR_DIGITAL_AES3;

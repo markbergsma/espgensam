@@ -21,6 +21,13 @@
 ///      To prevent overwriting stored presets at boot, the source select entity starts unconfigured
 ///      (Unknown state in Home Assistant) and does not transmit until explicitly commanded or
 ///      snooped from an external GLM controller.
+///    - Two options, not three: source_type 0x03 ("Automatic") is listed by the HLM project's
+///      protocol spec, but it is a *standalone* setting - GLM exposes it only when configuring what
+///      a speaker should do on its own, not in live input selection - and neither project has ever
+///      observed it on the wire, so its pair_selector and channel bytes are unknown. It would also
+///      have to be persisted with a flash commit (0x15), which this component does not implement.
+///      Adding it here would ship a guess that cannot be made to stick; it belongs to a standalone
+///      settings feature instead. A snooped 0x03 is handled defensively in snoop_audio_source_().
 ///
 /// 2. Per-Monitor AES3 Sub-Channel Assignment (GenSAMAES3ChannelSelect):
 ///    A digital AES3 stream carries two audio sub-channels (Channel A and Channel B).
