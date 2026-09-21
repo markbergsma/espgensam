@@ -32,8 +32,11 @@ What it does not carry over
 ---------------------------
 Fields whose wire encoding is unknown are dropped rather than guessed, and every dropped
 non-default value is reported so nothing disappears silently: ``Optional_Gain``,
-``Time-of-flight_Compensation``, ``Group_Sensitivity``, ``Video_Delay``, the ``LFE_*`` family
-and ``SubwooferGroupID``.
+``Time-of-flight_Compensation``, ``Video_Delay``, the ``LFE_*`` family and
+``SubwooferGroupID``.
+
+``Group_Sensitivity`` is *not* among them: GLM sums it with the device's own
+``Level_Sensitivity`` and sends the total as one level word. See ``convert()``.
 """
 
 import logging
@@ -68,7 +71,6 @@ LEVEL_SENTINEL_DB = -130.0
 DROPPED_FIELDS = {
     "Optional_Gain": 0.0,
     "Time-of-flight_Compensation": 0.0,
-    "Group_Sensitivity": 0.0,
     "Video_Delay": 0.0,
     "LFE_+10": 0.0,
     "LFE_Channel": 0.0,
@@ -294,6 +296,16 @@ def convert(model, known_ids=None):
             if level <= LEVEL_SENTINEL_DB:
                 warn(f"{where}: Level_Sensitivity is {level:g}, GLM's 'not calibrated' marker; using 0 dB")
                 level = 0.0
+
+            # GLM sends one level word per device carrying both trims summed, so the group
+            # offset has to be added here rather than dropped. The sentinel above is applied
+            # first, deliberately: an uncalibrated device contributes 0 dB of its own but still
+            # takes the group's offset, which is what GLM does.
+            # Summing can leave the range the group schema accepts where neither field could
+            # alone. That is left to fail validation rather than clamped here: the schema is
+            # deliberately the backstop for a setup file (see test_sam_config.py), and silently
+            # trimming a level is worse than refusing to build.
+            level += _num(fields.get("Group_Sensitivity"), 0.0)
 
             delay = 0
             phase = _num(fields.get("Phase(degrees)"))

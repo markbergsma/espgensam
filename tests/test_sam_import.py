@@ -107,6 +107,38 @@ def test_level_is_carried_at_full_precision():
     check(groups[0]["devices"][0]["level_db"] == -1.9258, "group 1 subwoofer level is -1.9258")
 
 
+def test_group_sensitivity_is_summed_into_the_level():
+    # GLM applies the group-level trim on top of each device's own calibration, and sends the
+    # sum as one level word. Confirmed against captures/glm_lfe_capture.log: a group carrying
+    # Group_Sensitivity:-0.3 with Level_Sensitivity:0 put 10 01 00 7B A7 8D on the wire to all
+    # three speakers, and round(10^(-0.3/20) * 8388607) == 0x7BA78D exactly. Dropping it plays
+    # the whole group 0.3 dB loud.
+    text = make_sam().replace("Group_Sensitivity:0", "Group_Sensitivity:-0.3", 1)
+    groups, warnings = convert(text)
+    check(groups[0]["devices"][0]["level_db"] == -1.9258 + -0.3,
+          "Group_Sensitivity is added to the device's own Level_Sensitivity")
+    check("Group_Sensitivity" not in warnings,
+          "an applied Group_Sensitivity is no longer reported as dropped")
+
+    # The sentinel path has to keep working: -999 means "not calibrated", so the device
+    # contributes 0 dB and the group trim still applies on top of that.
+    text = make_sam(g1_level=-999).replace("Group_Sensitivity:0", "Group_Sensitivity:-0.3", 1)
+    groups, _ = convert(text)
+    check(groups[0]["devices"][0]["level_db"] == -0.3,
+          "a -999 device level leaves the group trim intact rather than discarding it")
+
+
+def test_summed_level_is_not_clamped_on_its_way_to_the_schema():
+    # Summing can leave the -60..0 dB range the group schema accepts where neither field could
+    # alone, so it is worth pinning that convert() passes the sum through untouched. The schema
+    # is the backstop for a setup file by design -- see test_sam_config.py -- and clamping here
+    # would hide an out-of-range level rather than refuse to build.
+    text = make_sam().replace("Group_Sensitivity:0", "Group_Sensitivity:-70", 1)
+    groups, _ = convert(text)
+    check(groups[0]["devices"][0]["level_db"] == -1.9258 + -70,
+          "a sum past the schema floor reaches the schema rather than being trimmed")
+
+
 def test_phase_becomes_the_delay_glm_transmits():
     groups, _ = convert()
     # Both values were observed on the wire for these exact phases at a 90 Hz crossover.

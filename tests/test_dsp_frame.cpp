@@ -97,9 +97,9 @@ void check_wire(const char *what, const Frame &frame, const char *expected) {
 }
 
 // --- Level compensation -----------------------------------------------------------------
-// The three values are the same subwoofer's Level_Sensitivity in the three groups, plus the
-// two-way monitors' unity. Full .sam precision matters: truncating -8.37833 to -8.3783
-// shifts the encoded word by 11 counts.
+// The first two values are the same subwoofer's Level_Sensitivity in two groups, then the
+// two-way monitors' unity, then a group-wide Group_Sensitivity from a later capture. Full
+// .sam precision matters: truncating -8.37833 to -8.3783 shifts the encoded word by 11 counts.
 
 void test_captured_level_frames() {
   check_wire("level -1.9258 dB on 0x02 matches capture", make_level(0x02, -1.9258f),
@@ -112,6 +112,13 @@ void test_captured_level_frames() {
   // This frame's CRC is 0x7E9E and is transmitted escaped as 7D 5E 9E.
   check_wire("level 0 dB on 0x03 matches capture, with its CRC escaped",
              make_level(0x03, 0.0f), "03' 10 01 00 7F FF FF 7D 5E 9E 7E");
+
+  // -0.3 dB is a group trim rather than a per-device one: in glm_lfe_capture.log the whole
+  // system carries Level_Sensitivity:0 and the "2.1 LFE" group carries Group_Sensitivity:-0.3,
+  // and GLM sent this same frame to all three speakers. It is the evidence that the two fields
+  // are summed into one level word; sam_import.py adds them for that reason.
+  check_wire("level -0.3 dB on 0x02 matches capture", make_level(0x02, -0.3f),
+             "02' 10 01 00 7B A7 8D C3 FC 7E");
 }
 
 void test_level_encoding_details() {

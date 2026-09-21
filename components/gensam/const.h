@@ -111,10 +111,14 @@ static constexpr uint8_t VOLUME_PAYLOAD_SILENCE[3] = {0x00, 0x00, 0x02};
 /// three groups; see docs/glm-protocol-comparison.md.
 ///
 ///  - 0x01 carries [sub-command, 3-byte level] in the same linear-gain encoding as
-///    CMD_VOLUME. Sub-command 0x00 is the **per-device level compensation**, not the "max
-///    level restriction" the protocol specification labels it: across the three captured
-///    groups its value tracked the setup file's Level_Sensitivity exactly, at -1.9258 dB,
-///    -8.3783 dB and 0.0 dB, nowhere near that setup's global -20 dB volume limit.
+///    CMD_VOLUME. Sub-command 0x00 is the **level compensation**, not the "max level
+///    restriction" the protocol specification labels it: across three captured groups its
+///    value tracked the setup file's Level_Sensitivity exactly, at -1.9258 dB, -8.3783 dB and
+///    0.0 dB, nowhere near that setup's global -20 dB volume limit. It is not purely
+///    per-device, though: a later capture of a group carrying Group_Sensitivity:-0.3 over
+///    Level_Sensitivity:0 put -0.3 dB on the wire to every speaker, so the field is the **sum
+///    of the device's own calibration trim and the group's offset**, and sam_import.py adds
+///    the two for that reason.
 ///    Sub-command 0x09 is emitted by GLM on every device with a constant 0x000000 payload;
 ///    its meaning is unknown and this component does not send it. It is not a stray: all 28
 ///    occurrences across the captures follow a 0x00 frame immediately, one for one, so the

@@ -226,6 +226,30 @@ silently write "LFE off" over one that uses LFE. §8 has the experiment that set
 
 ---
 
+## 6a. `10 01 00` carries two trims summed, not one
+
+A sixth capture (`glm_lfe_capture.log`, five switches over a three-group setup) settled what
+the level word actually contains. One group carries `Group_Sensitivity:-0.3` at group level,
+copied into each device node, over `Level_Sensitivity:0` everywhere; the other two carry 0.
+
+GLM sent `10 01 00 7B A7 8D` to **all three speakers** in that group and `10 01 00 7F FF FF` in
+the other two. And:
+
+```
+round(10^((Level_Sensitivity + Group_Sensitivity) / 20) x 8388607) == 0x7BA78D
+```
+
+exactly, for every device in every group. So the field is the sum of the device's own
+calibration trim and the group's offset, not the per-device trim alone — which is all the
+earlier captures could show, because their `Group_Sensitivity` was zero throughout.
+
+`sam_import.py` previously listed `Group_Sensitivity` among the dropped fields, so applying
+such a group played the whole system 0.3 dB loud. It now adds the two. The `-999`
+"not calibrated" sentinel is applied first, deliberately: an uncalibrated device contributes
+0 dB of its own and still takes the group's offset. Covered by
+`test_group_sensitivity_is_summed_into_the_level()` in `tests/test_sam_import.py`, and by the
+verbatim frame in `tests/test_dsp_frame.cpp`.
+
 ## 7. Where espgensam differs on purpose
 
 Each of these is a choice, not an oversight.
