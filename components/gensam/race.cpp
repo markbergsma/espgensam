@@ -78,6 +78,13 @@ constexpr uint32_t DSP_FRAME_GAP_MS = 3;
 /// between frames for a monitor's reply.
 constexpr uint32_t GROUP_FRAME_GAP_MS = 3;
 
+/// Spacing between the frames of the wake burst that opens a group push.
+///
+/// Wider than GROUP_FRAME_GAP_MS because the OEM's own burst is: measured at ~22 ms between the
+/// two 0x7F frames and ~38 ms before the 0x01, consistently across six captured group switches.
+/// One figure for both slots is close enough and keeps a single constant.
+constexpr uint32_t GROUP_WAKE_GAP_MS = 20;
+
 /// Abandon a group push that has not finished in this long.
 ///
 /// A push holds the system at silence, so it must not be able to stall there indefinitely --
@@ -85,9 +92,18 @@ constexpr uint32_t GROUP_FRAME_GAP_MS = 3;
 /// adapter takes the bus, and that hold has its own multi-second cooldown.
 constexpr uint32_t GROUP_APPLY_TIMEOUT_MS = 15000;
 
+/// Wake burst opening a group push, one value per frame; see GroupApplyState::preamble_step.
+constexpr uint8_t GROUP_WAKE_SEQUENCE[] = {WAKEUP_VAL_ON_1, WAKEUP_VAL_ON_1, WAKEUP_VAL_ON_2};
+constexpr uint8_t GROUP_WAKE_STEPS = sizeof(GROUP_WAKE_SEQUENCE);
+
 /// Frame sequence positions within one device's DSP block, following the order GLM uses.
+///
+/// The keep-alive leading each block is the OEM's: it emits 0xFF 0x04 immediately before every
+/// device's 0x17 0x01, and once more when the last block finishes. Sending it as an ordinary
+/// step gets GROUP_FRAME_GAP_MS pacing for free.
 enum : uint8_t {
-  GROUP_STEP_PREPARE = 0,                                  ///< 0x17 0x01
+  GROUP_STEP_KEEPALIVE = 0,                                ///< 0xFF 0x04
+  GROUP_STEP_PREPARE,                                      ///< 0x17 0x01
   GROUP_STEP_DELAY,                                        ///< 0x10 0x02
   GROUP_STEP_LEVEL,                                        ///< 0x10 0x01 0x00
   GROUP_STEP_PEQ_FIRST,                                    ///< 0x10 0x0E, 20 of them
@@ -622,14 +638,22 @@ bool GenSAMHub::start_group_apply_(uint32_t now) {
   apply_.active = true;
   apply_.group_idx = wanted;
   apply_.started_ms = now;
-  apply_.last_tx_ms = now - GROUP_FRAME_GAP_MS;  // let the first frame go immediately
+  // Let the first frame go immediately, whichever pacing gate it faces: the wake burst's is
+  // the wider of the two, so backdating by that clears both.
+  apply_.last_tx_ms = now - GROUP_WAKE_GAP_MS;
 
   // Duck for the duration. The block retunes filters and levels underneath a playing signal,
   // and the OEM ducks for the same reason. Skipped in standby, where there is nothing to
   // protect and the volume broadcast would re-establish amplifier gain.
+  //
+  // The wake burst is skipped on the same condition, and for the mirror-image reason: waking
+  // the speakers because somebody picked a group would be a surprising side effect, and a
+  // group pushed while the system is down is re-pushed by the next wake's discovery anyway.
   if (!current_standby_ && this->can_transmit()) {
     this->silence_system_volume_();
     apply_.ducked = true;
+  } else {
+    apply_.preamble_step = GROUP_WAKE_STEPS;
   }
 
   race_state_ = RaceState::APPLYING_GROUP;
@@ -638,6 +662,10 @@ bool GenSAMHub::start_group_apply_(uint32_t now) {
 }
 
 void GenSAMHub::finish_group_apply_() {
+  // Close the push the way the OEM does: a keep-alive, then the volume restore last, so the
+  // audible step is the final thing on the bus. Not broadcast_volume_and_keepalive_(), which
+  // sends the volume first and would lift the duck before the keep-alive went out.
+  this->send_frame(make_stay_online());
   if (apply_.ducked) {
     this->restore_system_volume_();
   }
@@ -682,9 +710,10 @@ bool GenSAMHub::send_group_step_(const GenSAMMonitor &mon, const GroupDevice &de
 
   // A device switched off in this group plays nothing, so its DSP is left untouched and only
   // its mute is asserted. Reconfiguring a speaker that is about to be silent would spend bus
-  // time to no effect, and would overwrite calibration another group still depends on.
+  // time to no effect, and would overwrite calibration another group still depends on. The
+  // keep-alive is skipped along with the rest: one frame is not long enough to need it.
   if (!dev.enabled) {
-    if (step == GROUP_STEP_PREPARE) {
+    if (step == GROUP_STEP_KEEPALIVE) {
       this->send_frame(make_bypass(addr, true));
       return true;
     }
@@ -692,6 +721,10 @@ bool GenSAMHub::send_group_step_(const GenSAMMonitor &mon, const GroupDevice &de
   }
 
   switch (step) {
+    case GROUP_STEP_KEEPALIVE:
+      this->send_frame(make_stay_online());
+      return true;
+
     case GROUP_STEP_PREPARE:
       this->send_frame(make_prepare_config(addr));
       return true;
@@ -755,6 +788,20 @@ void GenSAMHub::race_step_applying_group_(uint32_t now) {
              group->name, (unsigned) GROUP_APPLY_TIMEOUT_MS, (unsigned) apply_.device_idx,
              (unsigned) apply_.step);
     this->finish_group_apply_();
+    return;
+  }
+
+  // The wake burst comes first, at its own wider spacing, and every frame of it is broadcast --
+  // so it runs to completion before any device is looked up, and is unaffected by which of them
+  // are online.
+  if (apply_.preamble_step < GROUP_WAKE_STEPS) {
+    if (now - apply_.last_tx_ms < GROUP_WAKE_GAP_MS) {
+      return;
+    }
+    this->send_frame(
+        make_wakeup_step(WAKEUP_OP_POWER, GROUP_WAKE_SEQUENCE[apply_.preamble_step]));
+    apply_.preamble_step++;
+    apply_.last_tx_ms = now;
     return;
   }
 

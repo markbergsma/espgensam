@@ -124,15 +124,20 @@ enum class RaceState : uint8_t {
 
 /// @brief Cursor over an in-progress group preset push.
 ///
-/// Applying a group is the longest transmission this component performs: about 25 frames per
+/// Applying a group is the longest transmission this component performs: about 26 frames per
 /// speaker, which for a modest system is over 200 ms of bus time even before any monitor
 /// hesitates.  Doing that inside one loop() call would trip ESPHome's loop watchdog, so it is
 /// driven one frame at a time from the state machine, with @ref step naming the position
 /// within a device's block and @ref device_idx the device.  Nothing here is persistent state:
 /// it is scratch for the duration of the push.
+///
+/// A push opens with a three-frame wake burst, counted off by @ref preamble_step before the
+/// device loop begins; see docs/glm-group-apply.md for why the OEM sends one on every switch
+/// even with the system already awake.
 struct GroupApplyState {
   bool active{false};          ///< Whether a push is in progress.
   uint8_t group_idx{0};        ///< Index into the group table being applied.
+  uint8_t preamble_step{0};    ///< Frames of the opening wake burst already sent.
   size_t device_idx{0};        ///< Position within that group's device list.
   uint8_t step{0};             ///< Position within the current device's frame sequence.
   uint32_t last_tx_ms{0};      ///< millis() of the last frame sent, for pacing.
