@@ -96,7 +96,9 @@ static constexpr uint8_t CMD_DISCOVERY = 0xFE;        ///< Monitor discovery pin
 ///
 ///  - `LFE_Level` and `LFE_+10` are **summed into this single opcode** as decibels.
 ///  - `LFE_Channel` is not sent here at all: it is the sub-channel byte of the subwoofer's
-///    *second* CMD_SELECT_AUDIO_SOURCE frame, i.e. input 1 carries the LFE feed.
+///    *second* CMD_SELECT_AUDIO_SOURCE frame, i.e. input 1 carries the LFE feed. When the
+///    program input would be the A+B sum it is narrowed to the channel the LFE is not on,
+///    since the sum would otherwise carry the LFE content twice.
 ///  - `LFE_CrossoverFrequency(Hz)` appears nowhere on the wire. GLM fixes it at 120 Hz, the
 ///    standard LFE bandwidth limit, and offers no way to change it.
 ///
@@ -115,9 +117,10 @@ static constexpr uint8_t LFE_LEVEL_PAD = 0x00;
 /// Decibels contributed by the setup file's `LFE_+10` flag when set.
 static constexpr float LFE_PLUS_10_DB = 10.0f;
 
-/// Bounds of the wire field, which is a signed byte of whole decibels. These are the encoding's
-/// own limits rather than a range GLM is known to offer: its LFE level control has not been
-/// swept, so anything narrower would be invented.
+/// Bounds of the wire field, which is a signed byte. Whole decibels is not only what the field
+/// can hold but what GLM's own LFE level control offers, so nothing is lost in rounding to it.
+/// The bounds themselves are still the encoding's own rather than that control's range, which
+/// has not been swept: anything narrower would be invented.
 static constexpr float MIN_LFE_LEVEL_DB = -128.0f;
 static constexpr float MAX_LFE_LEVEL_DB = 127.0f;
 ///@}

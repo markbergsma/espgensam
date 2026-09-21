@@ -349,10 +349,9 @@ def convert(model, known_ids=None):
             # disagree on the wire -- the capture shows Input:3 going out as A alone once LFE
             # was put on B.
             #
-            # Which channel it narrows to rests on a single observation, LFE on B giving A.
-            # That is equally consistent with "always A", but "the channel the LFE is not on"
-            # is the reading that still makes sense when the two are swapped, so it is the one
-            # used here.
+            # It narrows to the channel the LFE is not on, rather than always to A: a capture
+            # of two groups differing only in which channel carries the LFE showed the
+            # program input following it the other way, A for LFE on B and B for LFE on A.
             if lfe_channel != "none" and SAM_INPUT_TO_SOURCE[source_key] == "aes3_sum":
                 program = {"aes3_a": "aes3_b", "aes3_b": "aes3_a"}.get(lfe_channel)
                 if program is None:
@@ -369,8 +368,9 @@ def convert(model, known_ids=None):
                 lfe_level += LFE_PLUS_10_DB
 
             # The wire field is a signed byte of whole decibels, so a fractional trim cannot
-            # be transmitted. GLM has only ever been seen writing integers here; say so rather
-            # than round in silence.
+            # be transmitted. GLM's own control is whole decibels too, so a file it wrote will
+            # not trip this -- which makes it worth reporting rather than rounding in silence:
+            # it means the value came from somewhere else.
             if lfe_channel != "none" and lfe_level != round(lfe_level):
                 warn(
                     f"{where}: LFE level {lfe_level:g} dB is not a whole number of decibels, "

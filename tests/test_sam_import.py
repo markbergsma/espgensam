@@ -165,6 +165,17 @@ def test_an_lfe_feed_narrows_a_summed_program_input_off_the_lfe_channel():
           "a summed program input narrows to the channel the LFE feed is not on")
     check(sub["lfe_channel"] == "aes3_b", "and the LFE feed keeps its own channel")
 
+    # The mirror image, which is what rules out "always A": glm_lfe3_capture.log switched
+    # between two groups differing only in which channel the LFE sits on, and the program
+    # input followed it the other way -- 40 00 02 00 01 with LFE on B, 40 00 02 00 02 with
+    # LFE on A.
+    text = (make_sam()
+            .replace("LFE_Channel:0", "LFE_Channel:1", 1)
+            .replace("LFE_Level:0", "LFE_Level:-4", 1))
+    groups, _ = convert(text)
+    check(groups[0]["devices"][0]["source"] == "aes3_b",
+          "moving the LFE feed to A moves the program input to B")
+
     # Only the sum is ambiguous. An input already on one channel is left alone.
     text = (make_sam()
             .replace("Input:3", "Input:1", 1)

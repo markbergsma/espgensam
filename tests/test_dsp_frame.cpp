@@ -420,8 +420,18 @@ void test_captured_lfe_routing_frames() {
   // And the program input, which GLM narrows off the LFE channel rather than summing both.
   check_wire("program input is the sum without LFE", make_audio_source(0x05, 0x00, 0x02, 0x03),
              "05' 40 00 02 00 03 F3 95 7E");
-  check_wire("program input is A alone with LFE on B",
-             make_audio_source(0x05, 0x00, 0x02, 0x01), "05' 40 00 02 00 01 D3 D7 7E");
+
+  // The two LFE groups are mirror images, which is what rules out "the program input is
+  // always A": moving the LFE feed from B to A moved the program input from A to B. Both
+  // pairs are verbatim from glm_lfe3_capture.log, one switch apart.
+  check_wire("program input is A with LFE on B", make_audio_source(0x05, 0x00, 0x02, 0x01),
+             "05' 40 00 02 00 01 D3 D7 7E");
+  check_wire("LFE input is B with LFE on B", make_audio_source(0x05, 0x01, 0x02, 0x02),
+             "05' 40 01 02 00 02 95 00 7E");
+  check_wire("program input is B with LFE on A", make_audio_source(0x05, 0x00, 0x02, 0x02),
+             "05' 40 00 02 00 02 E3 B4 7E");
+  check_wire("LFE input is A with LFE on A", make_audio_source(0x05, 0x01, 0x02, 0x01),
+             "05' 40 01 02 00 01 A5 63 7E");
 }
 
 void test_lfe_level_encoding_details() {

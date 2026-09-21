@@ -22,7 +22,7 @@ component decodes but never transmits):
 esphome logs espgensam-capture-local.yaml | tee captures/glm_group_switch_capture.log
 ```
 
-Seven logs, all under `captures/`, which is gitignored and therefore local to the machine that
+Eight logs, all under `captures/`, which is gitignored and therefore local to the machine that
 recorded it:
 
 | Log | Lines | Setup file | What it caught |
@@ -32,6 +32,7 @@ recorded it:
 | `glm_group_switch_capture.log` | 3764 | Home Cinema | switching between three groups |
 | `glm_lfe_capture.log` | 2186 | espgensam | an LFE group, `LFE_+10` set |
 | `glm_lfe2_capture.log` | 1666 | espgensam | the same group, `LFE_+10` clear |
+| `glm_lfe3_capture.log` | 1961 | espgensam | a second LFE group, feed on A instead of B |
 | `glm_v5_no_wakeup_capture.log` | 936 | Home Cinema | GLM v5 boot without a wake sequence |
 | `glm_startup_capture.log` | 924 | Home Cinema | OEM adapter startup |
 
@@ -44,7 +45,7 @@ one meant wherever this document cites a `.sam` field without saying otherwise. 
 built specifically to move fields the first held constant — a group trim, an LFE feed, a
 different crossover — and lives outside the repository, in GLM's own directory; the two
 configs that read it are `espgensam-lfe-local.yaml` and `espgensam-lfe-capture-local.yaml`.
-Counts quoted as "across the captures" are over all seven logs.
+Counts quoted as "across the captures" are over all eight logs.
 
 A caveat that shapes everything below: **no acoustic measurement has been taken.** What is known
 about espgensam's own pushes is that monitors ACK every frame and Home Assistant reports the
@@ -171,27 +172,27 @@ implements the first, so the group push needed its own; see `GROUP_WAKE_SEQUENCE
 
 ## 4. Opcode evidence
 
-Across all seven logs. Every opcode espgensam does not send has a payload that never varies —
+Across all eight logs. Every opcode espgensam does not send has a payload that never varies —
 which is exactly why `0x3E`, the one that does vary, turned out to be readable:
 
 | Opcode | Frames | Payload | Addressed to | Sent by us |
 |---|---|---|---|---|
-| `0x05` signal generator | 60 | `04 00 00 00 FF FF EA 00 01 90 00 02 DA`, always | every speaker | no |
+| `0x05` signal generator | 75 | `04 00 00 00 FF FF EA 00 01 90 00 02 DA`, always | every speaker | no |
 | `0x2D` session preamble | 12 | `00`, always | broadcast, at app connect only | no |
-| `0x3C` | 32 | `00 00`, always | the subwoofer only | no |
-| `0x3D` input sync | 86 | `00 00`, always | every speaker, and broadcast at app connect | no |
-| `0x3E` LFE level | 30 | `00 00`, `00 06`, `00 FC` | the subwoofer only | **yes**, with an LFE feed |
-| `0x42` | 20 | `00 00`, always | the subwoofer only | no |
-| `0x10 01 09` | 49 | `00 00 00`, always | every speaker | no |
+| `0x3C` | 41 | `00 00`, always | the subwoofer only | no |
+| `0x3D` input sync | 105 | `00 00`, always | every speaker, and broadcast at app connect | no |
+| `0x3E` LFE level | 38 | `00 00`, `00 06`, `00 FC` | the subwoofer only | **yes**, with an LFE feed |
+| `0x42` | 25 | `00 00`, always | the subwoofer only | no |
+| `0x10 01 09` | 62 | `00 00 00`, always | every speaker | no |
 
-`0x10 01 09` is not a stray: there are exactly 49 `0x10 01 00` frames too, and each `09` follows
+`0x10 01 09` is not a stray: there are exactly 62 `0x10 01 00` frames too, and each `09` follows
 an `00` immediately. The pair travels together.
 
 ---
 
 ## 5. What the tail is
 
-`0x2B` takes only two values in 300 frames: `03` and `04`. Read through espgensam's own bitfield
+`0x2B` takes only two values in 389 frames: `03` and `04`. Read through espgensam's own bitfield
 (`BYPASS_MUTE_MASK`, `BYPASS_LED_COLOR_MASK` in `const.h`), `04` is *unmuted, LED off* and `03`
 is *muted, LED red* — byte for byte what `make_bypass(addr, false)` and `make_bypass(addr, true)`
 already build.
@@ -240,6 +241,10 @@ values are read.
 Note the field is *not* 16-bit two's complement: −4 dB goes out as `00 FC`, not `FF FC`. GLM
 writes an int8 into the low byte without sign-extending into the pad.
 
+Whole decibels is also all GLM's own LFE level control offers, confirmed in the UI rather than
+inferred from the wire, so rounding to the field loses nothing. Its *range* has not been swept,
+which is why espgensam validates against the encoding's limits rather than a narrower guess.
+
 ### `LFE_Channel` is routing, and needs no opcode of its own
 
 It is the sub-channel byte of the subwoofer's **second** `0x40` frame. The two `0x40` frames a
@@ -249,14 +254,16 @@ subwoofer gets are two different feeds, not one setting sent twice:
 |---|---|---|
 | no LFE | program, `40 00 02 00 03` | `40 01 02 00 00` — nothing |
 | LFE on B | program, `40 00 02 00 01` | `40 01 02 00 02` — the LFE feed |
+| LFE on A | program, `40 00 02 00 02` | `40 01 02 00 01` — the LFE feed |
 
-Both groups carry `Input:3` in the setup file, yet the program input goes out as the A+B **sum**
-in the first and as **A alone** in the second. GLM narrows it off the LFE channel, which it has
-to: summing both would fold the LFE content into the bass-managed path on top of its own feed.
+All three groups carry `Input:3` in the setup file, yet the program input goes out as the A+B
+**sum** only in the first. GLM narrows it off the LFE channel, which it has to: summing both
+would fold the LFE content into the bass-managed path on top of its own feed.
 
-Which channel it narrows *to* rests on one observation — LFE on B gave A. That is equally
-consistent with "always A", but "the channel the LFE is not on" is the reading that still makes
-sense with the two swapped, so it is the one `sam_import.py` implements.
+**It narrows to the channel the LFE is not on**, not to A. A third capture switched between
+two groups differing only in which channel carries the LFE, and the program input followed it
+the other way — the two rows above are mirror images. That rules out "always A", which the
+first LFE capture could not distinguish on its own.
 
 ### `LFE_CrossoverFrequency(Hz)` is never transmitted
 
@@ -265,7 +272,7 @@ UI offers no way to change it. No frame carries 120 (`0x78`) anywhere.
 
 ### `0x3C` and `0x42` are still unknown
 
-Both are subwoofer-only and `00 00` in all six captures, and neither is an LFE field:
+Both are subwoofer-only and `00 00` in all eight captures, and neither is an LFE field:
 
 - `0x42` stayed `00 00` across a controlled change of `LFE_Level`, which is now known to live
   in `0x3E`.
@@ -336,19 +343,10 @@ unsent frames matter. Monitors ACK and Home Assistant reports success, but nothi
 measured. *Experiment:* apply two groups whose calibration differs audibly — a large level
 trim, or a deep notch — and measure, rather than trusting the ACKs.
 
-**What are `0x3C` and `0x42`?** Subwoofer-only, `00 00` in all seven logs, and now known not
+**What are `0x3C` and `0x42`?** Subwoofer-only, `00 00` in all eight logs, and now known not
 to be LFE fields (§6). Nothing in either setup file has moved them. *Experiment:* none
 obvious — they need a GLM feature nobody has exercised yet, so the next lead is likelier to
 come from a capture taken for some other purpose.
-
-**Which channel does GLM narrow a summed program input to?** Observed once: LFE on B gave A.
-"Always A" and "the channel the LFE is not on" both fit, and espgensam implements the latter
-(§6). *Experiment:* a group with the LFE feed on A instead of B. One switch settles it.
-
-**Is `LFE_Level` really whole decibels in GLM's own UI?** The wire field is a signed byte and
-every observed value has been an integer, but the control has not been swept, so the bounds
-espgensam validates against are the encoding's rather than GLM's. *Experiment:* set a
-fractional LFE level in GLM, if it allows one, and see what it transmits.
 
 **Do DSP writes stick when the monitors are in standby?** `race_step_configuring_()` calls
 `finish_temporary_wake_()` — which commands standby — *before* `start_group_apply_()`, so a
