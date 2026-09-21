@@ -345,6 +345,30 @@ class GenSAMHub : public Component {
   /// @param freq_hz Crossover filter frequency in Hz (typically 50..120 Hz, step 5 Hz).
   void set_monitor_crossover_by_serial(const std::string &serial_or_id, uint16_t freq_hz);
 
+  /// @brief Set the per-device level trim for an individual monitor by logical address.
+  ///
+  /// The trim AutoCal derives to match one speaker's output to the rest of a group. Clamped
+  /// to [MIN_LEVEL_DB, MAX_LEVEL_DB] here rather than only in the entity, because a YAML
+  /// lambda can reach this directly and an unclamped sentinel encodes as digital silence.
+  /// @param address Logical bus address (0x02..0x7F).
+  /// @param db Attenuation in decibels; 0.0 is unity.
+  void set_monitor_level(uint8_t address, float db);
+
+  /// @brief Set the per-device level trim for an individual monitor by serial number or unique ID.
+  /// @param serial_or_id Serial number string (e.g. "7350APM88123456") or decimal unique ID string.
+  /// @param db Attenuation in decibels; 0.0 is unity.
+  void set_monitor_level_by_serial(const std::string &serial_or_id, float db);
+
+  /// @brief Set the time-of-flight delay for an individual monitor by logical address.
+  /// @param address Logical bus address (0x02..0x7F).
+  /// @param samples Delay in samples at DSP_DELAY_RATE_HZ, clamped to MAX_DELAY_SAMPLES.
+  void set_monitor_delay(uint8_t address, uint32_t samples);
+
+  /// @brief Set the time-of-flight delay for an individual monitor by serial number or unique ID.
+  /// @param serial_or_id Serial number string (e.g. "7350APM88123456") or decimal unique ID string.
+  /// @param samples Delay in samples at DSP_DELAY_RATE_HZ, clamped to MAX_DELAY_SAMPLES.
+  void set_monitor_delay_by_serial(const std::string &serial_or_id, uint32_t samples);
+
   /// @brief Set input routing for an individual monitor by logical RS-485 address.
   ///
   /// Transmits immediately, wrapped in a transient silence, and marks the system as deviating
@@ -369,8 +393,9 @@ class GenSAMHub : public Component {
   /// @brief Record that a device setting no longer matches the active group, and publish it.
   ///
   /// Set by a hand override or a snooped GLM change to anything a group push owns - input
-  /// routing and crossover. Cleared when a group is applied, which is what makes an override
-  /// temporary. Purely informational: nothing in the hub behaves differently because of it.
+  /// routing, crossover, level trim and delay. Cleared when a group is applied, which is what
+  /// makes an override temporary. Purely informational: nothing in the hub behaves
+  /// differently because of it.
   /// @param modified True when deviating, false when a group push has just re-established it.
   void set_group_modified(bool modified);
 

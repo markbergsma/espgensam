@@ -101,6 +101,12 @@ void MonitorRegistry::bind_if_matched(GenSAMMonitor &mon) {
     if (b.input_select != nullptr && b.input_configured) {
       b.input_select->publish_state(input_to_str(b.source, b.aes3_channel));
     }
+    if (b.level_number != nullptr && b.level_configured) {
+      b.level_number->publish_state(b.level_db);
+    }
+    if (b.delay_number != nullptr && b.delay_configured) {
+      b.delay_number->publish_state(delay_samples_to_ms(b.delay_samples));
+    }
     break;
   }
 }
@@ -217,6 +223,22 @@ void MonitorRegistry::set_binding_input(GenSAMMonitorBinding &b, uint8_t source,
   }
 }
 
+void MonitorRegistry::set_binding_level(GenSAMMonitorBinding &b, float db) {
+  b.level_db = db;
+  b.level_configured = true;
+  if (b.level_number != nullptr) {
+    b.level_number->publish_state(db);
+  }
+}
+
+void MonitorRegistry::set_binding_delay(GenSAMMonitorBinding &b, uint32_t samples) {
+  b.delay_samples = samples;
+  b.delay_configured = true;
+  if (b.delay_number != nullptr) {
+    b.delay_number->publish_state(delay_samples_to_ms(samples));
+  }
+}
+
 void MonitorRegistry::set_crossover(GenSAMMonitor &mon, uint16_t freq_hz) {
   if (mon.binding != nullptr) {
     this->set_binding_crossover(*mon.binding, freq_hz);
@@ -226,6 +248,18 @@ void MonitorRegistry::set_crossover(GenSAMMonitor &mon, uint16_t freq_hz) {
 void MonitorRegistry::set_input(GenSAMMonitor &mon, uint8_t source, uint8_t channel) {
   if (mon.binding != nullptr) {
     this->set_binding_input(*mon.binding, source, channel);
+  }
+}
+
+void MonitorRegistry::set_level(GenSAMMonitor &mon, float db) {
+  if (mon.binding != nullptr) {
+    this->set_binding_level(*mon.binding, db);
+  }
+}
+
+void MonitorRegistry::set_delay(GenSAMMonitor &mon, uint32_t samples) {
+  if (mon.binding != nullptr) {
+    this->set_binding_delay(*mon.binding, samples);
   }
 }
 

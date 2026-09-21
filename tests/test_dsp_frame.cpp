@@ -44,9 +44,13 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
+using esphome::gensam::clamp_level_db;
+using esphome::gensam::delay_ms_to_samples;
+using esphome::gensam::delay_samples_to_ms;
 using esphome::gensam::Frame;
 using esphome::gensam::make_delay;
 using esphome::gensam::make_level;
@@ -200,6 +204,100 @@ void test_phase_to_delay_conversion() {
   }
 }
 
+// --- Presentation conversions and safety bounds ------------------------------------------
+//
+// These guard the two paths by which a value reaches make_level() / make_delay() from outside
+// a group preset: a Home Assistant number entity, and a YAML lambda calling the hub directly.
+
+void test_delay_unit_round_trip() {
+  // Every captured AutoPhase result survives the trip through milliseconds unchanged. This is
+  // what lets the number entity display milliseconds while the binding stores samples.
+  for (uint32_t samples : {0u, 67u, 267u, 289u, 4800u, esphome::gensam::MAX_DELAY_SAMPLES}) {
+    char label[96];
+    std::snprintf(label, sizeof(label), "%u samples -> ms -> %u samples", samples, samples);
+    check(delay_ms_to_samples(delay_samples_to_ms(samples)) == samples, label);
+  }
+
+  check(std::fabs(delay_samples_to_ms(289) - 6.0208333f) < 1e-5f,
+        "289 samples is 6.0208333 ms, not a round number");
+  check(delay_samples_to_ms(4800) == 100.0f, "4800 samples is exactly 100 ms");
+  check(delay_ms_to_samples(esphome::gensam::MAX_DELAY_MS) == esphome::gensam::MAX_DELAY_SAMPLES,
+        "192 ms is the 9216-sample ceiling");
+}
+
+void test_delay_clamping() {
+  check(delay_ms_to_samples(-1.0f) == 0, "a negative delay is 0 samples");
+  check(delay_ms_to_samples(-0.0f) == 0, "negative zero is 0 samples");
+  check(delay_ms_to_samples(1000.0f) == esphome::gensam::MAX_DELAY_SAMPLES,
+        "a delay past the ceiling clamps rather than wrapping");
+  check(delay_ms_to_samples(std::numeric_limits<float>::infinity()) ==
+            esphome::gensam::MAX_DELAY_SAMPLES,
+        "an infinite delay clamps to the ceiling");
+  check(delay_ms_to_samples(std::numeric_limits<float>::quiet_NaN()) == 0,
+        "a NaN delay is 0 samples, not an enormous one");
+}
+
+void test_conversions_are_projections() {
+  // f(f(x)) == f(x). Without this, nudging a number entity repeatedly could walk the value:
+  // each adjustment starts from what was published last, so publishing anything other than
+  // the canonical form would compound.
+  for (float ms = 0.0f; ms <= 200.0f; ms += 0.05f) {
+    const uint32_t once = delay_ms_to_samples(ms);
+    const uint32_t twice = delay_ms_to_samples(delay_samples_to_ms(once));
+    if (once != twice) {
+      char label[96];
+      std::snprintf(label, sizeof(label), "delay is stable at %.2f ms (%u vs %u)", ms, once, twice);
+      check(false, label);
+      return;
+    }
+  }
+  check(true, "delay conversion is stable across 0..200 ms in 0.05 ms steps");
+
+  // The off-grid group value specifically: it must not creep towards a step boundary.
+  check(delay_ms_to_samples(6.0208333f) == 289, "the off-grid 6.0208333 ms lands back on 289");
+
+  for (float db = -70.0f; db <= 10.0f; db += 0.05f) {
+    if (clamp_level_db(clamp_level_db(db)) != clamp_level_db(db)) {
+      check(false, "level clamp is stable");
+      return;
+    }
+  }
+  check(true, "level clamp is stable across -70..+10 dB");
+}
+
+void test_level_floor_keeps_the_speaker_audible() {
+  // A GLM setup file writes Calibration_Level: -999 for "not calibrated". Unclamped, that
+  // encodes as 0x000000 - digital silence - and would mute the speaker instead of trimming it.
+  check(clamp_level_db(-999.0f) == esphome::gensam::MIN_LEVEL_DB,
+        "the -999 dB 'not calibrated' sentinel clamps to the floor");
+  check(clamp_level_db(-std::numeric_limits<float>::infinity()) == esphome::gensam::MIN_LEVEL_DB,
+        "negative infinity clamps to the floor");
+  check(clamp_level_db(std::numeric_limits<float>::quiet_NaN()) == esphome::gensam::MIN_LEVEL_DB,
+        "NaN clamps to the floor rather than reaching the encoder");
+  check(clamp_level_db(+10.0f) == esphome::gensam::MAX_LEVEL_DB, "positive gain clamps to unity");
+  check(clamp_level_db(std::numeric_limits<float>::infinity()) == esphome::gensam::MAX_LEVEL_DB,
+        "positive infinity clamps to unity");
+
+  // Sweep the whole offered range: no step of it may encode as silence, and the encoding must
+  // stay monotonic, so a smaller trim is never a louder one.
+  uint32_t previous = 0;
+  bool all_audible = true;
+  bool monotonic = true;
+  for (int i = 0; i <= 600; i++) {
+    const float db = esphome::gensam::MIN_LEVEL_DB + static_cast<float>(i) * 0.1f;
+    const uint32_t word = esphome::gensam::volume_db_to_int24(clamp_level_db(db));
+    if (word == 0) {
+      all_audible = false;
+    }
+    if (i > 0 && word <= previous) {
+      monotonic = false;
+    }
+    previous = word;
+  }
+  check(all_audible, "no 0.1 dB step of the offered range encodes as digital silence");
+  check(monotonic, "the offered range encodes monotonically");
+}
+
 }  // namespace
 
 int main() {
@@ -210,6 +308,10 @@ int main() {
   test_captured_delay_frames();
   test_delay_encoding_details();
   test_phase_to_delay_conversion();
+  test_delay_unit_round_trip();
+  test_delay_clamping();
+  test_conversions_are_projections();
+  test_level_floor_keeps_the_speaker_audible();
 
   if (failures != 0) {
     std::printf("\n%d check(s) FAILED\n", failures);

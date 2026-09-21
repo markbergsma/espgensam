@@ -84,6 +84,19 @@ struct GenSAMMonitorBinding {
   number::Number *crossover_number{nullptr};           ///< Bass management crossover frequency number entity (Hz).
   uint16_t crossover_freq{DEFAULT_CROSSOVER_HZ};       ///< Configured / active crossover frequency in Hz (default: 85 Hz).
   bool crossover_configured{false};                    ///< True if a custom crossover was set by user or sniffed from GLM.
+
+  number::Number *level_number{nullptr};               ///< Per-device level trim number entity (dB).
+  float level_db{0.0f};                                ///< Configured / active level trim in dB; attenuation only.
+
+  /// True once the level has been chosen deliberately, by a group push or by Home Assistant.
+  /// Carries the same meaning as input_configured: while false nothing is transmitted, so the
+  /// speaker keeps whatever trim its own DSP holds.
+  bool level_configured{false};
+
+  number::Number *delay_number{nullptr};               ///< Time-of-flight delay number entity (ms in HA).
+  uint32_t delay_samples{0};                           ///< Configured / active delay, samples at DSP_DELAY_RATE_HZ.
+  bool delay_configured{false};                        ///< True once the delay has been chosen deliberately.
+
   select::Select *input_select{nullptr};               ///< Input routing select entity (analog / AES3 A, B, Sum).
   uint8_t source{SOURCE_ANALOG};                       ///< Configured / active input source.
   uint8_t aes3_channel{AES3_CHANNEL_A};                ///< Configured / active AES3 sub-channel; ignored when analog.

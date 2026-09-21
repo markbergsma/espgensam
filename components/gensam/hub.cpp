@@ -671,6 +671,104 @@ void GenSAMHub::set_monitor_crossover_by_serial(const std::string &serial_or_id,
   this->set_monitor_crossover(mon->address, freq_hz);
 }
 
+// Level and delay follow the crossover pattern above, with one deliberate difference: no
+// CMD_PREPARE_CONFIG frame precedes them. GLM emits 0x17 before a *block* of DSP settings but
+// routinely omits it for an individual write - in captures/glm_group_switch_capture.log
+// monitor 0x02 takes a delay and a level at 18:31:56.899 with its nearest 0x17 ninety seconds
+// away - so a bare frame lands, and spending a bus turn on a frame whose meaning is still
+// unresolved (see commands.h) buys nothing.
+
+void GenSAMHub::set_monitor_level(uint8_t address, float db) {
+  // A hand-picked trim deviates from the active group, the same as an input override.
+  this->set_group_modified(true);
+
+  const float level = clamp_level_db(db);
+
+  GenSAMMonitor *mon = registry_.find(address);
+  if (mon == nullptr) {
+    ESP_LOGW(TAG, "Cannot set level for unknown monitor 0x%02X", address);
+    return;
+  }
+
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot send level command to 0x%02X: bus not available for TX", address);
+    return;
+  }
+
+  if (!this->send_frame_twice(make_level(address, level))) {
+    ESP_LOGW(TAG, "Level command to 0x%02X was not transmitted", address);
+    return;
+  }
+
+  registry_.set_level(*mon, level);
+
+  ESP_LOGI(TAG, "Set monitor 0x%02X level trim: %.1f dB", address, level);
+}
+
+void GenSAMHub::set_monitor_level_by_serial(const std::string &serial_or_id, float db) {
+  const float level = clamp_level_db(db);
+
+  // Store on the binding first, so the setting survives a monitor that is not (yet) on the bus.
+  GenSAMMonitorBinding *binding = registry_.find_binding_by_serial_or_id(serial_or_id);
+  if (binding != nullptr) {
+    registry_.set_binding_level(*binding, level);
+  }
+
+  GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
+  if (mon == nullptr) {
+    this->set_group_modified(true);
+    ESP_LOGW(TAG, "Level for '%s' set to %.1f dB (stored; monitor not currently discovered on bus)",
+             serial_or_id.c_str(), level);
+    return;
+  }
+  this->set_monitor_level(mon->address, level);
+}
+
+void GenSAMHub::set_monitor_delay(uint8_t address, uint32_t samples) {
+  this->set_group_modified(true);
+
+  const uint32_t delay = std::min(samples, MAX_DELAY_SAMPLES);
+
+  GenSAMMonitor *mon = registry_.find(address);
+  if (mon == nullptr) {
+    ESP_LOGW(TAG, "Cannot set delay for unknown monitor 0x%02X", address);
+    return;
+  }
+
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot send delay command to 0x%02X: bus not available for TX", address);
+    return;
+  }
+
+  if (!this->send_frame_twice(make_delay(address, delay))) {
+    ESP_LOGW(TAG, "Delay command to 0x%02X was not transmitted", address);
+    return;
+  }
+
+  registry_.set_delay(*mon, delay);
+
+  ESP_LOGI(TAG, "Set monitor 0x%02X delay: %u samples (%.2f ms)", address, (unsigned) delay,
+           delay_samples_to_ms(delay));
+}
+
+void GenSAMHub::set_monitor_delay_by_serial(const std::string &serial_or_id, uint32_t samples) {
+  const uint32_t delay = std::min(samples, MAX_DELAY_SAMPLES);
+
+  GenSAMMonitorBinding *binding = registry_.find_binding_by_serial_or_id(serial_or_id);
+  if (binding != nullptr) {
+    registry_.set_binding_delay(*binding, delay);
+  }
+
+  GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
+  if (mon == nullptr) {
+    this->set_group_modified(true);
+    ESP_LOGW(TAG, "Delay for '%s' set to %u samples (stored; monitor not currently discovered on bus)",
+             serial_or_id.c_str(), (unsigned) delay);
+    return;
+  }
+  this->set_monitor_delay(mon->address, delay);
+}
+
 void GenSAMHub::send_audio_source_frame(uint8_t address, uint8_t source, uint8_t channel, bool is_subwoofer) {
   if (!can_transmit()) {
     return;

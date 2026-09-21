@@ -121,6 +121,11 @@ Each monitor gets an **Input** select listing `Analog`, `AES3 Channel A (Left)`,
 how the hardware works: a GLM group can perfectly well run the subwoofer on AES3 while both
 main monitors are analog, so there is no single system-wide input to select.
 
+Each monitor also gets three calibration controls: **Bass Management Crossover Frequency**
+(50-120 Hz), **Level** (-60 to 0 dB, attenuation only) and **Delay** (0-192 ms). They are
+disabled by default, because a group preset normally owns them and overwrites them at its next
+push — enable them in Home Assistant for a speaker you want to trim by hand.
+
 ### 3. Group Presets (`gensam: groups:`)
 
 A group preset is a named monitoring configuration, just like the Group buttons in GLM: which
@@ -150,7 +155,7 @@ gensam:
       source: aes3_sum            # analog | aes3_a | aes3_b | aes3_sum
       crossover: 90               # Hz
       level_db: -1.9258           # per-speaker trim from AutoCal
-      delay_samples: 289          # alignment delay, 48 kHz samples
+      delay_samples: 289          # alignment delay, 48 kHz samples (max 9216 = 192 ms)
       filters:                    # up to 20; the rest are left flat
         - {type: notch, frequency: 56.1739, gain: -6.05847, q: 4.68839}
         - {type: low_shelf, frequency: 118.711, gain: -0.177536}
@@ -166,10 +171,11 @@ two-way monitor takes two low shelves, two high shelves and then up to sixteen n
 a subwoofer takes twenty notches and no shelves. The converter below gets this right; if you
 write a group by hand, follow the same order.
 
-Applying a group sets every speaker's Input select, so they always show what the speakers were
-last told. Changing one by hand takes effect immediately but does not alter the group, so the
-next group push - switching group, waking from standby, or a rediscovery - puts the group's own
-routing back. While the two disagree, the hub's **Group Modified** diagnostic sensor is on.
+Applying a group sets every speaker's Input select, Crossover, Level and Delay, so they always
+show what the speakers were last told. Changing one by hand takes effect immediately but does
+not alter the group, so the next group push - switching group, waking from standby, or a
+rediscovery - puts the group's own values back. While the two disagree, the hub's **Group
+Modified** diagnostic sensor is on.
 
 ### 4. Converting an existing GLM setup
 

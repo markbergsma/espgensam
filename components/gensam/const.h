@@ -128,6 +128,31 @@ static constexpr uint16_t MIN_CROSSOVER_HZ = 50;      ///< Minimum allowable cro
 static constexpr uint16_t MAX_CROSSOVER_HZ = 120;     ///< Maximum allowable crossover frequency (Hz)
 static constexpr uint16_t CROSSOVER_STEP_HZ = 5;      ///< Supported Genelec crossover frequency step resolution (Hz)
 
+// --- Per-device level trim and time-of-flight delay ------------------------
+/// @name Level trim bounds
+///
+/// The floor is what keeps the digital-silence sentinel out of reach. make_level() encodes
+/// anything at or below GENELEC_VOLUME_MIN_DB (-130 dB) as 0x000000, and a GLM setup file
+/// writes Calibration_Level: -999 for "not calibrated", so a value that leaks through would
+/// mute the speaker rather than trim it. -60 dB is far enough below any real AutoCal trim to
+/// be useful and far enough above the sentinel to be safe; the group schema picks it too.
+///
+/// The ceiling is unity. Level compensation is attenuation only: make_level() clamps positive
+/// decibels to 0 dB, so there is nothing above it to offer.
+///@{
+static constexpr float MIN_LEVEL_DB = -60.0f;   ///< Minimum per-device level trim (dB).
+static constexpr float MAX_LEVEL_DB = 0.0f;     ///< Unity; attenuation only.
+static constexpr float LEVEL_STEP_DB = 0.1f;    ///< Adjustment resolution offered in Home Assistant (dB).
+///@}
+
+/// Longest time-of-flight delay accepted, in samples at DSP_DELAY_RATE_HZ: 192 ms, which is
+/// the limit the GLM v5 user interface enforces. Captured AutoPhase results are far smaller
+/// (289, 267 and 67 samples), so this is a guard rail rather than a working range.
+static constexpr uint32_t MAX_DELAY_SAMPLES = 9216;
+
+/// MAX_DELAY_SAMPLES expressed in milliseconds, which is the unit Home Assistant sees.
+static constexpr float MAX_DELAY_MS = 192.0f;
+
 // --- ACK status values ----------------------------------------------------
 static constexpr uint8_t ACK_OK = 0x2D;               ///< Positive ACK
 static constexpr uint8_t ACK_ERROR = 0x2E;            ///< Negative ACK

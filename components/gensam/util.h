@@ -31,7 +31,19 @@
 ///    low levels, volume is mapped across configurable logarithmic bounds
 ///    [min_volume_db, max_volume_db] (e.g. -80.0 dB to 0.0 dB):
 ///      dB = min_volume_db + slider * (max_volume_db - min_volume_db)
+///
+/// 4. Per-Device Level Trim and Time-of-Flight Delay:
+///    Both are DSP parameters a group preset carries per speaker and that Home Assistant can
+///    also set by hand, so the conversions live here rather than in the entity layer: the
+///    registry needs them to publish, the hub needs them to clamp, and the number entities
+///    need them to interpret what the user typed. Two rules hold throughout:
+///      - Level is attenuation only, and its floor is a safety bound rather than a taste
+///        judgement; see MIN_LEVEL_DB in const.h.
+///      - Delay is stored and transmitted as a sample count at 48 kHz. Milliseconds are a
+///        presentation unit and are derived from the samples, never the other way round.
 /// ===================================================================================
+
+#include "const.h"
 
 #include <cmath>
 #include <cstdint>
@@ -99,6 +111,55 @@ inline float volume_db_to_slider(float db, float min_db = -80.0f, float max_db =
     return 1.0f;
   }
   return (db - min_db) / (max_db - min_db);
+}
+
+/// @brief Clamp a per-device level trim to the range the hardware may safely be given.
+///
+/// Every caller goes through this, not only the Home Assistant entity. A YAML lambda can
+/// reach set_monitor_level_by_serial() with any float at all, and make_level() turns anything
+/// at or below -130 dB into digital silence, so an unclamped -999 from a GLM setup file would
+/// mute the speaker. NaN is treated as the floor rather than propagating: std::clamp with a
+/// NaN argument is unspecified, and a silent NaN reaching the encoder is worse than a
+/// conservative value.
+/// @param db Requested level trim in decibels.
+/// @return @p db clamped to [MIN_LEVEL_DB, MAX_LEVEL_DB].
+inline float clamp_level_db(float db) {
+  if (std::isnan(db)) {
+    return MIN_LEVEL_DB;
+  }
+  return std::clamp(db, MIN_LEVEL_DB, MAX_LEVEL_DB);
+}
+
+/// @brief Convert a time-of-flight delay in milliseconds to a DSP sample count.
+///
+/// Samples are the authoritative representation: that is what goes on the wire, what a group
+/// preset stores, and what a monitor binding holds. Milliseconds exist only because they are
+/// what a person reasons about, so this direction rounds to the nearest whole sample and the
+/// reverse direction reports exactly what was stored. Rounding here rather than in the entity
+/// is what makes a write a projection - converting an already-converted value changes nothing
+/// further - so repeated adjustment cannot accumulate drift.
+/// @param ms Requested delay in milliseconds; NaN and negatives yield 0.
+/// @return Sample count at DSP_DELAY_RATE_HZ, clamped to [0, MAX_DELAY_SAMPLES].
+inline uint32_t delay_ms_to_samples(float ms) {
+  if (std::isnan(ms) || ms <= 0.0f) {
+    return 0;
+  }
+  if (ms >= MAX_DELAY_MS) {
+    return MAX_DELAY_SAMPLES;
+  }
+  double samples = std::round(static_cast<double>(ms) * DSP_DELAY_RATE_HZ / 1000.0);
+  return static_cast<uint32_t>(std::clamp(samples, 0.0, static_cast<double>(MAX_DELAY_SAMPLES)));
+}
+
+/// @brief Convert a DSP sample count to a delay in milliseconds.
+///
+/// The result is frequently not a round number - an AutoPhase result of 289 samples is
+/// 6.0208333 ms - because the sample grid and any display step are unrelated. Reporting the
+/// exact equivalent of what was transmitted is deliberate: it is the only value that is true.
+/// @param samples Sample count at DSP_DELAY_RATE_HZ.
+/// @return Delay in milliseconds.
+inline float delay_samples_to_ms(uint32_t samples) {
+  return static_cast<float>(static_cast<double>(samples) * 1000.0 / DSP_DELAY_RATE_HZ);
 }
 
 /// @brief Encode a 24-bit integer into 3 big-endian bytes.

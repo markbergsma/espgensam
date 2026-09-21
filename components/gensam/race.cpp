@@ -59,8 +59,16 @@ constexpr uint32_t TURNAROUND_US = 300;
 /// Spacing between the volume broadcast and the keep-alive that follows it.
 constexpr uint32_t VOLUME_KEEPALIVE_GAP_US = 250;
 
-/// Delay between the two configuration frames sent to the same monitor.
+/// Delay between the routing and crossover configuration frames sent to the same monitor.
 constexpr uint32_t CONFIG_FRAME_GAP_MS = 10;
+
+/// Delay before each DSP configuration frame (level, delay) sent to the same monitor.
+///
+/// Shorter than CONFIG_FRAME_GAP_MS on purpose. These gaps are blocking delay() calls inside a
+/// single loop() call, so they add up: at 10 ms each, a subwoofer's full configuration block
+/// would approach the 50 ms at which ESPHome warns about a slow loop. 3 ms is GROUP_FRAME_GAP_MS,
+/// which is the spacing GLM itself uses between the very same frames.
+constexpr uint32_t DSP_FRAME_GAP_MS = 3;
 
 /// Spacing between consecutive frames of a group's DSP block.
 ///
@@ -502,6 +510,32 @@ bool GenSAMHub::configure_monitor_(const GenSAMMonitor &mon) {
     configured_anything = true;
   }
 
+  // 3. DSP level trim and time-of-flight delay
+  //
+  // Redundant whenever groups are configured, since the group re-apply that follows discovery
+  // pushes the same two values a moment later. It is kept because it is the *only* source of
+  // level and delay for a system that has no groups: block at all, or has default_group: none.
+  // Both frames go bare, without a preceding 0x17; see the note in hub.cpp.
+  if (mon.binding != nullptr && mon.binding->level_configured) {
+    if (configured_anything) {
+      delay(DSP_FRAME_GAP_MS);
+    }
+    const float db = mon.binding->level_db;
+    ESP_LOGI(TAG, "Configuring level trim for monitor 0x%02X: %.1f dB", addr, db);
+    this->send_frame(make_level(addr, db));
+    configured_anything = true;
+  }
+
+  if (mon.binding != nullptr && mon.binding->delay_configured) {
+    if (configured_anything) {
+      delay(DSP_FRAME_GAP_MS);
+    }
+    const uint32_t samples = mon.binding->delay_samples;
+    ESP_LOGI(TAG, "Configuring delay for monitor 0x%02X: %u samples", addr, (unsigned) samples);
+    this->send_frame(make_delay(addr, samples));
+    configured_anything = true;
+  }
+
   return configured_anything;
 }
 
@@ -752,9 +786,13 @@ void GenSAMHub::race_step_applying_group_(uint32_t now) {
 
     // Device finished. Mirror what was pushed onto the binding so the per-monitor entities
     // show the active group's values, and so a later rediscovery re-sends the same thing.
+    // Through the registry rather than the hub setters: those transmit and raise
+    // group_modified, which finish_group_apply_() is about to clear.
     if (mon->binding != nullptr && dev.enabled) {
       registry_.set_binding_crossover(*mon->binding, dev.crossover_hz);
       registry_.set_binding_input(*mon->binding, dev.source, dev.aes3_channel);
+      registry_.set_binding_level(*mon->binding, dev.level_db);
+      registry_.set_binding_delay(*mon->binding, dev.delay_samples);
     }
     apply_.configured++;
     apply_.device_idx++;

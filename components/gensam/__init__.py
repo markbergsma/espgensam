@@ -75,6 +75,7 @@ CONF_SOURCE = "source"
 CONF_CROSSOVER = "crossover"
 CONF_LEVEL_DB = "level_db"
 CONF_DELAY_SAMPLES = "delay_samples"
+CONF_DELAY_MS = "delay_ms"
 CONF_FREQUENCY = "frequency"
 CONF_GAIN = "gain"
 CONF_Q = "q"
@@ -87,6 +88,18 @@ PEQ_BAND_COUNT = 20
 DEFAULT_CROSSOVER_HZ = 85
 MIN_CROSSOVER_HZ = 50
 MAX_CROSSOVER_HZ = 120
+
+# Per-device level trim and time-of-flight delay bounds; mirror const.h.
+#
+# A group device and a monitor's own number entity must agree on these. publish_state() does
+# not clamp, so a group value outside the entity's declared range would be published as an
+# out-of-range state when the group push mirrors it onto the binding.
+MIN_LEVEL_DB = -60.0
+MAX_LEVEL_DB = 0.0
+LEVEL_STEP_DB = 0.1
+MAX_DELAY_SAMPLES = 9216
+MAX_DELAY_MS = 192.0
+DELAY_STEP_MS = 0.1
 
 # YAML `source:` -> (C++ source constant, C++ AES3 channel constant).
 #
@@ -116,6 +129,8 @@ GenSAMMuteSwitch = gensam_ns.class_("GenSAMMuteSwitch", switch.Switch)
 GenSAMIdentifyButton = gensam_ns.class_("GenSAMIdentifyButton", button.Button)
 GenSAMRediscoverButton = gensam_ns.class_("GenSAMRediscoverButton", button.Button)
 GenSAMCrossoverNumber = gensam_ns.class_("GenSAMCrossoverNumber", number.Number)
+GenSAMLevelNumber = gensam_ns.class_("GenSAMLevelNumber", number.Number)
+GenSAMDelayNumber = gensam_ns.class_("GenSAMDelayNumber", number.Number)
 GenSAMVolumeNumber = gensam_ns.class_("GenSAMVolumeNumber", number.Number)
 GenSAMInputSelect = gensam_ns.class_("GenSAMInputSelect", select.Select)
 GenSAMGroupSelect = gensam_ns.class_("GenSAMGroupSelect", select.Select)
@@ -283,6 +298,38 @@ def _validate_monitor(conf):
             entity_category=ENTITY_CATEGORY_CONFIG,
         )(c)
 
+    # Level and delay are box-entry rather than sliders: at 0.1 resolution their ranges are
+    # 600 and 1920 positions, unlike the crossover's 14.
+    if CONF_LEVEL_DB not in conf:
+        c = {
+            CONF_NAME: f"{name} Level",
+            CONF_DISABLED_BY_DEFAULT: True,
+            CONF_MODE: "box",
+        }
+        if dev_id:
+            c[CONF_DEVICE_ID] = dev_id
+        conf[CONF_LEVEL_DB] = number.number_schema(
+            GenSAMLevelNumber,
+            icon="mdi:tune-vertical",
+            unit_of_measurement="dB",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        )(c)
+
+    if CONF_DELAY_MS not in conf:
+        c = {
+            CONF_NAME: f"{name} Delay",
+            CONF_DISABLED_BY_DEFAULT: True,
+            CONF_MODE: "box",
+        }
+        if dev_id:
+            c[CONF_DEVICE_ID] = dev_id
+        conf[CONF_DELAY_MS] = number.number_schema(
+            GenSAMDelayNumber,
+            icon="mdi:timer-outline",
+            unit_of_measurement="ms",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        )(c)
+
     if CONF_INPUT in conf:
         val = conf[CONF_INPUT]
         if isinstance(val, str):
@@ -367,6 +414,18 @@ MONITOR_SCHEMA = cv.All(
                 unit_of_measurement="Hz",
                 entity_category=ENTITY_CATEGORY_CONFIG,
             ),
+            cv.Optional(CONF_LEVEL_DB): number.number_schema(
+                GenSAMLevelNumber,
+                icon="mdi:tune-vertical",
+                unit_of_measurement="dB",
+                entity_category=ENTITY_CATEGORY_CONFIG,
+            ),
+            cv.Optional(CONF_DELAY_MS): number.number_schema(
+                GenSAMDelayNumber,
+                icon="mdi:timer-outline",
+                unit_of_measurement="ms",
+                entity_category=ENTITY_CATEGORY_CONFIG,
+            ),
             # Only needed for a model whose PEQ design rate is not yet known; otherwise it
             # is derived from the discovered model. See PEQ_RATE_* in const.h.
             cv.Optional(CONF_PEQ_DESIGN_RATE): cv.int_range(min=8000, max=192000),
@@ -418,8 +477,15 @@ GROUP_DEVICE_SCHEMA = cv.Schema(
         # Attenuation only. A GLM setup file writes -999 for "not calibrated", and anything
         # at or below -130 dB encodes as digital silence, so the floor is deliberately well
         # above both: a sentinel leaking through here would mute the speaker.
-        cv.Optional(CONF_LEVEL_DB, default=0.0): cv.float_range(min=-60.0, max=0.0),
-        cv.Optional(CONF_DELAY_SAMPLES, default=0): cv.int_range(min=0, max=48000),
+        #
+        # Both bounds are shared with the per-monitor number entities, which the group push
+        # publishes to. They must not be looser here than there.
+        cv.Optional(CONF_LEVEL_DB, default=0.0): cv.float_range(
+            min=MIN_LEVEL_DB, max=MAX_LEVEL_DB
+        ),
+        cv.Optional(CONF_DELAY_SAMPLES, default=0): cv.int_range(
+            min=0, max=MAX_DELAY_SAMPLES
+        ),
         cv.Optional(CONF_FILTERS, default=[]): cv.All(
             cv.ensure_list(PEQ_BAND_SCHEMA), cv.Length(max=PEQ_BAND_COUNT)
         ),
@@ -811,6 +877,31 @@ async def to_code(config):
                 cg.add(xo_var.set_serial_or_id(target_id))
                 xo_num = f"{xo_var}"
 
+            # 10b. Level trim and time-of-flight delay numbers
+            lvl_num = "nullptr"
+            if CONF_LEVEL_DB in mon_conf:
+                lvl_var = await number.new_number(
+                    mon_conf[CONF_LEVEL_DB],
+                    min_value=MIN_LEVEL_DB,
+                    max_value=MAX_LEVEL_DB,
+                    step=LEVEL_STEP_DB,
+                )
+                cg.add(lvl_var.set_hub(var))
+                cg.add(lvl_var.set_serial_or_id(target_id))
+                lvl_num = f"{lvl_var}"
+
+            dly_num = "nullptr"
+            if CONF_DELAY_MS in mon_conf:
+                dly_var = await number.new_number(
+                    mon_conf[CONF_DELAY_MS],
+                    min_value=0.0,
+                    max_value=MAX_DELAY_MS,
+                    step=DELAY_STEP_MS,
+                )
+                cg.add(dly_var.set_hub(var))
+                cg.add(dly_var.set_serial_or_id(target_id))
+                dly_num = f"{dly_var}"
+
             # 11. Optional PEQ design rate override; 0 means derive it from the model
             design_rate = mon_conf.get(CONF_PEQ_DESIGN_RATE, 0)
 
@@ -831,6 +922,8 @@ async def to_code(config):
                         f"{mute_sw}, "
                         f"{model_sens}, {serial_sens}, {fw_sens}, {hw_id_sens}, "
                         f"{xo_num}, 85U, false, "
+                        f"{lvl_num}, 0.0f, false, "
+                        f"{dly_num}, 0U, false, "
                         f"{input_sel}, {src_c}, {ch_c}, "
                         f"{'true' if configured else 'false'}, {design_rate}U}}"
                     )

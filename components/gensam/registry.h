@@ -40,6 +40,7 @@
 
 #include "input.h"
 #include "monitor.h"
+#include "util.h"
 
 namespace esphome {
 namespace gensam {
@@ -147,6 +148,17 @@ class MonitorRegistry {
   /// @param channel AES3 sub-channel; ignored when @p source is analog.
   void set_binding_input(GenSAMMonitorBinding &b, uint8_t source, uint8_t channel);
 
+  /// @brief Store a level trim on a binding and publish it to the bound number entity.
+  /// @param b The binding to update.
+  /// @param db Level trim in decibels; expected already clamped by the caller.
+  void set_binding_level(GenSAMMonitorBinding &b, float db);
+
+  /// @brief Store a time-of-flight delay on a binding and publish it to the bound number entity.
+  /// @param b The binding to update.
+  /// @param samples Delay in samples at DSP_DELAY_RATE_HZ; published to Home Assistant as
+  ///                milliseconds, since samples are the stored form and ms the presented one.
+  void set_binding_delay(GenSAMMonitorBinding &b, uint32_t samples);
+
   /// @brief Store a monitor's crossover frequency on its binding and publish it.
   /// @param mon The monitor to update; no-op if unbound.
   /// @param freq_hz Crossover filter frequency in Hz.
@@ -157,6 +169,16 @@ class MonitorRegistry {
   /// @param source SOURCE_ANALOG or SOURCE_DIGITAL_AES3.
   /// @param channel AES3 sub-channel; ignored when @p source is analog.
   void set_input(GenSAMMonitor &mon, uint8_t source, uint8_t channel);
+
+  /// @brief Store a monitor's level trim on its binding and publish it.
+  /// @param mon The monitor to update; no-op if unbound.
+  /// @param db Level trim in decibels.
+  void set_level(GenSAMMonitor &mon, float db);
+
+  /// @brief Store a monitor's time-of-flight delay on its binding and publish it.
+  /// @param mon The monitor to update; no-op if unbound.
+  /// @param samples Delay in samples at DSP_DELAY_RATE_HZ.
+  void set_delay(GenSAMMonitor &mon, uint32_t samples);
 
   /// @brief Determine whether every online monitor is muted.
   /// @param[out] any_online Set to true if at least one monitor is online.
