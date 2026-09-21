@@ -94,14 +94,30 @@ Frame make_crossover(uint8_t addr, uint16_t freq_hz);
 ///
 /// Standard monitors are configured with input 0 only; 7xxx subwoofers additionally
 /// require input 1.  The third payload byte selects the physical analog input pair and
-/// differs per input index; it is unused (0x00) for AES3.  The AES3 sub-channel applies
-/// to input 0 only.
+/// differs per input index; it is unused (0x00) for AES3.
+///
+/// On a subwoofer the two inputs are two feeds, not one setting sent twice: input 0 is the
+/// bass-managed program and **input 1 is the LFE channel**.  Its sub-channel byte is therefore
+/// the setup file's `LFE_Channel`, which is 0x00 -- nothing -- whenever LFE is unused.  Pass 0
+/// for @p channel on input 1 unless the device has an LFE feed.
 /// @param addr Target monitor bus address.
-/// @param input_idx Input index (0x00 primary, 0x01 secondary / subwoofer).
+/// @param input_idx Input index (0x00 primary, 0x01 secondary / subwoofer LFE).
 /// @param source SOURCE_ANALOG (0x01) or SOURCE_DIGITAL_AES3 (0x02).
-/// @param channel AES3_CHANNEL_A / _B / _SUM; ignored for analog and for input 1.
+/// @param channel AES3_CHANNEL_A / _B / _SUM for input 0, the LFE channel for input 1;
+///                ignored for analog.
 /// @return CMD_SELECT_AUDIO_SOURCE frame carrying the 4-byte selection record.
 Frame make_audio_source(uint8_t addr, uint8_t input_idx, uint8_t source, uint8_t channel);
+
+/// @brief Build a subwoofer LFE level frame (CMD_SUB_LFE_LEVEL 0x3E).
+///
+/// Carries `LFE_Level` and `LFE_+10` summed, as whole decibels; see const.h for the encoding
+/// and the captures that settled it.  Subwoofers only: no two-way monitor has ever been sent
+/// this opcode.
+/// @param addr Target monitor bus address.
+/// @param level_db Effective LFE level in dB, rounded to the nearest whole decibel and clamped
+///                 to the signed-byte range the wire field can express.
+/// @return CMD_SUB_LFE_LEVEL frame carrying the 2-byte record.
+Frame make_lfe_level(uint8_t addr, float level_db);
 
 /// @brief Build a "prepare for configuration" frame (CMD_PREPARE_CONFIG 0x17).
 ///

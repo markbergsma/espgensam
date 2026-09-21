@@ -81,6 +81,22 @@ struct GroupDevice {
   uint8_t source{SOURCE_ANALOG};                ///< SOURCE_ANALOG or SOURCE_DIGITAL_AES3.
   uint8_t aes3_channel{AES3_CHANNEL_A};         ///< AES3 sub-channel; ignored when analog.
 
+  /// @name LFE feed
+  ///
+  /// Subwoofers only, and meaningful only in a surround setup: the discrete ".1" channel,
+  /// which reaches the subwoofer on its second input alongside the bass-managed program on
+  /// the first. Both default to "no LFE", which is what a stereo or 2.1 group wants and what
+  /// GLM sends for one. See const.h for the wire encoding.
+  ///@{
+  /// AES3 sub-channel carrying the LFE feed, or 0 for none. Sent as the sub-channel byte of
+  /// the input-1 CMD_SELECT_AUDIO_SOURCE frame.
+  uint8_t lfe_channel{0};
+
+  /// Effective LFE level: the setup file's LFE_Level plus 10 dB when its LFE_+10 flag is set.
+  /// Sent as CMD_SUB_LFE_LEVEL. Ignored unless lfe_channel is non-zero.
+  float lfe_level_db{0.0f};
+  ///@}
+
   /// Per-device level trim from AutoCal, the setup file's Level_Sensitivity. Sent as
   /// CMD_DSP sub-command 0x01/0x00. Attenuation only: 0.0 is unity.
   float level_db{0.0f};

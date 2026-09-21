@@ -776,10 +776,13 @@ void GenSAMHub::send_audio_source_frame(uint8_t address, uint8_t source, uint8_t
   // Primary frame (Input 0)
   this->send_frame(make_audio_source(address, 0x00, source, channel));
 
-  // Subwoofers (7xxx series) require a secondary frame for Input 1
+  // Subwoofers (7xxx series) require a secondary frame for Input 1, which is the LFE feed.
+  // Zero here rather than the device's LFE channel: this path is a hand-picked input change
+  // with no group behind it, so there is nothing to say what the LFE routing should be, and
+  // zero is what GLM sends for a subwoofer without one. A group push sets it properly.
   if (is_subwoofer) {
     delay(5);
-    this->send_frame(make_audio_source(address, 0x01, source, channel));
+    this->send_frame(make_audio_source(address, 0x01, source, 0x00));
   }
 }
 

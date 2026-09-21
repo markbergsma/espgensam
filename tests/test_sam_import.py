@@ -128,6 +128,87 @@ def test_group_sensitivity_is_summed_into_the_level():
           "a -999 device level leaves the group trim intact rather than discarding it")
 
 
+def test_lfe_fields_become_a_channel_and_one_effective_level():
+    # The values are the "2.1 LFE" group of the setup file the two LFE captures were taken
+    # against: LFE_Channel:2 with LFE_Level:-4, captured as 40 01 02 00 02 and 3E 00 06 with
+    # the +10 flag set, and 3E 00 FC with it clear.
+    text = (make_sam()
+            .replace("LFE_Channel:0", "LFE_Channel:2", 1)
+            .replace("LFE_Level:0", "LFE_Level:-4", 1)
+            .replace("LFE_+10:0", "LFE_+10:1", 1))
+    groups, warnings = convert(text)
+    sub = groups[0]["devices"][0]
+    check(sub["lfe_channel"] == "aes3_b", "LFE_Channel:2 is the AES3 B sub-channel")
+    check(sub["lfe_level_db"] == 6.0, "LFE_Level:-4 with LFE_+10:1 is +6 dB")
+    check("LFE" not in warnings, "carried LFE fields are no longer reported as dropped")
+
+    # The same group with the boost off, which is the second capture.
+    text = (make_sam()
+            .replace("LFE_Channel:0", "LFE_Channel:2", 1)
+            .replace("LFE_Level:0", "LFE_Level:-4", 1))
+    groups, _ = convert(text)
+    check(groups[0]["devices"][0]["lfe_level_db"] == -4.0,
+          "LFE_Level:-4 with LFE_+10:0 is -4 dB")
+
+
+def test_an_lfe_feed_narrows_a_summed_program_input_off_the_lfe_channel():
+    # GLM does this itself: in glm_lfe_capture.log the subwoofer's Input: is 3 (A+B sum) in
+    # both the "AES3" and "2.1 LFE" groups, yet input 0 went out as the sum (40 00 02 00 03)
+    # in the first and as A alone (40 00 02 00 01) in the second, where LFE sits on B. Summing
+    # both channels would fold the LFE feed into the bass-managed path on top of its own.
+    text = (make_sam()
+            .replace("LFE_Channel:0", "LFE_Channel:2", 1)
+            .replace("LFE_Level:0", "LFE_Level:-4", 1))
+    groups, _ = convert(text)
+    sub = groups[0]["devices"][0]
+    check(sub["source"] == "aes3_a",
+          "a summed program input narrows to the channel the LFE feed is not on")
+    check(sub["lfe_channel"] == "aes3_b", "and the LFE feed keeps its own channel")
+
+    # Only the sum is ambiguous. An input already on one channel is left alone.
+    text = (make_sam()
+            .replace("Input:3", "Input:1", 1)
+            .replace("LFE_Channel:0", "LFE_Channel:2", 1))
+    groups, _ = convert(text)
+    check(groups[0]["devices"][0]["source"] == "aes3_a",
+          "a program input already on one channel is untouched")
+
+
+def test_a_device_without_lfe_says_so():
+    # Every stereo and 2.1 group. "none" rather than a channel that happens to be unused, so
+    # the group push can tell "no LFE feed" from "LFE on sub-channel A".
+    groups, _ = convert()
+    check(all(d["lfe_channel"] == "none" for g in groups for d in g["devices"]),
+          "a setup file with no LFE configured yields no LFE channel anywhere")
+    check(all(d["lfe_level_db"] == 0.0 for g in groups for d in g["devices"]),
+          "and no LFE level")
+
+    # Two-way monitors have no LFE fields at all in the file; absent must read as none.
+    two = groups[0]["devices"][1]
+    check(two["lfe_channel"] == "none", "a two-way monitor, which has no LFE fields, gets none")
+
+
+def test_a_fractional_lfe_level_is_reported_because_the_wire_rounds_it():
+    # The wire field is one signed byte of whole decibels.
+    text = (make_sam()
+            .replace("LFE_Channel:0", "LFE_Channel:2", 1)
+            .replace("LFE_Level:0", "LFE_Level:-4.5", 1))
+    _, warnings = convert(text)
+    check("whole number of decibels" in warnings,
+          "a fractional LFE level is reported rather than silently rounded")
+
+
+def test_an_unrecognised_lfe_channel_is_fatal():
+    # Same treatment as Input:. Guessing would route the LFE feed to the wrong channel.
+    text = make_sam().replace("LFE_Channel:0", "LFE_Channel:9", 1)
+    try:
+        convert(text)
+        check(False, "an unrecognised LFE_Channel is rejected")
+    except sam_import.SamError as err:
+        check("LFE_Channel" in str(err) and "9" in str(err),
+              "an unrecognised LFE_Channel is rejected, naming the value")
+
+
 def test_summed_level_is_not_clamped_on_its_way_to_the_schema():
     # Summing can leave the -60..0 dB range the group schema accepts where neither field could
     # alone, so it is worth pinning that convert() passes the sum through untouched. The schema

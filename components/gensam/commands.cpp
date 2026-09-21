@@ -4,6 +4,8 @@
 
 #include "commands.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include "util.h"
 
@@ -113,11 +115,22 @@ Frame make_delay(uint8_t addr, uint32_t samples) {
                 static_cast<uint8_t>((samples >> 8) & 0xFF), static_cast<uint8_t>(samples & 0xFF)});
 }
 
+Frame make_lfe_level(uint8_t addr, float level_db) {
+  // Whole decibels in a signed byte, and GLM does not sign-extend into the pad: -4 dB is
+  // 00 FC, not FF FC. Clamping before the cast keeps an out-of-range level from wrapping
+  // round to the opposite sign, which would be a large boost where an attenuation was meant.
+  const float clamped = std::clamp(level_db, MIN_LFE_LEVEL_DB, MAX_LFE_LEVEL_DB);
+  const auto level = static_cast<int8_t>(std::lroundf(clamped));
+  return Frame(addr, CMD_SUB_LFE_LEVEL, {LFE_LEVEL_PAD, static_cast<uint8_t>(level)});
+}
+
 Frame make_audio_source(uint8_t addr, uint8_t input_idx, uint8_t source, uint8_t channel) {
   if (source == SOURCE_DIGITAL_AES3) {
-    // Byte 2 is unused for AES3; the sub-channel in byte 3 applies to the primary input only.
+    // Byte 2 is unused for AES3. Byte 3 is the sub-channel of whichever feed this frame
+    // describes: the program for input 0, the LFE channel for input 1. Callers pass 0 for
+    // input 1 when there is no LFE feed, which is what GLM sends then.
     return Frame(addr, CMD_SELECT_AUDIO_SOURCE,
-                 {input_idx, SOURCE_DIGITAL_AES3, 0x00, (input_idx == 0x00) ? channel : uint8_t{0x00}});
+                 {input_idx, SOURCE_DIGITAL_AES3, 0x00, channel});
   }
   // Analog: byte 2 selects the physical input pair, which differs between input 0 and input 1.
   return Frame(addr, CMD_SELECT_AUDIO_SOURCE,

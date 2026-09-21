@@ -12,10 +12,12 @@
 /// ===================================================================================
 /// WHAT THIS PINS DOWN
 /// ===================================================================================
-/// Every expected frame is a verbatim capture of GLM switching a calibrated 7350A + 2x 8330A
-/// between the three groups of captures/glm-config/Home Cinema.sam, taken from
-/// captures/glm_group_switch_capture.log. They are complete frames -- address, payload, CRC
-/// and delimiter -- so a pass means our bytes are indistinguishable from Genelec's.
+/// Every expected frame is a verbatim capture of GLM configuring a calibrated 7350A + 2x
+/// 8330A, mostly from captures/glm_group_switch_capture.log (three groups of
+/// captures/glm-config/Home Cinema.sam) and the rest from captures/glm_lfe_capture.log and
+/// glm_lfe2_capture.log, which added a group trim and an LFE feed. They are complete frames
+/// -- address, payload, CRC and delimiter -- so a pass means our bytes are indistinguishable
+/// from Genelec's.
 ///
 /// 1. The level scale. The protocol specification says the 24-bit level field uses a scale of
 ///    2^23, but 0 dB is transmitted as 0x7FFFFF, which is 2^23 - 1; the larger scale does not
@@ -37,6 +39,11 @@
 ///    samples, a 4x difference the specification flags as unresolved. The three captured
 ///    subwoofer delays are the AutoPhase results of the three groups, and the phase-to-sample
 ///    conversion is asserted here so a future change to DSP_DELAY_RATE_HZ has to confront it.
+///
+/// 5. The LFE encoding. Two captures of one group differing in a single setup-file field fix
+///    0x3E as whole decibels in a signed byte, with LFE_Level and LFE_+10 summed into it, and
+///    show that a subwoofer's two 0x40 frames are two different feeds rather than one setting
+///    sent twice: input 1 is the LFE channel, and the program input is narrowed off it.
 /// ===================================================================================
 
 #include "../components/gensam/commands.h"
@@ -52,7 +59,9 @@ using esphome::gensam::clamp_level_db;
 using esphome::gensam::delay_ms_to_samples;
 using esphome::gensam::delay_samples_to_ms;
 using esphome::gensam::Frame;
+using esphome::gensam::make_audio_source;
 using esphome::gensam::make_delay;
+using esphome::gensam::make_lfe_level;
 using esphome::gensam::make_level;
 using esphome::gensam::parse_dsp_delay;
 using esphome::gensam::parse_dsp_level;
@@ -385,10 +394,59 @@ void test_delay_decode() {
   check(samples == 99, "a rejected delay frame leaves the output untouched");
 }
 
+// --- LFE level ----------------------------------------------------------------------------
+// Two captures of the same group differing in exactly one setup-file field. With LFE_Level:-4
+// throughout, LFE_+10:1 gave 00 06 and LFE_+10:0 gave 00 FC: a delta of exactly 10, which is
+// what fixes the unit at whole decibels and the flag's contribution at +10 dB.
+
+void test_captured_lfe_level_frames() {
+  check_wire("LFE level +6 dB on 0x02 matches capture", make_lfe_level(0x02, 6.0f),
+             "02' 3E 00 06 AC F5 7E");
+
+  // Negative levels are not sign-extended into the pad byte: -4 dB is 00 FC, not FF FC.
+  check_wire("LFE level -4 dB on 0x05 matches capture", make_lfe_level(0x05, -4.0f),
+             "05' 3E 00 FC B3 8D 7E");
+}
+
+void test_captured_lfe_routing_frames() {
+  // The same subwoofer, same Input:3 in the setup file, in two groups that differ only in
+  // whether an LFE feed is configured. Input 1 is the LFE feed and carries its channel;
+  // with no LFE it carries nothing, which is how the two are told apart on the wire.
+  check_wire("subwoofer input 1 carries the LFE channel", make_audio_source(0x05, 0x01, 0x02, 0x02),
+             "05' 40 01 02 00 02 95 00 7E");
+  check_wire("subwoofer input 1 is empty without an LFE feed",
+             make_audio_source(0x05, 0x01, 0x02, 0x00), "05' 40 01 02 00 00 B5 42 7E");
+
+  // And the program input, which GLM narrows off the LFE channel rather than summing both.
+  check_wire("program input is the sum without LFE", make_audio_source(0x05, 0x00, 0x02, 0x03),
+             "05' 40 00 02 00 03 F3 95 7E");
+  check_wire("program input is A alone with LFE on B",
+             make_audio_source(0x05, 0x00, 0x02, 0x01), "05' 40 00 02 00 01 D3 D7 7E");
+}
+
+void test_lfe_level_encoding_details() {
+  // Whole decibels only: the wire field is one signed byte, so anything finer is rounded.
+  check(make_lfe_level(0x02, -3.6f).payload == make_lfe_level(0x02, -4.0f).payload,
+        "a fractional LFE level rounds to the nearest whole decibel");
+
+  // Clamped rather than wrapped. A cast alone would turn +200 dB into a negative byte, so an
+  // out-of-range boost would arrive as an attenuation and vice versa.
+  check(make_lfe_level(0x02, 400.0f).payload.back() == 127,
+        "a level above the field's range clamps to +127 dB rather than wrapping");
+  check(static_cast<int8_t>(make_lfe_level(0x02, -400.0f).payload.back()) == -128,
+        "a level below the field's range clamps to -128 dB rather than wrapping");
+
+  check(make_lfe_level(0x02, 0.0f).payload[0] == 0x00,
+        "the pad byte is zero");
+}
+
 }  // namespace
 
 int main() {
   std::printf("level and delay frame builders\n");
+  test_captured_lfe_level_frames();
+  test_captured_lfe_routing_frames();
+  test_lfe_level_encoding_details();
   test_captured_level_frames();
   test_level_encoding_details();
   test_level_shares_the_volume_encoding();

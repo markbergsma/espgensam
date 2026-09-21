@@ -81,6 +81,8 @@ CONF_ENABLED = "enabled"
 CONF_SOURCE = "source"
 CONF_CROSSOVER = "crossover"
 CONF_LEVEL_DB = "level_db"
+CONF_LFE_CHANNEL = "lfe_channel"
+CONF_LFE_LEVEL_DB = "lfe_level_db"
 CONF_DELAY_SAMPLES = "delay_samples"
 CONF_DELAY_MS = "delay_ms"
 CONF_FREQUENCY = "frequency"
@@ -105,6 +107,11 @@ MIN_LEVEL_DB = -60.0
 MAX_LEVEL_DB = 0.0
 LEVEL_STEP_DB = 0.1
 MAX_DELAY_SAMPLES = 9216
+
+# Bounds of the LFE level wire field, a signed byte of whole decibels; mirror const.h.
+# These are the encoding's own limits, not a range GLM is known to offer.
+MIN_LFE_LEVEL_DB = -128.0
+MAX_LFE_LEVEL_DB = 127.0
 MAX_DELAY_MS = 192.0
 DELAY_STEP_MS = 0.1
 
@@ -113,6 +120,15 @@ DELAY_STEP_MS = 0.1
 # One key covers both bytes because that is how a GLM setup file expresses it, as a single
 # `Input:` enum, and because the pair is never usefully mixed: an analog device has no
 # sub-channel. The .sam numbering is 1=A, 2=B, 3=A+B sum, 4=analog.
+# YAML `lfe_channel:` -> C++ AES3 sub-channel constant. Subwoofers only: this is the feed
+# carried on input 1, and "none" is both the default and what a stereo or 2.1 group wants.
+GROUP_LFE_CHANNELS = {
+    "none": "0",
+    "aes3_a": "gensam::AES3_CHANNEL_A",
+    "aes3_b": "gensam::AES3_CHANNEL_B",
+    "aes3_sum": "gensam::AES3_CHANNEL_SUM",
+}
+
 GROUP_SOURCES = {
     "analog": ("gensam::SOURCE_ANALOG", "gensam::AES3_CHANNEL_A"),
     "aes3_a": ("gensam::SOURCE_DIGITAL_AES3", "gensam::AES3_CHANNEL_A"),
@@ -475,28 +491,58 @@ PEQ_BAND_SCHEMA = cv.All(
     _validate_peq_band,
 )
 
-GROUP_DEVICE_SCHEMA = cv.Schema(
-    {
-        cv.Required(CONF_UNIQUE_ID): cv.positive_int,
-        cv.Optional(CONF_ENABLED, default=True): cv.boolean,
-        cv.Optional(CONF_SOURCE, default="analog"): cv.one_of(*GROUP_SOURCES, lower=True),
-        cv.Optional(CONF_CROSSOVER): cv.int_range(min=MIN_CROSSOVER_HZ, max=MAX_CROSSOVER_HZ),
-        # Attenuation only. A GLM setup file writes -999 for "not calibrated", and anything
-        # at or below -130 dB encodes as digital silence, so the floor is deliberately well
-        # above both: a sentinel leaking through here would mute the speaker.
-        #
-        # Both bounds are shared with the per-monitor number entities, which the group push
-        # publishes to. They must not be looser here than there.
-        cv.Optional(CONF_LEVEL_DB, default=0.0): cv.float_range(
-            min=MIN_LEVEL_DB, max=MAX_LEVEL_DB
-        ),
-        cv.Optional(CONF_DELAY_SAMPLES, default=0): cv.int_range(
-            min=0, max=MAX_DELAY_SAMPLES
-        ),
-        cv.Optional(CONF_FILTERS, default=[]): cv.All(
-            cv.ensure_list(PEQ_BAND_SCHEMA), cv.Length(max=PEQ_BAND_COUNT)
-        ),
-    }
+def _validate_group_device(conf):
+    """Reject an LFE feed that the program input would also carry.
+
+    A subwoofer fed the A+B sum on input 0 and an LFE channel on input 1 gets the LFE content
+    twice, once on its own input and once folded into the sum, so it plays several dB hot.
+    GLM narrows the program input off the LFE channel rather than allowing this, and
+    sam_import.py does the same on the way in; this catches a group written by hand.
+    """
+    if conf[CONF_LFE_CHANNEL] != "none" and conf[CONF_SOURCE] == "aes3_sum":
+        raise cv.Invalid(
+            f"a device with an LFE feed on '{conf[CONF_LFE_CHANNEL]}' cannot also take the "
+            f"AES3 A+B sum as its program input: the sum already carries the LFE channel, so "
+            f"it would be reproduced twice. Name the other channel as 'source'.",
+            path=[CONF_SOURCE],
+        )
+    return conf
+
+
+GROUP_DEVICE_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_UNIQUE_ID): cv.positive_int,
+            cv.Optional(CONF_ENABLED, default=True): cv.boolean,
+            cv.Optional(CONF_SOURCE, default="analog"): cv.one_of(*GROUP_SOURCES, lower=True),
+            cv.Optional(CONF_CROSSOVER): cv.int_range(min=MIN_CROSSOVER_HZ, max=MAX_CROSSOVER_HZ),
+            # Attenuation only. A GLM setup file writes -999 for "not calibrated", and anything
+            # at or below -130 dB encodes as digital silence, so the floor is deliberately well
+            # above both: a sentinel leaking through here would mute the speaker.
+            #
+            # Both bounds are shared with the per-monitor number entities, which the group push
+            # publishes to. They must not be looser here than there.
+            cv.Optional(CONF_LEVEL_DB, default=0.0): cv.float_range(
+                min=MIN_LEVEL_DB, max=MAX_LEVEL_DB
+            ),
+            cv.Optional(CONF_DELAY_SAMPLES, default=0): cv.int_range(
+                min=0, max=MAX_DELAY_SAMPLES
+            ),
+            # The discrete ".1" feed, on a subwoofer's second input. Ignored for anything else,
+            # and the level is ignored unless a channel is set: with no LFE feed there is nothing
+            # for it to apply to.
+            cv.Optional(CONF_LFE_CHANNEL, default="none"): cv.one_of(
+                *GROUP_LFE_CHANNELS, lower=True
+            ),
+            cv.Optional(CONF_LFE_LEVEL_DB, default=0.0): cv.float_range(
+                min=MIN_LFE_LEVEL_DB, max=MAX_LFE_LEVEL_DB
+            ),
+            cv.Optional(CONF_FILTERS, default=[]): cv.All(
+                cv.ensure_list(PEQ_BAND_SCHEMA), cv.Length(max=PEQ_BAND_COUNT)
+            ),
+        }
+    ),
+    _validate_group_device,
 )
 
 GROUP_SCHEMA = cv.Schema(
@@ -804,6 +850,8 @@ def _emit_group_table(config):
             lines.append(
                 f"    {{{dev[CONF_UNIQUE_ID]}u, {str(dev[CONF_ENABLED]).lower()}, "
                 f"{dev[CONF_CROSSOVER]}u, {source}, {channel}, "
+                f"{GROUP_LFE_CHANNELS[dev[CONF_LFE_CHANNEL]]}, "
+                f"{_cpp_float(dev[CONF_LFE_LEVEL_DB])}, "
                 f"{_cpp_float(dev[CONF_LEVEL_DB])}, {dev[CONF_DELAY_SAMPLES]}u, "
                 f"gensam_g{gi}_d{di}_bands, {count}u}},"
             )

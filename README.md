@@ -158,6 +158,8 @@ gensam:
       crossover: 90               # Hz
       level_db: -1.9258           # per-speaker trim from AutoCal
       delay_samples: 289          # alignment delay, 48 kHz samples (max 9216 = 192 ms)
+      lfe_channel: aes3_b         # subwoofers in surround setups only; default none
+      lfe_level_db: -4            # whole dB, including the LFE +10 boost if set
       filters:                    # up to 20; the rest are left flat
         - {type: notch, frequency: 56.1739, gain: -6.05847, q: 4.68839}
         - {type: low_shelf, frequency: 118.711, gain: -0.177536}
@@ -168,13 +170,20 @@ gensam:
 Only `notch` takes a `q`. Set `enabled: false` on a device to mute it in that group rather
 than configure it.
 
+`lfe_channel` is for a subwoofer in a surround setup, where the discrete ".1" channel reaches
+it on its own input alongside the bass-managed program. Leave it out for stereo and 2.1, which
+is what `none` means. When it is set, `source` must name a single channel rather than the A+B
+sum, so that the LFE feed is not also folded into the program path; importing handles this for
+you.
+
 Filter order is the order the speaker's own filter slots run in, which differs by model: a
 two-way monitor takes two low shelves, two high shelves and then up to sixteen notches, while
 a subwoofer takes twenty notches and no shelves. Importing gets this right; if you write a
 group by hand, follow the same order.
 
-Applying a group sets every speaker's Input select, Crossover, Level and Delay, so they always
-show what the speakers were last told. Changing one by hand takes effect immediately but does
+Applying a group sets every speaker's Input select, Crossover, Level and Delay - and the LFE
+routing and level on a subwoofer that has them - so they always show what the speakers were
+last told. Changing one by hand takes effect immediately but does
 not alter the group, so the next group push - switching group, waking from standby, or a
 rediscovery - puts the group's own values back. While the two disagree, the hub's **Group
 Modified** diagnostic sensor is on.

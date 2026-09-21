@@ -150,6 +150,32 @@ def test_a_value_the_schema_rejects_fails_the_build():
               "the rejection names the setup file and the group it came from")
 
 
+def test_an_lfe_feed_on_a_summed_program_input_is_rejected():
+    # The importer narrows the program input off the LFE channel, as GLM does, so this cannot
+    # arise from a setup file. A hand-written group can express it, and it would play the LFE
+    # content twice -- once on the subwoofer's own LFE input and once folded into the sum.
+    device = {
+        gensam.CONF_UNIQUE_ID: 1842915,
+        gensam.CONF_SOURCE: "aes3_sum",
+        gensam.CONF_LFE_CHANNEL: "aes3_b",
+    }
+    try:
+        gensam.GROUP_DEVICE_SCHEMA(device)
+        check(False, "an LFE feed alongside a summed program input is rejected")
+    except cv.Invalid as err:
+        check("reproduced twice" in str(err),
+              "an LFE feed alongside a summed program input is rejected, explaining why")
+
+    # The same device on a single channel is fine, and so is the sum with no LFE feed.
+    ok_single = gensam.GROUP_DEVICE_SCHEMA({**device, gensam.CONF_SOURCE: "aes3_a"})
+    check(ok_single[gensam.CONF_LFE_CHANNEL] == "aes3_b",
+          "an LFE feed on a single-channel program input is accepted")
+    ok_sum = gensam.GROUP_DEVICE_SCHEMA({k: v for k, v in device.items()
+                                         if k != gensam.CONF_LFE_CHANNEL})
+    check(ok_sum[gensam.CONF_LFE_CHANNEL] == "none",
+          "a summed program input with no LFE feed is accepted and defaults to no LFE")
+
+
 def test_a_file_that_is_not_a_setup_file_is_rejected():
     try:
         expand(text="nothing here is a GLM setup\n")

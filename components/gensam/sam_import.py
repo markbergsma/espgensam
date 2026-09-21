@@ -32,17 +32,31 @@ What it does not carry over
 ---------------------------
 Fields whose wire encoding is unknown are dropped rather than guessed, and every dropped
 non-default value is reported so nothing disappears silently: ``Optional_Gain``,
-``Time-of-flight_Compensation``, ``Video_Delay``, the ``LFE_*`` family and
-``SubwooferGroupID``.
+``Time-of-flight_Compensation``, ``Video_Delay`` and ``SubwooferGroupID``.
 
-``Group_Sensitivity`` is *not* among them: GLM sums it with the device's own
-``Level_Sensitivity`` and sends the total as one level word. See ``convert()``.
+Two fields that look droppable are not:
+
+* ``Group_Sensitivity`` is summed with the device's own ``Level_Sensitivity``; GLM sends the
+  total as one level word.
+* The ``LFE_*`` family is carried, except ``LFE_CrossoverFrequency(Hz)``, which GLM fixes at
+  120 Hz and never transmits. ``LFE_Channel`` becomes the subwoofer's input-1 routing and
+  ``LFE_Level`` plus ``LFE_+10`` become one effective level. See ``convert()``.
 """
 
 import logging
 
 # .sam Input: enum -> espgensam source. GLM stores routing and sub-channel as one value.
 SAM_INPUT_TO_SOURCE = {1: "aes3_a", 2: "aes3_b", 3: "aes3_sum", 4: "analog"}
+
+# .sam LFE_Channel: -> espgensam lfe_channel. Subwoofers only, and 0 means the group has no
+# LFE feed at all, which is the usual case outside a surround setup. The numbering is the AES3
+# sub-channel's own, not the Input: enum's: GLM puts this value straight into the sub-channel
+# byte of the input-1 routing frame, so 2 travels as 0x02.
+SAM_LFE_CHANNEL = {0: "none", 1: "aes3_a", 2: "aes3_b", 3: "aes3_sum"}
+
+# Decibels the .sam LFE_+10 flag adds to LFE_Level. The ".1" channel is mastered 10 dB below
+# reference for headroom, and this is the playback boost that puts it back.
+LFE_PLUS_10_DB = 10.0
 
 # .sam band key -> (espgensam filter type, first wire slot for that key).
 #
@@ -72,9 +86,6 @@ DROPPED_FIELDS = {
     "Optional_Gain": 0.0,
     "Time-of-flight_Compensation": 0.0,
     "Video_Delay": 0.0,
-    "LFE_+10": 0.0,
-    "LFE_Channel": 0.0,
-    "LFE_Level": 0.0,
     "SubwooferGroupID": 0.0,
 }
 
@@ -324,6 +335,49 @@ def convert(model, known_ids=None):
             if source_key not in SAM_INPUT_TO_SOURCE:
                 raise SamError(f"{where}: unrecognised Input value {source_key}")
 
+            # The LFE feed, which only a subwoofer has: the discrete ".1" channel, reaching it
+            # on input 1 alongside the bass-managed program on input 0. Absent or 0 means the
+            # group has no LFE at all, which is every stereo and 2.1 group.
+            lfe_key = int(_num(fields.get("LFE_Channel"), 0))
+            if lfe_key not in SAM_LFE_CHANNEL:
+                raise SamError(f"{where}: unrecognised LFE_Channel value {lfe_key}")
+            lfe_channel = SAM_LFE_CHANNEL[lfe_key]
+
+            # A subwoofer fed both a summed program and an LFE channel would get the LFE
+            # content twice: once on its own input and once folded into the sum. GLM narrows
+            # the program input to avoid that, and the mapping has to do the same or the two
+            # disagree on the wire -- the capture shows Input:3 going out as A alone once LFE
+            # was put on B.
+            #
+            # Which channel it narrows to rests on a single observation, LFE on B giving A.
+            # That is equally consistent with "always A", but "the channel the LFE is not on"
+            # is the reading that still makes sense when the two are swapped, so it is the one
+            # used here.
+            if lfe_channel != "none" and SAM_INPUT_TO_SOURCE[source_key] == "aes3_sum":
+                program = {"aes3_a": "aes3_b", "aes3_b": "aes3_a"}.get(lfe_channel)
+                if program is None:
+                    raise SamError(
+                        f"{where}: Input is the AES3 A+B sum and the LFE feed is on "
+                        f"{lfe_channel}, which leaves no channel for the program material"
+                    )
+                source_key = {v: k for k, v in SAM_INPUT_TO_SOURCE.items()}[program]
+
+            # GLM sends one level for the LFE path with the +10 dB boost already folded in,
+            # so the flag is applied here rather than carried separately.
+            lfe_level = _num(fields.get("LFE_Level"), 0.0)
+            if _num(fields.get("LFE_+10"), 0.0):
+                lfe_level += LFE_PLUS_10_DB
+
+            # The wire field is a signed byte of whole decibels, so a fractional trim cannot
+            # be transmitted. GLM has only ever been seen writing integers here; say so rather
+            # than round in silence.
+            if lfe_channel != "none" and lfe_level != round(lfe_level):
+                warn(
+                    f"{where}: LFE level {lfe_level:g} dB is not a whole number of decibels, "
+                    f"which is all the wire field carries; it will be sent as "
+                    f"{round(lfe_level):g} dB"
+                )
+
             devices.append(
                 {
                     "unique_id": unique_id,
@@ -331,6 +385,8 @@ def convert(model, known_ids=None):
                     "source": SAM_INPUT_TO_SOURCE[source_key],
                     "crossover": int(crossover) if crossover else None,
                     "level_db": level,
+                    "lfe_channel": lfe_channel,
+                    "lfe_level_db": lfe_level,
                     "delay_samples": delay,
                     "filters": band_slots(node, where),
                 }
@@ -370,6 +426,13 @@ def to_group_config(groups):
                 entry["crossover"] = int(dev["crossover"])
             entry["level_db"] = float(dev["level_db"])
             entry["delay_samples"] = int(dev["delay_samples"])
+
+            # Emitted only when there is an LFE feed, so the overwhelming majority of groups
+            # -- every stereo and 2.1 one -- keep the shape they had before LFE was supported
+            # and the YAML stays readable.
+            if dev["lfe_channel"] != "none":
+                entry["lfe_channel"] = dev["lfe_channel"]
+                entry["lfe_level_db"] = float(dev["lfe_level_db"])
 
             bands = []
             for slot in dev["filters"]:

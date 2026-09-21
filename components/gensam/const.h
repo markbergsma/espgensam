@@ -53,11 +53,11 @@ static constexpr uint8_t CMD_PREPARE_CONFIG = 0x17;   ///< Prepare for a block o
 static constexpr uint8_t CMD_SOFTWARE_QUERY = 0x39;   ///< Firmware version query
 static constexpr uint8_t CMD_WAKEUP = 0x3A;           ///< Wakeup / standby control (0x3A)
 static constexpr uint8_t CMD_BASS_MANAGE_XO = 0x3B;   ///< Bass management crossover frequency configuration
-static constexpr uint8_t CMD_SUB_LFE_XO = 0x3C;       ///< LFE crossover? See the block below
+static constexpr uint8_t CMD_UNKNOWN_3C = 0x3C;       ///< Subwoofer only, always 00 00; see below
 static constexpr uint8_t CMD_INPUT_SYNC = 0x3D;       ///< Input-select sync; see the block below
-static constexpr uint8_t CMD_SUB_LFE_CHANNEL = 0x3E;  ///< LFE channel? See the block below
+static constexpr uint8_t CMD_SUB_LFE_LEVEL = 0x3E;    ///< Subwoofer LFE level; see the block below
 static constexpr uint8_t CMD_SELECT_AUDIO_SOURCE = 0x40; ///< Audio source selection & AES3 channel assignment
-static constexpr uint8_t CMD_SUB_LFE_LEVEL = 0x42;    ///< LFE level? See the block below
+static constexpr uint8_t CMD_UNKNOWN_42 = 0x42;       ///< Subwoofer only, always 00 00; see below
 static constexpr uint8_t CMD_DISCOVERY = 0xFE;        ///< Monitor discovery ping
 
 // --- Opcodes GLM sends that this component does not -----------------------
@@ -79,17 +79,47 @@ static constexpr uint8_t CMD_DISCOVERY = 0xFE;        ///< Monitor discovery pin
 ///    immediately before CMD_SELECT_AUDIO_SOURCE, so it reads as an input-select preamble
 ///    rather than a latch applied afterwards; in a group push GLM instead sweeps it across
 ///    every speaker at the close.
-///  - CMD_SUB_LFE_XO / _CHANNEL / _LEVEL (0x3C, 0x3E, 0x42): always 00 00, and in 48 observed
-///    frames **only ever addressed to the subwoofer**. Their positions are fixed: 0x3C follows
-///    the crossover, 0x3E follows the subwoofer's second CMD_SELECT_AUDIO_SOURCE frame, and
-///    0x42 follows 0x3E. The names encode a **hypothesis, not a finding**: a .sam group node
-///    has exactly four subwoofer-only fields left unaccounted for once Phase(degrees) is mapped
-///    to DSP_SUB_DELAY -- LFE_+10, LFE_Channel, LFE_CrossoverFrequency(Hz) and LFE_Level -- and
-///    0x3C sits next to CMD_BASS_MANAGE_XO with the same 2-byte big-endian shape. The captured
-///    setup runs with LFE inactive, so every one of these frames is 00 00 and the correlation
-///    has no variance to test against; LFE_CrossoverFrequency(Hz) is 120 there, which would be
-///    00 78 rather than 00 00. Sending a hardcoded 00 00 would therefore be byte-correct for
-///    that setup and would silently disable LFE on one that uses it.
+///  - CMD_UNKNOWN_3C (0x3C) and CMD_UNKNOWN_42 (0x42): always 00 00, and in every observed
+///    frame **only ever addressed to the subwoofer**. Their positions are fixed -- 0x3C
+///    follows the crossover, 0x42 follows CMD_SUB_LFE_LEVEL -- and that is all that is known.
+///    They are not the remaining LFE fields: 0x42 stayed 00 00 across a controlled change of
+///    LFE_Level, and 0x3C stayed 00 00 while LFE_CrossoverFrequency(Hz) was 120, which would
+///    encode as 00 78. See docs/glm-group-apply.md.
+///@}
+
+// --- Subwoofer LFE level (CMD_SUB_LFE_LEVEL) ------------------------------
+/// @name LFE level encoding
+///
+/// The LFE channel is the discrete ".1" feed of a surround mix, separate from the bass
+/// management that redirects low frequencies out of the main channels. A GLM setup file gives
+/// a subwoofer four LFE fields; three of them are accounted for and this is one:
+///
+///  - `LFE_Level` and `LFE_+10` are **summed into this single opcode** as decibels.
+///  - `LFE_Channel` is not sent here at all: it is the sub-channel byte of the subwoofer's
+///    *second* CMD_SELECT_AUDIO_SOURCE frame, i.e. input 1 carries the LFE feed.
+///  - `LFE_CrossoverFrequency(Hz)` appears nowhere on the wire. GLM fixes it at 120 Hz, the
+///    standard LFE bandwidth limit, and offers no way to change it.
+///
+/// The payload is two bytes. The first is always 0x00; the second is the level as a **signed
+/// 8-bit integer number of decibels**, which is *not* sign-extended into the first byte -- a
+/// value of -4 dB goes out as `00 FC`, not `FF FC`.
+///
+/// Settled by two captures of the same group differing in exactly one field: with
+/// `LFE_Level:-4` the payload was `00 06` when `LFE_+10:1` and `00 FC` when `LFE_+10:0`. The
+/// delta of exactly 10 between them is what pins the unit as decibels and the flag's
+/// contribution as +10 dB, independently of how the absolute values are read.
+///@{
+/// First payload byte of a CMD_SUB_LFE_LEVEL frame. Always 0x00, including for negative levels.
+static constexpr uint8_t LFE_LEVEL_PAD = 0x00;
+
+/// Decibels contributed by the setup file's `LFE_+10` flag when set.
+static constexpr float LFE_PLUS_10_DB = 10.0f;
+
+/// Bounds of the wire field, which is a signed byte of whole decibels. These are the encoding's
+/// own limits rather than a range GLM is known to offer: its LFE level control has not been
+/// swept, so anything narrower would be invented.
+static constexpr float MIN_LFE_LEVEL_DB = -128.0f;
+static constexpr float MAX_LFE_LEVEL_DB = 127.0f;
 ///@}
 
 // --- Audio source parameters (CMD_SELECT_AUDIO_SOURCE) --------------------

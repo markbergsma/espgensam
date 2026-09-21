@@ -109,7 +109,8 @@ enum : uint8_t {
   GROUP_STEP_PEQ_FIRST,                                    ///< 0x10 0x0E, 20 of them
   GROUP_STEP_CROSSOVER = GROUP_STEP_PEQ_FIRST + PEQ_BAND_COUNT,  ///< 0x3B
   GROUP_STEP_SOURCE,                                       ///< 0x40, primary input
-  GROUP_STEP_SOURCE_AUX,                                   ///< 0x40, subwoofer secondary input
+  GROUP_STEP_SOURCE_AUX,                                   ///< 0x40, subwoofer LFE input
+  GROUP_STEP_LFE_LEVEL,                                    ///< 0x3E, subwoofer LFE level
   GROUP_STEP_DONE,
 };
 
@@ -749,12 +750,24 @@ bool GenSAMHub::send_group_step_(const GenSAMMonitor &mon, const GroupDevice &de
       return true;
 
     case GROUP_STEP_SOURCE_AUX:
-      // Only 7xxx subwoofers have a secondary input. Returning false for everything else
-      // ends the device, which is correct because this is the last step in the sequence.
+      // Only 7xxx subwoofers have a secondary input, and on them it is the LFE feed rather
+      // than a repeat of the primary: its sub-channel byte is the group's LFE channel, which
+      // is 0 for the stereo and 2.1 groups that have no LFE at all.
       if (!mon.is_subwoofer()) {
         return false;
       }
-      this->send_frame(make_audio_source(addr, 0x01, dev.source, dev.aes3_channel));
+      this->send_frame(make_audio_source(addr, 0x01, dev.source, dev.lfe_channel));
+      return true;
+
+    case GROUP_STEP_LFE_LEVEL:
+      // Skipped outright when there is no LFE feed. GLM does send 0x3E 00 00 to a subwoofer
+      // in that case, but the frame only restates a level that applies to nothing, and the
+      // two opcodes that bracket it (0x3C, 0x42) are still unexplained, so a group without
+      // LFE is left exactly as it was rather than half-matching the OEM.
+      if (!mon.is_subwoofer() || dev.lfe_channel == 0) {
+        return false;
+      }
+      this->send_frame(make_lfe_level(addr, dev.lfe_level_db));
       return true;
 
     default:
