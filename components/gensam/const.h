@@ -40,19 +40,57 @@ static constexpr uint8_t CMD_STATUS = 0x00;           ///< Status/telemetry poll
 static constexpr uint8_t CMD_ACK = 0x01;              ///< ACK / response opcode
 static constexpr uint8_t CMD_SET_RID = 0x02;          ///< Assign device RID
 static constexpr uint8_t CMD_STAY_ONLINE = 0x04;      ///< Keep-alive / stay online
+static constexpr uint8_t CMD_SIGNAL_GEN = 0x05;       ///< Signal generator; see the block below
 static constexpr uint8_t CMD_QUERY_STATUS = 0x08;     ///< GLMv5 monitor telemetry query
 static constexpr uint8_t CMD_REPORT_STATUS = 0x09;    ///< GLMv5 monitor telemetry report
 static constexpr uint8_t CMD_VOLUME = 0x1F;           ///< Volume control (24-bit)
 static constexpr uint8_t CMD_BAR_CODE = 0x19;         ///< Serial number / barcode query
 static constexpr uint8_t CMD_HARDWARE_QUERY = 0x22;   ///< Hardware ID query
 static constexpr uint8_t CMD_BYPASS = 0x2B;           ///< Bypass / Mute / LED control
+static constexpr uint8_t CMD_SESSION_PREAMBLE = 0x2D; ///< GLM app connect only; see the block below
 static constexpr uint8_t CMD_DSP = 0x10;              ///< DSP parameter update (PEQ, delay, level)
 static constexpr uint8_t CMD_PREPARE_CONFIG = 0x17;   ///< Prepare for a block of DSP settings
 static constexpr uint8_t CMD_SOFTWARE_QUERY = 0x39;   ///< Firmware version query
 static constexpr uint8_t CMD_WAKEUP = 0x3A;           ///< Wakeup / standby control (0x3A)
 static constexpr uint8_t CMD_BASS_MANAGE_XO = 0x3B;   ///< Bass management crossover frequency configuration
+static constexpr uint8_t CMD_SUB_LFE_XO = 0x3C;       ///< LFE crossover? See the block below
+static constexpr uint8_t CMD_INPUT_SYNC = 0x3D;       ///< Input-select sync; see the block below
+static constexpr uint8_t CMD_SUB_LFE_CHANNEL = 0x3E;  ///< LFE channel? See the block below
 static constexpr uint8_t CMD_SELECT_AUDIO_SOURCE = 0x40; ///< Audio source selection & AES3 channel assignment
+static constexpr uint8_t CMD_SUB_LFE_LEVEL = 0x42;    ///< LFE level? See the block below
 static constexpr uint8_t CMD_DISCOVERY = 0xFE;        ///< Monitor discovery ping
+
+// --- Opcodes GLM sends that this component does not -----------------------
+/// @name Observed but unsent opcodes
+///
+/// These are named so that a reader of a bus capture is not left staring at raw bytes. Each is
+/// emitted by an OEM GLM adapter, each has a payload that never varies across the five captures
+/// in captures/, and none is transmitted here. docs/glm-group-apply.md has the full argument and
+/// the frame-by-frame position of each within a group push.
+///
+///  - CMD_SIGNAL_GEN (0x05): the signal generator. GLM sends exactly one frame of it, per
+///    speaker, at the head of every group push: the 13-byte "stop generator / restore" payload
+///    04 00 00 00 FF FF EA 00 01 90 00 02 DA, identical in all 35 occurrences. **When a signal
+///    generator feature is added here, the group push must send this frame the same way**, so
+///    that a generator left running by an earlier operation cannot survive a group switch.
+///  - CMD_SESSION_PREAMBLE (0x2D): always FF 2D 00, and only when the GLM app connects, paired
+///    with a broadcast CMD_INPUT_SYNC. It is not part of a group push.
+///  - CMD_INPUT_SYNC (0x3D): always 00 00. In a full single-device configuration it sits
+///    immediately before CMD_SELECT_AUDIO_SOURCE, so it reads as an input-select preamble
+///    rather than a latch applied afterwards; in a group push GLM instead sweeps it across
+///    every speaker at the close.
+///  - CMD_SUB_LFE_XO / _CHANNEL / _LEVEL (0x3C, 0x3E, 0x42): always 00 00, and in 48 observed
+///    frames **only ever addressed to the subwoofer**. Their positions are fixed: 0x3C follows
+///    the crossover, 0x3E follows the subwoofer's second CMD_SELECT_AUDIO_SOURCE frame, and
+///    0x42 follows 0x3E. The names encode a **hypothesis, not a finding**: a .sam group node
+///    has exactly four subwoofer-only fields left unaccounted for once Phase(degrees) is mapped
+///    to DSP_SUB_DELAY -- LFE_+10, LFE_Channel, LFE_CrossoverFrequency(Hz) and LFE_Level -- and
+///    0x3C sits next to CMD_BASS_MANAGE_XO with the same 2-byte big-endian shape. The captured
+///    setup runs with LFE inactive, so every one of these frames is 00 00 and the correlation
+///    has no variance to test against; LFE_CrossoverFrequency(Hz) is 120 there, which would be
+///    00 78 rather than 00 00. Sending a hardcoded 00 00 would therefore be byte-correct for
+///    that setup and would silently disable LFE on one that uses it.
+///@}
 
 // --- Audio source parameters (CMD_SELECT_AUDIO_SOURCE) --------------------
 static constexpr uint8_t SOURCE_ANALOG = 0x01;        ///< Analog input
@@ -78,7 +116,9 @@ static constexpr uint8_t VOLUME_PAYLOAD_SILENCE[3] = {0x00, 0x00, 0x02};
 ///    groups its value tracked the setup file's Level_Sensitivity exactly, at -1.9258 dB,
 ///    -8.3783 dB and 0.0 dB, nowhere near that setup's global -20 dB volume limit.
 ///    Sub-command 0x09 is emitted by GLM on every device with a constant 0x000000 payload;
-///    its meaning is unknown and this component does not send it.
+///    its meaning is unknown and this component does not send it. It is not a stray: all 28
+///    occurrences across the captures follow a 0x00 frame immediately, one for one, so the
+///    pair travels together.
 ///  - 0x02 carries a 4-byte big-endian time-of-flight delay as a sample count **at 48 kHz on
 ///    every device class**, which resolves the 4x ambiguity the specification flags for
 ///    subwoofers. On a subwoofer the value is the AutoPhase result expressed as a delay:
@@ -93,6 +133,11 @@ static constexpr uint8_t DSP_SUB_PEQ = 0x0E;    ///< Parametric EQ band coeffici
 
 /// DSP_SUB_LEVEL sub-command selecting the per-device level compensation.
 static constexpr uint8_t DSP_LEVEL_COMPENSATION = 0x00;
+
+/// DSP_SUB_LEVEL sub-command GLM pairs 1:1 with DSP_LEVEL_COMPENSATION, payload always 0x000000.
+/// Named only so the pairing is visible; never sent, and deliberately not decoded, since its
+/// constant payload would read as -130 dB and mute the speaker.
+static constexpr uint8_t DSP_LEVEL_UNKNOWN_09 = 0x09;
 
 /// Timebase of a DSP_SUB_DELAY sample count, independent of the device's PEQ design rate.
 static constexpr uint32_t DSP_DELAY_RATE_HZ = 48000;
