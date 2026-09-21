@@ -1,3 +1,5 @@
+import logging
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
@@ -21,6 +23,10 @@ from esphome.const import (
     ENTITY_CATEGORY_CONFIG,
     CONF_DISABLED_BY_DEFAULT,
 )
+
+from . import sam_import
+
+_LOGGER = logging.getLogger(__name__)
 
 AUTO_LOAD = ["sensor", "binary_sensor", "button", "text_sensor", "switch", "number", "select", "light"]
 MULTI_CONF = True
@@ -66,6 +72,7 @@ CONF_STATUS_LED = "status_led"
 CONF_MODE = "mode"
 
 CONF_GROUPS = "groups"
+CONF_SAM_FILE = "sam_file"
 CONF_GROUP_SELECT = "group_select"
 CONF_DEFAULT_GROUP = "default_group"
 CONF_PEQ_DESIGN_RATE = "peq_design_rate"
@@ -503,6 +510,80 @@ GROUP_SCHEMA = cv.Schema(
 )
 
 
+def _import_sam_groups(config):
+    """Expand `sam_file:` into group presets, ahead of any written out in `groups:`.
+
+    Runs before _validate_hub and _validate_groups so that everything downstream -- the
+    group_modified sensor, the duplicate-name check, crossover inheritance, default_group,
+    group_select and the generated C++ table -- only ever sees plain groups and needs no
+    knowledge that a file was involved.
+
+    Imported groups come first, in the order the setup file lists them, because that order is
+    the Home Assistant select's option order and default_group falls to the first entry: a
+    hand-written extra like a mute-all preset belongs after the calibrated positions, not in
+    front of them.
+
+    This is a whole-config validator rather than a validator on the key because it needs the
+    `monitors:` block to know which devices are really yours. _CONFIG_SCHEMA has validated the
+    entire mapping by the time it runs, so that does not depend on the order the two keys are
+    written in.
+    """
+    path = config.get(CONF_SAM_FILE)
+    if path is None:
+        return config
+
+    # Mirrors _validate_groups: a monitor may be declared without a unique_id, which defaults
+    # to 0, names no device, and must not filter anything.
+    known = {m[CONF_UNIQUE_ID] for m in config.get(CONF_MONITORS, []) if m.get(CONF_UNIQUE_ID)}
+    if not known:
+        known = None
+        _LOGGER.warning(
+            "gensam: no monitors with a unique_id are configured, so every device in '%s' is "
+            "taken as yours. GLM setup files can retain a speaker that was removed, or one "
+            "that was never really there; list your monitors to have those skipped.",
+            path,
+        )
+
+    try:
+        imported = sam_import.load_groups(path, known)
+    except sam_import.SamError as err:
+        raise cv.Invalid(f"{path}: {err}", path=[CONF_SAM_FILE]) from err
+    except OSError as err:
+        raise cv.Invalid(f"Could not read '{path}': {err}", path=[CONF_SAM_FILE]) from err
+
+    if not imported:
+        raise cv.Invalid(
+            f"'{path}' produced no usable groups. Either it holds none, or none of its "
+            f"devices are among the configured monitors; the warnings above say which.",
+            path=[CONF_SAM_FILE],
+        )
+
+    # Validated through the same schema as a hand-written group, not trusted as-is: the level
+    # and delay bounds are what keep an uncalibrated setup file from reaching a speaker.
+    groups = []
+    for group in imported:
+        try:
+            groups.append(GROUP_SCHEMA(group))
+        except cv.Invalid as err:
+            where = "".join(
+                f"[{p}]" if isinstance(p, int) else f".{p}" for p in err.path
+            ).lstrip(".")
+            raise cv.Invalid(
+                f"'{path}' group '{group[CONF_NAME]}' cannot be used as it stands: "
+                f"{err.msg}{f' ({where})' if where else ''}. Convert the file with "
+                f"tools/sam2yaml.py and include the result if you need to correct it by hand.",
+                path=[CONF_SAM_FILE],
+            ) from err
+
+    groups.extend(config.get(CONF_GROUPS, []))
+    config[CONF_GROUPS] = groups
+    _LOGGER.info(
+        "gensam: imported %d group(s) from %s: %s",
+        len(imported), path, ", ".join(g[CONF_NAME] for g in imported),
+    )
+    return config
+
+
 def _validate_groups(config):
     """Cross-check the group table against the monitors it refers to."""
     groups = config.get(CONF_GROUPS)
@@ -613,6 +694,11 @@ _CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_STARTUP_VOLUME_DB, default=-30.0): cv.float_,
         cv.Optional(CONF_MONITORS): cv.ensure_list(MONITOR_SCHEMA),
         cv.Optional(CONF_GROUPS): cv.All(cv.ensure_list(GROUP_SCHEMA), cv.Length(min=1)),
+        # A GLM 5 setup file to read the groups from, converted while the configuration is
+        # validated. cv.file_ resolves it against the directory holding this YAML, expands a
+        # leading `~` and takes an absolute path as given, so it can point straight at GLM's
+        # own setup directory. See sam_import.py.
+        cv.Optional(CONF_SAM_FILE): cv.file_,
         # Which group to apply once discovery completes. Defaults to the first one: having
         # configured groups but applied none leaves the speakers in a state nothing here
         # chose, and the select entity reading "unknown". Set to 'none' to keep the older
@@ -653,7 +739,7 @@ _CONFIG_SCHEMA = cv.Schema(
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
-CONFIG_SCHEMA = cv.All(_CONFIG_SCHEMA, _validate_hub, _validate_groups)
+CONFIG_SCHEMA = cv.All(_CONFIG_SCHEMA, _import_sam_groups, _validate_hub, _validate_groups)
 
 
 def _cpp_float(value):

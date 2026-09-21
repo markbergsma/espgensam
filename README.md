@@ -9,7 +9,7 @@
 - **Native Home Assistant Integration**: Discovered automatically through the ESPHome Native API
 - **Standalone Autonomy**: Controls monitors locally with zero dependency on the GLM network adapter, the GLM software or the Home Assistant server status.
 - **Speaker Controls**: Direct volume, mute, power/standby, input select, and telemetry reporting.
-- **Group Presets**: Switch between named calibrations (GLM's "groups") from Home Assistant, each with its own room EQ, level, delay, crossover and input routing per speaker. Convert an existing GLM setup file with the included tool.
+- **Group Presets**: Switch between named calibrations (GLM's "groups") from Home Assistant, each with its own room EQ, level, delay, crossover and input routing per speaker. Read straight from your existing GLM 5 setup file.
 - **Direct 9-Bit RS485 Transceiver**: Uses ESP32 RMT (10 MHz pulse digitization) for RX and RMT pulse generation for TX to cleanly handle the 9-bit/2-stop-bit GLM bus.
 
 You may also want to take a look at [HLM, the Homebrew Loudspeaker Manager](https://github.com/robcazzaro/hlm), which is a similar project to control Genelec SAM monitors from a (STM32/ESP32) microcontroller. It already implements most of the protocol's functionality. We have started collaborating to better understand the underlying GLM protocol.
@@ -133,7 +133,9 @@ speakers take part, how each is fed, and the room calibration for each of them a
 position. Switching between groups from Home Assistant re-sends the whole DSP
 block to every speaker.
 
-Because a group carries twenty EQ bands per speaker, groups live in their own file:
+Most setups should get their groups from their existing GLM calibration, with
+[`sam_file:`](#4-importing-an-existing-glm-setup) below. Written out by hand instead, a group
+carries twenty EQ bands per speaker, so they live in their own file:
 
 ```yaml
 gensam:
@@ -168,8 +170,8 @@ than configure it.
 
 Filter order is the order the speaker's own filter slots run in, which differs by model: a
 two-way monitor takes two low shelves, two high shelves and then up to sixteen notches, while
-a subwoofer takes twenty notches and no shelves. The converter below gets this right; if you
-write a group by hand, follow the same order.
+a subwoofer takes twenty notches and no shelves. Importing gets this right; if you write a
+group by hand, follow the same order.
 
 Applying a group sets every speaker's Input select, Crossover, Level and Delay, so they always
 show what the speakers were last told. Changing one by hand takes effect immediately but does
@@ -177,10 +179,58 @@ not alter the group, so the next group push - switching group, waking from stand
 rediscovery - puts the group's own values back. While the two disagree, the hub's **Group
 Modified** diagnostic sensor is on.
 
-### 4. Converting an existing GLM setup
+### 4. Importing an existing GLM setup (`gensam: sam_file:`)
 
-`tools/sam2yaml.py` reads a GLM 5 `.sam` setup file and writes the groups file, so an
+Point the hub at a GLM 5 `.sam` setup file and every group in it becomes a group preset, so an
 existing AutoCal calibration does not have to be retyped:
+
+```yaml
+gensam:
+  monitors:
+    - unique_id: 1842915
+      # ...
+
+  sam_file: "My Setup.sam"
+
+  default_group: "Main Listening Position"
+  group_select:
+    name: "Group Preset"
+```
+
+The file is read while ESPHome validates the configuration, which happens on every
+`esphome config`, `compile` and `run`. Re-run calibration, save in GLM, rebuild: there is nothing
+to regenerate and no converted file to keep in step. `esphome config` prints the groups in
+full, which is how you see what was imported.
+
+Presets appear in the order the setup file lists them, before any you also wrote in `groups:`.
+That order is what the **Group Preset** select offers and what `default_group` falls back to,
+so a hand-written extra — a mute-all, a late-night trim — lands after the calibrated positions.
+
+Only devices named in your `monitors:` block are configured. The rest are skipped with a
+warning: a GLM setup file can retain a speaker that is no longer connected, or one that was
+never really there. With no `monitors:` at all, every device in the file is taken as yours.
+
+Anything the import cannot carry across is reported rather than dropped quietly. Pay attention
+to those warnings: they are the difference between the group sounding as GLM calibrated it,
+and sounding off.
+
+#### Where the file lives
+
+The path is relative to the directory holding your ESPHome YAML, but `~` is expanded and an
+absolute path is taken as given, so it can point straight at GLM's own setup directory:
+
+```yaml
+  sam_file: "glm/My Setup.sam"
+  sam_file: "~/Documents/Genelec/GLM5/Setup Files/My Setup.sam"
+```
+
+Building from the ESPHome dashboard or the Home Assistant add-on needs the `.sam` copied into
+the configuration directory instead. GLM setup names usually contain spaces, so quote them.
+
+#### If you would rather have the YAML
+
+`tools/sam2yaml.py` runs the same conversion and writes the groups file out, which is the way
+to inspect it, diff two GLM exports, or correct a file the component will not accept:
 
 ```bash
 python3 tools/sam2yaml.py "My Setup.sam" \
@@ -188,16 +238,9 @@ python3 tools/sam2yaml.py "My Setup.sam" \
     -o gensam_groups.yaml
 ```
 
-`--monitors` lists the `unique_id`s from your `monitors:` block. Devices outside that list are
-skipped with a warning — a GLM setup file can retain a speaker that is no longer connected, or
-one that was never really there.
-
-Anything the tool cannot carry across is reported on stderr rather than dropped quietly. Read
-those warnings: they are the difference between the group sounding as GLM calibrated it and
-sounding close.
-
-The tool needs PyYAML. If your system Python lacks it, `pip install pyyaml`, or run it with
-ESPHome's own interpreter.
+`--monitors` does by hand what `monitors:` does automatically. Include the result with
+`groups: !include gensam_groups.yaml` and leave `sam_file:` out. The tool needs PyYAML; if your
+system Python lacks it, `pip install pyyaml`, or run it with ESPHome's own interpreter.
 
 ---
 
