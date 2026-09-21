@@ -27,11 +27,13 @@
 /// 3. Bidirectional Synchronization & Volatile Persistence:
 ///    - When adjusted via Home Assistant, the entity dispatches the unicast frame to the
 ///      monitor, marks the binding configured, and publishes state.
-///    - Monitor crossover settings are stored in volatile RAM bindings and re-transmitted
-///      automatically during the bus configuration phase (CONFIGURING_DEVICES) whenever
-///      monitors are woken up from standby or rediscovered.
+///    - Crossover, level and delay settings are stored in volatile RAM bindings and
+///      re-transmitted automatically during the bus configuration phase (CONFIGURING_DEVICES)
+///      whenever monitors are woken up from standby or rediscovered.
 ///    - In addition, passive bus sniffing detects GLM-initiated changes on the RS-485 bus,
-///      ensuring Home Assistant reflects adjustments made in official Genelec software.
+///      ensuring Home Assistant reflects adjustments made in official Genelec software. That
+///      is not only cosmetic: because the re-transmission above would otherwise reassert the
+///      stale value, following a change is what stops it being silently undone.
 ///
 /// 4. Per-Device Level Trim (GenSAMLevelNumber):
 ///    The gain offset AutoCal derives to match one speaker's output to the rest of a group,

@@ -54,6 +54,8 @@ using esphome::gensam::delay_samples_to_ms;
 using esphome::gensam::Frame;
 using esphome::gensam::make_delay;
 using esphome::gensam::make_level;
+using esphome::gensam::parse_dsp_delay;
+using esphome::gensam::parse_dsp_level;
 using esphome::gensam::Uart9BitChar;
 
 namespace {
@@ -298,6 +300,84 @@ void test_level_floor_keeps_the_speaker_audible() {
   check(monotonic, "the offered range encodes monotonically");
 }
 
+// --- Decoding what GLM puts on the bus ---------------------------------------------------
+
+void test_level_decode_matches_the_captures() {
+  // The same three payloads the builders are checked against above, read back.
+  struct Case {
+    std::vector<uint8_t> payload;
+    float expect;
+  };
+  const Case cases[] = {
+      {{0x01, 0x00, 0x66, 0x8B, 0xD9}, -1.9258f},
+      {{0x01, 0x00, 0x30, 0xC9, 0x2A}, -8.37833f},
+      {{0x01, 0x00, 0x7F, 0xFF, 0xFF}, 0.0f},
+  };
+  for (const Case &c : cases) {
+    float db = 99.0f;
+    char label[96];
+    std::snprintf(label, sizeof(label), "captured level payload decodes to %.5g dB", c.expect);
+    check(parse_dsp_level(c.payload, db) && std::fabs(db - c.expect) < 0.001f, label);
+  }
+
+  // Round trip against the builder, which is the property that keeps the two in step.
+  for (float db : {0.0f, -1.9258f, -8.37833f, -20.0f, -59.9f}) {
+    float back = 99.0f;
+    char label[96];
+    std::snprintf(label, sizeof(label), "make_level(%.5g dB) decodes back to itself", db);
+    check(parse_dsp_level(make_level(0x02, db).payload, back) && std::fabs(back - db) < 0.001f,
+          label);
+  }
+}
+
+void test_level_decode_rejects_the_unknown_sub_command() {
+  // GLM emits this on every device immediately after the real level, with a constantly zero
+  // payload. Decoded as a level it is 0x000000 = -130 dB = digital silence, so a decoder that
+  // matched only the sub-command would store a mute for every speaker GLM touched.
+  float db = 99.0f;
+  check(!parse_dsp_level({0x01, 0x09, 0x00, 0x00, 0x00}, db),
+        "the constant `01 09 00 00 00` frame is not decoded as a level");
+  check(db == 99.0f, "a rejected level frame leaves the output untouched");
+
+  // Everything else that shares the 0x10 opcode or is simply malformed.
+  check(!parse_dsp_level({0x02, 0x00, 0x00, 0x01, 0x21}, db), "a delay payload is not a level");
+  check(!parse_dsp_level({0x0E, 0x00, 0x00, 0x00, 0x80}, db), "a PEQ payload is not a level");
+  check(!parse_dsp_level({}, db), "an empty payload is not a level");
+  check(!parse_dsp_level({0x01, 0x00, 0x7F}, db), "a truncated level payload is rejected");
+  check(!parse_dsp_level({0x01, 0x00, 0x7F, 0xFF, 0xFF, 0x00}, db),
+        "an over-long level payload is rejected");
+
+  // The floor is not the decoder's job, but callers rely on seeing the real value to decide.
+  check(parse_dsp_level({0x01, 0x00, 0x00, 0x00, 0x00}, db) && db <= -130.0f,
+        "a genuine zero level decodes as digital silence for the caller to reject");
+}
+
+void test_delay_decode() {
+  uint32_t samples = 99;
+  check(parse_dsp_delay({0x02, 0x00, 0x00, 0x01, 0x21}, samples) && samples == 289,
+        "captured delay payload decodes to 289 samples");
+  check(parse_dsp_delay({0x02, 0x00, 0x00, 0x01, 0x0B}, samples) && samples == 267,
+        "captured delay payload decodes to 267 samples");
+  check(parse_dsp_delay({0x02, 0x00, 0x00, 0x00, 0x43}, samples) && samples == 67,
+        "captured delay payload decodes to 67 samples");
+  check(parse_dsp_delay({0x02, 0x00, 0x00, 0x00, 0x00}, samples) && samples == 0,
+        "captured zero delay decodes to 0 samples");
+
+  for (uint32_t s : {0u, 67u, 289u, 9216u, 0x12345678u}) {
+    char label[96];
+    std::snprintf(label, sizeof(label), "make_delay(%u) decodes back to itself", s);
+    uint32_t back = 99;
+    check(parse_dsp_delay(make_delay(0x02, s).payload, back) && back == s, label);
+  }
+
+  samples = 99;
+  check(!parse_dsp_delay({0x01, 0x00, 0x7F, 0xFF, 0xFF}, samples), "a level payload is not a delay");
+  check(!parse_dsp_delay({0x0E, 0x00, 0x00, 0x00, 0x80}, samples), "a PEQ payload is not a delay");
+  check(!parse_dsp_delay({}, samples), "an empty payload is not a delay");
+  check(!parse_dsp_delay({0x02, 0x00, 0x01}, samples), "a truncated delay payload is rejected");
+  check(samples == 99, "a rejected delay frame leaves the output untouched");
+}
+
 }  // namespace
 
 int main() {
@@ -312,6 +392,9 @@ int main() {
   test_delay_clamping();
   test_conversions_are_projections();
   test_level_floor_keeps_the_speaker_audible();
+  test_level_decode_matches_the_captures();
+  test_level_decode_rejects_the_unknown_sub_command();
+  test_delay_decode();
 
   if (failures != 0) {
     std::printf("\n%d check(s) FAILED\n", failures);

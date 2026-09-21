@@ -124,5 +124,27 @@ Frame make_audio_source(uint8_t addr, uint8_t input_idx, uint8_t source, uint8_t
                {input_idx, SOURCE_ANALOG, (input_idx == 0x00) ? uint8_t{0x02} : uint8_t{0x01}, 0x00});
 }
 
+// --- CMD_DSP payload decoding ---
+
+bool parse_dsp_level(const std::vector<uint8_t> &payload, float &db) {
+  // Exact length, not a minimum: a longer payload carrying this sub-command is a record this
+  // component has not seen and does not understand, not a level with something appended.
+  if (payload.size() != 5 || payload[0] != DSP_SUB_LEVEL ||
+      payload[1] != DSP_LEVEL_COMPENSATION) {
+    return false;
+  }
+  db = volume_int24_to_db(decode_int24(&payload[2]));
+  return true;
+}
+
+bool parse_dsp_delay(const std::vector<uint8_t> &payload, uint32_t &samples) {
+  if (payload.size() != 5 || payload[0] != DSP_SUB_DELAY) {
+    return false;
+  }
+  samples = (static_cast<uint32_t>(payload[1]) << 24) | (static_cast<uint32_t>(payload[2]) << 16) |
+            (static_cast<uint32_t>(payload[3]) << 8) | static_cast<uint32_t>(payload[4]);
+  return true;
+}
+
 }  // namespace gensam
 }  // namespace esphome

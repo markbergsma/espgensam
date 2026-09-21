@@ -3,6 +3,7 @@
 /// See hub.h for the snooping rationale and complete API documentation.
 
 #include "hub.h"
+#include "commands.h"
 
 #include "esphome/core/log.h"
 #include "esphome/components/select/select.h"
@@ -19,6 +20,7 @@ void GenSAMHub::snoop_frame_(const Frame &frame) {
   this->snoop_mute_(frame);
   this->snoop_crossover_(frame);
   this->snoop_audio_source_(frame);
+  this->snoop_dsp_(frame);
   this->snoop_host_reply_(frame);
 }
 
@@ -177,14 +179,9 @@ void GenSAMHub::snoop_audio_source_(const Frame &frame) {
     return;
   }
 
-  GenSAMMonitor *mon = registry_.find(frame.address);
+  GenSAMMonitor *mon = this->resolve_snooped_monitor_(frame.address);
   if (mon == nullptr) {
-    if (frame.address < MONITOR_START_ADDR || frame.address >= 0x80) {
-      return;
-    }
-    mon = &registry_.get_or_create(frame.address);
-    this->mark_monitor_seen_(*mon);
-    registry_.bind_if_matched(*mon);
+    return;
   }
 
   const bool changed = mon->binding == nullptr || !mon->binding->input_configured ||
@@ -200,6 +197,93 @@ void GenSAMHub::snoop_audio_source_(const Frame &frame) {
   }
 }
 
+
+/// @brief Resolve the monitor a snooped unicast frame is addressed to, creating it if the
+///        address is a plausible monitor this component has not met yet.
+/// @return The monitor, or nullptr if the address is not one a monitor can hold.
+GenSAMMonitor *GenSAMHub::resolve_snooped_monitor_(uint8_t address) {
+  GenSAMMonitor *mon = registry_.find(address);
+  if (mon != nullptr) {
+    return mon;
+  }
+  if (address < MONITOR_START_ADDR || address >= 0x80) {
+    return nullptr;
+  }
+  mon = &registry_.get_or_create(address);
+  this->mark_monitor_seen_(*mon);
+  registry_.bind_if_matched(*mon);
+  return mon;
+}
+
+void GenSAMHub::snoop_dsp_(const Frame &frame) {
+  if (frame.command != CMD_DSP) {
+    return;
+  }
+
+  float db = 0.0f;
+  uint32_t samples = 0;
+  const bool is_level = parse_dsp_level(frame.payload, db);
+  const bool is_delay = !is_level && parse_dsp_delay(frame.payload, samples);
+  if (!is_level && !is_delay) {
+    // Includes the PEQ sub-command and GLM's constant `01 09 00 00 00`. PEQ coefficients are
+    // not tracked: nothing here holds a per-monitor filter set to compare them against.
+    return;
+  }
+
+  // Unlike the crossover, these have only ever been seen as unicast. A multicast or broadcast
+  // DSP write would be a record this component has not characterised, so it is ignored rather
+  // than fanned out to every monitor on a guess.
+  GenSAMMonitor *mon = this->resolve_snooped_monitor_(frame.address);
+  if (mon == nullptr) {
+    return;
+  }
+  GenSAMMonitorBinding *b = mon->binding;
+
+  if (is_level) {
+    // A value below the range this component offers is one it cannot reassert. Rather than
+    // clamp - which would quietly disagree with the speaker - stop asserting the level at
+    // all, exactly as snoop_audio_source_() does for a source it cannot name. Otherwise
+    // configure_monitor_() would undo the change at the next standby cycle.
+    if (db < MIN_LEVEL_DB) {
+      if (b != nullptr && b->level_configured) {
+        b->level_configured = false;
+        ESP_LOGW(TAG, "[Sniffed] Monitor 0x%02X level set to %.1f dB, below the %.0f dB this "
+                      "component asserts; no longer asserting its level",
+                 frame.address, db, MIN_LEVEL_DB);
+      }
+      return;
+    }
+
+    // Compare as encoded, which is what "the same setting" means on the wire: two decibel
+    // values that round to one level word are the same trim.
+    const bool changed = b == nullptr || !b->level_configured ||
+                         volume_db_to_int24(b->level_db) != volume_db_to_int24(db);
+    registry_.set_level(*mon, db);
+    if (changed) {
+      this->set_group_modified(true);
+      ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X level trim set to %.1f dB", frame.address, db);
+    }
+    return;
+  }
+
+  if (samples > MAX_DELAY_SAMPLES) {
+    if (b != nullptr && b->delay_configured) {
+      b->delay_configured = false;
+      ESP_LOGW(TAG, "[Sniffed] Monitor 0x%02X delay set to %u samples, past the %u this "
+                    "component asserts; no longer asserting its delay",
+               frame.address, (unsigned) samples, (unsigned) MAX_DELAY_SAMPLES);
+    }
+    return;
+  }
+
+  const bool changed = b == nullptr || !b->delay_configured || b->delay_samples != samples;
+  registry_.set_delay(*mon, samples);
+  if (changed) {
+    this->set_group_modified(true);
+    ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X delay set to %u samples (%.2f ms)", frame.address,
+             (unsigned) samples, delay_samples_to_ms(samples));
+  }
+}
 
 void GenSAMHub::snoop_host_reply_(const Frame &frame) {
   if (frame.address != HOST_ADDRESS || frame.command != CMD_REPORT_STATUS || last_queried_addr_ == 0) {

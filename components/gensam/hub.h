@@ -624,6 +624,14 @@ class GenSAMHub : public Component {
   /// @brief Track audio source selection and AES3 sub-channel assignment.
   void snoop_audio_source_(const Frame &frame);
 
+  /// @brief Follow a CMD_DSP level or delay write made by an external GLM controller.
+  void snoop_dsp_(const Frame &frame);
+
+  /// @brief Resolve the monitor a snooped unicast frame addresses, creating it if new.
+  /// @param address The frame's address byte.
+  /// @return The monitor, or nullptr if @p address cannot belong to one.
+  GenSAMMonitor *resolve_snooped_monitor_(uint8_t address);
+
   /// @brief Attribute a monitor's reply to the host to whichever query was last observed.
   void snoop_host_reply_(const Frame &frame);
 

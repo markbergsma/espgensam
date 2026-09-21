@@ -158,5 +158,35 @@ Frame make_level(uint8_t addr, float db);
 /// @return CMD_DSP frame carrying [0x02, samples(4, big-endian)].
 Frame make_delay(uint8_t addr, uint32_t samples);
 
+// --- CMD_DSP payload decoding -------------------------------------------------------------
+//
+// The inverses of make_level() and make_delay(), used by the snoop decoder to follow changes
+// an external GLM controller makes.  They live beside the builders deliberately: the two
+// directions share one payload layout, and separating them is how a correction gets applied
+// to the encoder and missed in the decoder.
+//
+// Both check structure only - length, sub-command, selector - and decode faithfully.  Whether
+// a decoded value is one this component is willing to assert is a policy question, answered
+// by the caller; see snoop_dsp_().
+
+/// @brief Decode a per-device level compensation payload (CMD_DSP, DSP_SUB_LEVEL 0x01).
+///
+/// The selector check is not optional.  GLM emits `10 01 09 00 00 00` on every device
+/// alongside the real level - a sub-command whose meaning is unknown and whose payload is
+/// constantly zero (see const.h).  Decoding that as a level yields 0x000000, which is
+/// -130 dB, which is digital silence: a decoder that matched the sub-command alone would
+/// store a mute for every speaker GLM touched.
+///
+/// @param payload The frame payload.
+/// @param[out] db Decoded level in decibels; may be as low as GENELEC_VOLUME_MIN_DB.
+/// @return True if @p payload is a well-formed per-device level compensation record.
+bool parse_dsp_level(const std::vector<uint8_t> &payload, float &db);
+
+/// @brief Decode a time-of-flight delay payload (CMD_DSP, DSP_SUB_DELAY 0x02).
+/// @param payload The frame payload.
+/// @param[out] samples Decoded delay in samples at DSP_DELAY_RATE_HZ; not range-checked.
+/// @return True if @p payload is a well-formed delay record.
+bool parse_dsp_delay(const std::vector<uint8_t> &payload, uint32_t &samples);
+
 }  // namespace gensam
 }  // namespace esphome
