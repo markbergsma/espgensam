@@ -41,6 +41,8 @@ Everything else — monitors, entities, tunables — lives in `packages/gensam.y
 
 While this hardware does work fine in practice, it has proven not to be ideal hardware for this use case due to the auto-direction circuit, and alternative hardware is currently under investigation.
 
+> **This board needs a terminator somewhere on the bus.** The Atomic RS485 Base has no termination resistor of its own (M5Stack's docs tell you to add one), and with nothing else attached it does not communicate at all — not degraded, dead. A GLM adapter's TERMINATOR port is enough, with the adapter otherwise idle. Running standalone, fit a 120 Ω across `A`/`B`.
+
 ### 2. Waveshare ESP32-S3-RS485-CAN
 - **MCU**: ESP32-S3 dual-core
 - **RS485 TX**: `GPIO17`

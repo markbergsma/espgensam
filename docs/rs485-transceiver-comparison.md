@@ -1,4 +1,4 @@
-# RS-485 bus measurements: Waveshare ESP32-S3-RS485-CAN
+# RS-485 bus measurements
 
 Controlled measurements on a live three-speaker GLM bus, 2026-09-22.
 
@@ -11,12 +11,15 @@ For why the code is shaped the way it is, see [`rs485.h`](../components/gensam/r
 
 ## Setup
 
+Sections 1 and 2 are the Waveshare; section 3 compares it against the M5Stack AtomS3 Lite +
+Atomic RS485 Base and states that run's configuration separately.
+
 | | |
 |---|---|
 | Board | Waveshare ESP32-S3-RS485-CAN — SP3485EN, `/RE` tied to `DE` on GPIO21, galvanically isolated |
 | Pins | TX GPIO17, RX GPIO18, direction GPIO21 |
 | Bus | Three speakers (7350A + 2× 8330A), 288,000 baud |
-| On the bus | **Waveshare only.** No GLM adapter, no AtomS3, no oscilloscope. |
+| On the bus | **One controller only.** No GLM adapter, no second board, no oscilloscope. |
 | Ground | RJ45 pin 8 unconnected — the board's RS-485 terminal is A/B only |
 | Mode | Bus master (`listen_only: false`), `poll_interval: 1s` |
 | Firmware | `tx_echoes_rx: false`, direction line released in the RMT TX-done ISR |
@@ -65,6 +68,46 @@ monitor's start bit arrives before a valid mark has been established and its fal
 real edge. The decoder locks one bit late and the address decodes as `0xC0` — exactly the "too
 shallow, not too narrow" mechanism described in `docs/crc-error-investigation.md` (branch
 `crc-investigation`), and the reason the fault is a *turnaround* property.
+
+### The two boards fail differently when unterminated
+
+Observed, not captured:
+
+| Board | Unterminated behaviour |
+|---|---|
+| Waveshare | degraded but functional — 71% aliases, still zero CRC errors, every frame delivered |
+| M5Stack Atomic RS485 Base | **no communication at all** |
+
+Restoring a terminator revives the Atomic base; a GLM adapter's TERMINATOR port is sufficient,
+with the adapter otherwise idle.
+
+Counters from the Atomic base unterminated, master mode, over several minutes including a manual
+rediscovery:
+
+```
+Stats: 24 chars (24 addr, 0 data), 24 bursts | rx: 0 start rej, 0 stop2, 0 framing errs
+     | frames: 0 ok, 18 invalid, 0 crc errs, 24 C0 alias [Monitors: 0]
+```
+
+Every character received is address-marked and every one is a `C0` alias. `C0'` is specifically a
+mangled `0x01'` (see frame.cpp), and only monitors address the host — so **the monitors are
+replying**, and our transmitted queries are reaching them intact. What fails is reception: the
+first character of each reply arrives mangled and **not one subsequent character ever decodes**
+(`0 data` across the whole session). `start rej`, `framing` and `stop2` are all zero, so this is
+not noise; the characters are well formed.
+
+It is the same lost-start-edge mechanism as the unterminated Waveshare, but qualitatively worse.
+There, 71% of frames needed the fixup yet the remainder of each frame decoded and every frame was
+delivered. Here the reply dies after its first character.
+
+**Why the severity differs is not established.** Both boards appear to carry 4.7 kΩ fail-safe
+bias, so a missing bias network does not explain it, and the monitors' replies show our
+transmissions are fine. Candidates, none tested — differences in receiver threshold or hysteresis,
+in bias topology, or in true fail-safe (open-line) behaviour between the two front ends.
+
+Not pursued further: the operating rule below resolves it in practice. The consequence that does
+matter is that **any board comparison must give both boards the same termination**, or it
+measures the network rather than the board.
 
 ### Operating rule
 
@@ -117,12 +160,61 @@ fragments.
 task-context variant necessarily includes the wait and the 5 µs delay in the measured interval
 (1,356 events vs 420). The comparison rests on `crc`, `framing` and `bursts`.
 
+## 3. Board comparison
+
+The question the work started from. Both boards as bus master, a single 120 Ω terminator at the
+controller end, no GLM adapter and no other controller on the bus, one board at a time.
+
+| Label | chars | frames | bursts | framing | stop2 | crc | invalid | `C0` | `start rej` |
+|---|---|---|---|---|---|---|---|---|---|
+| AtomS3 + Atomic RS485 Base | 76,240 | 4,014 | 11,420 | 557 | 44 | **64** | 83 | 117 | 0 |
+| Waveshare ESP32-S3-RS485-CAN | 100,793 | 4,257 | 4,257 | **0** | **0** | **0** | **0** | 37 | 27 |
+
+As rates:
+
+| | AtomS3 + Base | Waveshare |
+|---|---|---|
+| `crc errs` / frames | 1.594% | **0%** |
+| `framing errs` / chars | 0.731% | **0%** |
+| `C0 alias` / frames | 2.915% | 0.869% |
+| `invalid` / frames | 2.068% | **0%** |
+| bursts : frames | **2.84 : 1** | **1.00 : 1** |
+
+64 frames lost outright against none; at the AtomS3's rate, zero CRC errors in 4,257 frames has
+probability of order 1e-30. The burst:frame ratio reproduces the fragmentation seen in every
+earlier AtomS3 capture.
+
+Note the AtomS3 also reproduces the original `crc-investigation` finding: that baseline measured
+3.081% CRC on a different day in a session later discarded as confounded, and this controlled run
+lands in the same family. The fault is real and repeatable.
+
+### Configuration
+
+| | AtomS3 + Atomic RS485 Base | Waveshare |
+|---|---|---|
+| Termination | external 120 Ω across A/B | onboard jumper fitted |
+| Bus GND | connected | none — the terminal block has no ground pin |
+| Direction control | auto-direction, no GPIO | GPIO21, released in the TX-done ISR |
+| Raw log | `run-20260922-230742-atoms3-...` | `run-20260922-210520-term-in-...` |
+
+Grounding necessarily differs: one board is non-isolated and needs its reference, the other is
+isolated and exposes no ground terminal. Each is wired the only way it can be.
+
+### Caveats
+
+- **The AtomS3's error rate is not stationary.** Its first ~1,500 frames tracked 2.96% CRC and the
+  remaining ~2,500 ran at 0.79%, while framing errors held near 0.8% throughout. The pooled figure
+  is what the table reports, but the board is less consistent than a single rate suggests.
+- **`slow rel` cannot be compared between these boards.** It is only computed when a direction pin
+  is asserted, so it is structurally zero on the AtomS3 rather than measured.
+- Part of the Waveshare's margin is the ISR direction release, independently worth 28 CRC errors
+  per 4,000 frames (§2). A board without a direction line cannot benefit from it. That is the
+  mechanism, not a confound.
+
 ## Not yet measured
 
-- **Whether the `Rs485Profile` refactor is behaviour-neutral on the M5Stack AtomS3.** Needs a
-  before/after pair on that board under a controlled, single-terminator bus.
-- **The AtomS3 against the Waveshare**, both as bus master with one terminator. This is the
-  comparison that motivated the work and it has not been made under controlled conditions.
+- **Whether the `Rs485Profile` refactor is behaviour-neutral on the AtomS3.** Needs a before/after
+  pair on that board, terminated. §3 measures the board, not the refactor.
 - **Double-ended termination**, i.e. one terminator at the controller and one at the last speaker.
 - **A ground reference.** The board's terminal block has no ground pin; the internal header is the
   only access. Not needed for correct operation in this setup.
