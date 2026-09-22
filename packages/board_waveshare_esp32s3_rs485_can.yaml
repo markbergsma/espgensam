@@ -1,0 +1,44 @@
+# Waveshare ESP32-S3-RS485-CAN — HARDWARE ONLY.
+#
+# See AGENTS.md, "The board seam contract", for what may and may not go in this file.
+#
+# RS-485: SP3485EN (U7) behind a 6-channel digital isolator (U9) fed from a B0505LS-1W isolated
+# DC-DC. U7's /RE (pin 2) and DE (pin 3) share one net, RS485_EN: asserting it turns the driver on
+# AND the receiver off. Two things follow, both handled in components/gensam/rs485.h:
+#   - Nothing loops back while we transmit, so the echo skip must not be armed (`tx_echoes_rx`).
+#   - Every microsecond the line stays asserted past the last stop bit is a microsecond the
+#     receiver is deaf, landing on a reply that arrives 5-10 us later. Release happens in the RMT
+#     TX-done ISR for exactly this reason.
+#
+# Wiring: the RS-485 terminal block is A/B only -- there is no ground terminal, so RJ45 pin 8 is
+# left unconnected. Verified working that way. The fail-safe bias pair ties A to the isolated 3V3
+# rail and B to the isolated ground, so the isolated side self-references to the bus through 4.7k
+# and never floats. A defined reference is only reachable via the internal pin header, and has not
+# proved necessary.
+#
+# Two hardware caveats worth knowing before reading any measurement off this board:
+#   - Waveshare's documentation recommends <=115200 baud because of the isolation. GLM runs at
+#     288000. Verify passively (listen_only) before trusting active-mode results.
+#   - The 4.7k fail-safe bias against the onboard 120R termination gives roughly 42 mV of idle
+#     differential, inside the SP3485's +/-200 mV indeterminate band, and about half that if the
+#     GLM chain is already terminated at its far end.
+#
+# No addressable RGB LED and no user button: the onboard LEDs are power and bus activity only, so
+# this package declares no `light:` and no `status_led:`. Bus state stays visible through the
+# Bus Status sensor declared in packages/gensam.yaml. GPIO1/GPIO2 are free on the 2.0 mm header.
+#
+# CAN (GPIO15 TX / GPIO16 RX) is unused by this project and deliberately left undeclared.
+
+esp32:
+  variant: esp32s3
+  framework:
+    type: esp-idf
+
+gensam:
+  id: gensam_hub
+  tx_pin: GPIO17
+  rx_pin: GPIO18
+  de_pin: GPIO21
+  # Derived from de_pin anyway; stated because it is the single most destructive thing to get
+  # wrong on this board. Armed wrongly, the skip fast-forwards past the start of every reply.
+  tx_echoes_rx: false

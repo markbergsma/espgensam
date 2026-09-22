@@ -1,0 +1,57 @@
+# M5Stack AtomS3 Lite + Atomic RS485 Base — HARDWARE ONLY.
+#
+# This package declares peripherals and the transceiver's pins, and nothing else: no monitors, no
+# volume bounds, no Home Assistant entities beyond the ones that name a pin on this board. It is
+# the seam for supporting other controllers — a different board gets a different file here and
+# packages/gensam.yaml is untouched. See AGENTS.md, "The board seam contract".
+#
+# RS-485: Atomic RS485 Base, an auto-direction module. There is no direction GPIO; the module
+# senses TX transitions and asserts DE itself, which is why every frame must go out as one
+# uninterrupted RMT pulse train (see AGENTS.md) and why our own transmission loops back into RX.
+# `tx_echoes_rx` therefore defaults to true here, derived from the absence of a de_pin.
+#
+# Known limitation: the auto-direction circuit and its passive-pull receive front end are the
+# suspected cause of the ~3% master-mode CRC loss and the 0xC0 address alias. See
+# components/gensam/frame.cpp and docs/.
+
+esp32:
+  variant: esp32s3
+  framework:
+    type: esp-idf
+
+# Onboard WS2812 RGB LED (GPIO35). Consumes a third RMT channel alongside the two the bus uses.
+light:
+  - platform: esp32_rmt_led_strip
+    id: atom_led
+    name: "Status LED"
+    pin: GPIO35
+    num_leds: 1
+    chipset: WS2812
+    channel_colors: GRB
+    rmt_symbols: 96
+
+gensam:
+  id: gensam_hub
+  tx_pin: GPIO6
+  rx_pin: GPIO5
+
+  status_led:
+    light: atom_led
+    mode: bus_status
+    brightness: 50%
+
+# Physical button on the AtomS3 Lite (GPIO41, active-low) triggers monitor rediscovery.
+# The button *entity* is board-independent and lives in packages/gensam.yaml; only this physical
+# GPIO binding belongs to the board.
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO41
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "Rediscover Button"
+    on_press:
+      then:
+        - lambda: id(gensam_hub).rediscover_monitors();

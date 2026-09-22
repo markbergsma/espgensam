@@ -1,0 +1,53 @@
+# Shared espgensam configuration — BOARD-INDEPENDENT.
+#
+# Everything here holds regardless of which controller the firmware runs on. Nothing in this file
+# may name a GPIO: pins belong to packages/board_*.yaml. See AGENTS.md, "The board seam contract".
+#
+# Tunables are driven by substitutions so a device config can override them without restating the
+# block.
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [gensam]
+
+gensam:
+  id: gensam_hub
+  rx_buffer_size: 512
+  listen_only: ${listen_only}
+  glm_inactivity_cooldown: 15s
+  poll_interval: 1s
+  telemetry_averaging_period: 60s
+  min_volume_db: ${min_volume_db}
+  max_volume_db: ${max_volume_db}
+  startup_volume_db: ${startup_volume_db}
+
+  # Declared explicitly rather than left to the status_led validator to create: a board without an
+  # RGB LED has no status_led, and espgensam_dial depends on this sensor existing.
+  bus_status:
+    name: "Bus Status"
+
+  rediscover_button:
+    name: "Rediscover Monitors"
+
+  volume_db:
+    name: "Volume (dB)"
+
+  monitors:
+    - serial_number: "7350APM88123456"
+      unique_id: 1842915
+      name: "Subwoofer"
+      device_id: dev_subwoofer
+    - serial_number: "8330AP99234567"
+      unique_id: 1654321
+      name: "Left Monitor"
+      device_id: dev_left_monitor
+    - serial_number: "8330AP77345678"
+      unique_id: 1987654
+      name: "Right Monitor"
+      device_id: dev_right_monitor
+
+media_player:
+  - platform: gensam
+    name: "Genelec SAM System"

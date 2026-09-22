@@ -1,6 +1,17 @@
+# espgensam — device identity, network and tunables.
+#
+# Hardware lives in packages/board_*.yaml, everything board-independent in packages/gensam.yaml.
+# To target a different controller, change the one `board:` line below; nothing else moves.
+# See README.md for the supported boards and their wiring.
+
 substitutions:
   name: "espgensam"
   friendly_name: "Genelec SAM Controller"
+
+  listen_only: "false"
+  min_volume_db: "-80.0"
+  max_volume_db: "-30.0"
+  startup_volume_db: "-50.0"
 
 esphome:
   name: "${name}"
@@ -13,16 +24,12 @@ esphome:
     - id: dev_right_monitor
       name: "Right Monitor"
 
-esp32:
-  variant: esp32s3
-  framework:
-    type: esp-idf
+packages:
+  # --- Board selection: exactly one of these ---
+  board: !include packages/board_m5stack_atoms3_rs485_base.yaml
+  # board: !include packages/board_waveshare_esp32s3_rs485_can.yaml
 
-external_components:
-  - source:
-      type: local
-      path: components
-    components: [gensam]
+  gensam: !include packages/gensam.yaml
 
 wifi:
   ssid: !secret wifi_ssid
@@ -33,6 +40,7 @@ wifi:
 
 captive_portal:
 
+# DEBUG is required for the 15 s `Stats:` line that transceiver comparisons are read from.
 logger:
   level: DEBUG
 
@@ -42,75 +50,3 @@ api:
 
 ota:
   - platform: esphome
-
-# Onboard WS2812 RGB LED (M5Stack AtomS3 Lite, GPIO35)
-light:
-  - platform: esp32_rmt_led_strip
-    id: atom_led
-    name: "Status LED"
-    pin: GPIO35
-    num_leds: 1
-    chipset: WS2812
-    channel_colors: GRB
-    rmt_symbols: 96
-
-# Genelec SAM RS485 Hub Component (M5Stack AtomS3 Lite + Atomic RS485 Base)
-gensam:
-  id: gensam_hub
-  tx_pin: GPIO6
-  rx_pin: GPIO5
-  rx_buffer_size: 512
-  listen_only: false
-  glm_inactivity_cooldown: 15s
-  poll_interval: 1s
-  telemetry_averaging_period: 60s
-  min_volume_db: -80.0
-  max_volume_db: -30.0
-  startup_volume_db: -50.0
-
-  bus_status:
-    name: "Bus Status"
-
-  status_led:
-    light: atom_led
-    mode: bus_status
-    brightness: 50%
-
-  rediscover_button:
-    name: "Rediscover Monitors"
-
-  volume_db:
-    name: "Volume (dB)"
-
-
-  monitors:
-    - serial_number: "7350APM88123456"
-      unique_id: 1842915
-      name: "Subwoofer"
-      device_id: dev_subwoofer
-    - serial_number: "8330AP99234567"
-      unique_id: 1654321
-      name: "Left Monitor"
-      device_id: dev_left_monitor
-    - serial_number: "8330AP77345678"
-      unique_id: 1987654
-      name: "Right Monitor"
-      device_id: dev_right_monitor
-
-media_player:
-  - platform: gensam
-    name: "Genelec SAM System"
-
-# Physical button on M5Stack AtomS3 Lite (GPIO41, active-low) triggers monitor rediscovery
-binary_sensor:
-  - platform: gpio
-    pin:
-      number: GPIO41
-      inverted: true
-      mode:
-        input: true
-        pullup: true
-    name: "Rediscover Button"
-    on_press:
-      then:
-        - lambda: id(gensam_hub).rediscover_monitors();
