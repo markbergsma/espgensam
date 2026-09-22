@@ -18,14 +18,50 @@ You may also want to take a look at [HLM, the Homebrew Loudspeaker Manager](http
 
 ## Supported Hardware
 
-### 1. M5Stack AtomS3 Lite + Atomic RS485 Base (`espgensam.yaml`)
+There is one config, `espgensam.yaml`. Selecting a board is a one-line change to its `packages:` block:
+
+```yaml
+packages:
+  # --- Board selection: exactly one of these ---
+  board: !include packages/board_m5stack_atoms3_rs485_base.yaml
+  # board: !include packages/board_waveshare_esp32s3_rs485_can.yaml
+
+  gensam: !include packages/gensam.yaml
+```
+
+Everything else — monitors, entities, tunables — lives in `packages/gensam.yaml` and is shared. Adding a board means adding one `packages/board_*.yaml`.
+
+### 1. M5Stack AtomS3 Lite + Atomic RS485 Base
 - **MCU**: ESP32-S3 dual-core
 - **RS485 TX**: `GPIO6`
 - **RS485 RX**: `GPIO5`
 - **Direction Control**: Automatic (Atomic RS-485 pulse-sensing circuit)
 - **Status RGB LED**: `GPIO35` (WS2812)
+- **Rediscover button**: `GPIO41`
 
 While this hardware does work fine in practice, it has proven not to be ideal hardware for this use case due to the auto-direction circuit, and alternative hardware is currently under investigation.
+
+### 2. Waveshare ESP32-S3-RS485-CAN
+- **MCU**: ESP32-S3 dual-core
+- **RS485 TX**: `GPIO17`
+- **RS485 RX**: `GPIO18`
+- **Direction Control**: Explicit, `GPIO21` (SP3485EN; `/RE` is tied to `DE`, so the receiver is disabled while transmitting)
+- **Isolation**: Galvanically isolated RS-485, with an onboard 120 Ω termination and 4.7 kΩ fail-safe bias
+- **Status RGB LED**: none — the onboard LEDs are power and bus-activity indicators. Bus state is reported through the **Bus Status** sensor in Home Assistant.
+- **Rediscover button**: none — use the **Rediscover Monitors** button entity.
+
+Under evaluation, to test whether an explicitly driven direction line and a better receive path reduce the reply loss seen on the auto-direction module. Two things to be aware of before relying on it:
+
+- **Make sure the bus has exactly one terminator at the controller end.** This matters more than anything else in the wiring, and it is easy to get wrong in both directions. Measured on this board, 4,000+ frames per run:
+
+  | Terminators | `C0` address aliases | Rejected start edges |
+  |---|---|---|
+  | 0 | **71% of frames** | 1.90% of characters |
+  | 1 (120 Ω) | 0.87% | 0.027% |
+
+  Unterminated, the line takes ~4.7 µs to coast back to its idle level after the driver releases — longer than a bit time — so monitors replying 5–10 µs later lose their start edge. Frames still arrive intact either way, but only because the address-alias workaround is repairing 71% of them.
+
+  In practice: the board ships with its 120 Ω fitted, and a GLM adapter carries one too — a passive resistor, so it terminates whether or not the adapter is powered. **Adapter attached → pull the Waveshare jumper. Waveshare alone → leave it in.**
 
 ---
 
@@ -39,6 +75,10 @@ Connect the RS-485 transceiver terminal block to a standard CAT5/6 RJ45 patch ca
 | **Pin 2** | Orange | **Data B (D-)** (inverting) | `B` |
 | **Pin 8** | Brown | **GND** (bus ground reference) | `GND` |
 | Pins 3–7 | — | *Unconnected* | — |
+
+The `GND` row is board-dependent. **The Waveshare's RS-485 terminal block has only `A` and `B`** — there is no ground terminal, so pin 8 is simply left unconnected there, and the board works correctly that way. Its fail-safe bias network ties `A` to the isolated 3V3 rail and `B` to the isolated ground, so the isolated side already self-references to the bus through 4.7 kΩ and never actually floats.
+
+A defined ground reference is still better practice on long runs or in electrically noisy installations, where common-mode could otherwise drift outside the transceiver's −7 V…+12 V input range. On this board the only access is the internal pin header. It would create no ground loop — the isolation barrier blocks any return path through mains earth — but it has not proved necessary in practice.
 
 ---
 
@@ -62,11 +102,29 @@ esphome:
 
 ### 2. Hub & Monitor Configuration (`gensam:`)
 
+The pin keys belong in a board package; everything else is board-independent and lives in `packages/gensam.yaml`. They are shown together here for reference.
+
 ```yaml
 gensam:
   id: gensam_hub
+
+  # --- Transceiver pins (board package) ---
   tx_pin: GPIO6
   rx_pin: GPIO5
+  # de_pin: GPIO21      # Direction line, driven per frame. Omit on auto-direction modules.
+  # re_pin: GPIO17      # Receiver enable, asserted once at boot.
+  # power_pin: GPIO16   # 5 V DC-DC booster enable, for modules with their own rail.
+  # se_pin: GPIO19      # Transceiver enable / shutdown, asserted once at boot.
+  # tx_echoes_rx: false # Whether any of our own transmission can reach RX. Defaults to
+  #                     # "no de_pin configured", which is right for every supported board. An
+  #                     # auto-direction module's one-shot is triggered by our own start bit, so
+  #                     # it is always late and the opening bits escape; a deliberately driven
+  #                     # direction line is asserted first and leaks nothing. Set it only for a
+  #                     # board that drives DE but leaves its receiver permanently enabled —
+  #                     # getting it wrong the other way discards the start of every reply.
+  # All pin keys accept `inverted: true`. `mode:` is ignored: the driver configures pull-ups
+  # itself, and RMT rebinds tx_pin/rx_pin regardless.
+
   rx_buffer_size: 512
 
   # Coexistence with official GLM USB adapter
@@ -264,10 +322,13 @@ Edit `secrets.yaml` with your Wi-Fi credentials and ESPHome API key.
 
 ### 2. Build & Flash
 
-For **M5Stack AtomS3 Lite**:
+Select your board in the `packages:` block of `espgensam.yaml` (see [Supported Hardware](#supported-hardware)), then:
+
 ```bash
 esphome run espgensam.yaml
 ```
+
+Monitor serial numbers and entities live in `packages/gensam.yaml`, so they carry over unchanged if you swap boards.
 
 ---
 

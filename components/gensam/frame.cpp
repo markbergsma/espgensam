@@ -157,15 +157,33 @@ void FrameParser::feed(const Uart9BitChar &c) {
     // We map 0xC0' to HOST_ADDRESS. Full integrity is strictly protected by the 16-bit CRC check
     // in process_candidate_(); any corrupted noise frame will fail CRC and be dropped.
     //
-    // NOTE: this is NOT caused by our own driver-enable release, and discrete DE line control
-    // will not remove it. The bus captures settle this: glm_startup_capture.log and
-    // glm_v5_no_wakeup_capture.log contain no TX frames at all and still show the alias, and in
-    // glm_source_select_capture.log 47 of 50 occurrences fall after the hub has yielded the bus
-    // and stopped transmitting entirely. The lost start edge happens at the *bus* turnaround --
-    // the previous master's driver releasing, the line coasting to its idle bias, the monitor's
-    // driver asserting -- against a passive-pull receive front end. It is a receive-path
-    // property, so removing it needs a transceiver with better slew and active fail-safe
-    // biasing, not a DE output. Track c0_alias_count() to compare hardware.
+    // The lost start edge happens at the *bus* turnaround -- the previous master's driver
+    // releasing, the line coasting to its idle bias, the monitor's driver asserting. It is
+    // therefore a property of whoever released the bus, not of our own transmission: captures
+    // glm_startup_capture.log and glm_v5_no_wakeup_capture.log contain no TX frames at all and
+    // still show the alias, and in glm_source_select_capture.log 47 of 50 occurrences fall after
+    // the hub had yielded and stopped transmitting entirely.
+    //
+    // The dominant factor is bus termination, because it sets how fast the line coasts back to a
+    // valid idle mark once a driver releases. Measured on the Waveshare ESP32-S3-RS485-CAN as bus
+    // master, one variable, 4,000+ frames each (docs/rs485-transceiver-comparison.md):
+    //
+    //   no terminator:  2,850 aliases / 4,000 frames = 71.25%   (RC ~4.7 us, longer than a bit)
+    //   one 120 ohm:       37 aliases / 4,257 frames =  0.87%   (RC ~60 ns)
+    //
+    // Unterminated, the line has not settled when the monitor's start bit arrives 5-10 us later,
+    // so the edge is missed. Both runs delivered every frame correctly -- but the unterminated one
+    // only because this workaround repaired 71% of them.
+    //
+    // So the workaround stays, and c0_alias_count() is as much a measure of bus wiring as of the
+    // transceiver. Compare hardware only with termination pinned, and never pool samples across a
+    // configuration change.
+    //
+    // So the workaround stays: it is nearly idle while we drive the bus, and still earning its
+    // keep at ~0.8% whenever we yield to GLM, which is whenever a GLM adapter is present.
+    // Removing it would require never yielding. Track c0_alias_count() to compare hardware, and
+    // read it separately for master and yielded phases -- a single pooled figure mostly measures
+    // how much of the sample was spent yielding.
     if (addr == 0xC0) {
       addr = HOST_ADDRESS;
       c0_alias_count_++;
