@@ -6,6 +6,7 @@
 
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "soc/soc_caps.h"
 
 static const char *const TAG = "gensam.uart9bit";
@@ -122,16 +123,15 @@ Uart9Bit::~Uart9Bit() {
 /// Configures RX GPIO pull-up, optional DE hardware direction control, RMT TX continuous
 /// transmitter with copy encoder, FreeRTOS byte ring buffer, and RMT RX channel with
 /// 500 ns glitch filter, 50 µs idle burst detector, and ping-pong symbol buffers.
-/// @param port Port number (reserved for interface compatibility).
-/// @param tx_pin GPIO number for TX.
-/// @param rx_pin GPIO number for RX.
-/// @param de_pin Optional GPIO number for RS-485 DE/RE direction control (-1 if unused).
+/// @param profile Board RS-485 front end description.
 /// @param baud_rate Baud rate in bps (default 288,000 for Genelec GLM).
 /// @param rx_buffer_size RX ring buffer capacity in Uart9BitChar units.
-void Uart9Bit::setup(int port, int tx_pin, int rx_pin, int de_pin,
-                     uint32_t baud_rate, size_t rx_buffer_size) {
+void Uart9Bit::setup(const Rs485Profile &profile, uint32_t baud_rate, size_t rx_buffer_size) {
   baud_rate_ = baud_rate;
-  de_pin_ = de_pin;
+  profile_ = profile;
+
+  const int tx_pin = profile_.tx_pin;
+  const int rx_pin = profile_.rx_pin;
 
   // --- 0. Configure RX GPIO Pull-up ----------------------------------------
   gpio_config_t rx_gpio_cfg = {};
@@ -143,16 +143,9 @@ void Uart9Bit::setup(int port, int tx_pin, int rx_pin, int de_pin,
   gpio_config(&rx_gpio_cfg);
 
   // --- 0b. Optional DE/RE Direction Pin Configuration -----------------------
-  if (de_pin_ >= 0) {
-    gpio_config_t de_cfg = {};
-    de_cfg.pin_bit_mask = (1ULL << de_pin_);
-    de_cfg.mode = GPIO_MODE_OUTPUT;
-    de_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
-    de_cfg.pull_down_en = GPIO_PULLDOWN_ENABLE;
-    de_cfg.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&de_cfg);
-    gpio_set_level(static_cast<gpio_num_t>(de_pin_), 0);  // Default RX (listen)
-  }
+  // Deasserted, i.e. listening, is the resting state.
+  rs485_configure_output(profile_.de_pin, profile_.de_active_high, false);
+  de_asserted_ = false;
 
   // --- 1. RMT TX Channel Configuration (Zero-Gap Continuous Stream) ---------
   if (tx_pin >= 0) {
@@ -176,12 +169,29 @@ void Uart9Bit::setup(int port, int tx_pin, int rx_pin, int de_pin,
 #endif
     tx_channel_cfg.gpio_num = static_cast<gpio_num_t>(tx_pin);
     tx_channel_cfg.trans_queue_depth = 4;
-    tx_channel_cfg.flags.invert_out = 0;
+    tx_channel_cfg.flags.invert_out = profile_.tx_inverted ? 1 : 0;
     tx_channel_cfg.flags.with_dma = 0;
 
     esp_err_t err = rmt_new_tx_channel(&tx_channel_cfg, &rmt_tx_chan_);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "rmt_new_tx_channel failed: %s (err=0x%x)", esp_err_to_name(err), err);
+      return;
+    }
+
+    // Release the direction line the instant the hardware stops driving, rather than after
+    // rmt_tx_wait_all_done() returns to task context. On a transceiver whose /RE is tied to DE
+    // the difference is a receive blackout landing on the reply's start bit, and it is worth
+    // real frames: measured A/B on the Waveshare board with everything else pinned, task-context
+    // release produced 28 CRC errors and 133 framing errors per 4,000 frames against zero of
+    // each here. See rs485.h and docs/rs485-transceiver-comparison.md §2.
+    rmt_tx_event_callbacks_t tx_cbs = {
+        .on_trans_done = rmt_tx_done_callback_,
+    };
+    err = rmt_tx_register_event_callbacks(rmt_tx_chan_, &tx_cbs, this);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "rmt_tx_register_event_callbacks failed: %s", esp_err_to_name(err));
+      rmt_del_channel(rmt_tx_chan_);
+      rmt_tx_chan_ = nullptr;
       return;
     }
 
@@ -234,7 +244,7 @@ void Uart9Bit::setup(int port, int tx_pin, int rx_pin, int de_pin,
   rx_channel_cfg.mem_block_symbols = 64;
 #endif
   rx_channel_cfg.gpio_num = static_cast<gpio_num_t>(rx_pin);
-  rx_channel_cfg.flags.invert_in = 0;
+  rx_channel_cfg.flags.invert_in = profile_.rx_inverted ? 1 : 0;
   rx_channel_cfg.flags.with_dma = 0;
 
   esp_err_t err = rmt_new_rx_channel(&rx_channel_cfg, &rmt_rx_chan_);
@@ -289,9 +299,67 @@ void Uart9Bit::setup(int port, int tx_pin, int rx_pin, int de_pin,
   initialized_ = true;
   ESP_LOGI(TAG,
            "Uart9Bit initialized: TX=RMT (GPIO%d), RX=RMT (GPIO%d), DE=GPIO%d, "
-           "baud=%lu, tick=100ns, buf=%u chars",
-           tx_pin, rx_pin, de_pin_, (unsigned long)baud_rate_,
-           (unsigned)rx_buffer_size);
+           "tx_echoes_rx=%s, baud=%lu, tick=100ns, buf=%u chars",
+           tx_pin, rx_pin, profile_.de_pin, profile_.tx_echoes_rx ? "yes" : "no",
+           (unsigned long)baud_rate_, (unsigned)rx_buffer_size);
+}
+
+// ---------------------------------------------------------------------------
+// ISR-side: RMT TX Done Callback — direction line release
+// ---------------------------------------------------------------------------
+
+/// @brief Note that transmission has ended, and drop the direction line if it is asserted.
+///
+/// The timestamp is recorded unconditionally -- including on a board with no direction pin, where
+/// the rest of this function does nothing -- because the RX echo guard compares against it. An
+/// early return here would leave tx_end_us_ at zero forever and make the guard cancel every skip.
+///
+/// Idempotent: write()'s error paths call it where no ISR will fire, and the ISR may find the line
+/// already released. Uses the LL GPIO write so the whole path stays out of flash (see rs485.h).
+void IRAM_ATTR Uart9Bit::note_tx_complete_() {
+  const uint32_t now = static_cast<uint32_t>(esp_timer_get_time());
+  tx_end_us_ = now;
+
+  if (!de_asserted_) {
+    return;
+  }
+  rs485_write_pin(profile_.de_pin, profile_.de_active_high, false);
+  de_asserted_ = false;
+
+  // Overshoot past when the frame should have finished: the transmit call plus the rendered
+  // frame's own duration, converted from 100 ns RMT ticks.
+  //
+  // This is an upper bound on release latency rather than a measurement of it -- tx_start_us_ is
+  // taken in task context just before rmt_transmit(), so a preemption before the hardware starts
+  // is charged here even though it elapses ahead of the frame, where it cannot cost a reply. See
+  // uart9bit.h. The count is what makes the number actionable: outliers inflate the max without
+  // moving it, while a genuine stall moves both.
+  const uint32_t expected_end = tx_start_us_ + tx_frame_ticks_ / 10;
+  const int32_t over_us = static_cast<int32_t>(now - expected_end);
+  if (over_us > 0) {
+    if (static_cast<uint32_t>(over_us) > tx_overshoot_max_us_) {
+      tx_overshoot_max_us_ = static_cast<uint32_t>(over_us);
+    }
+    if (static_cast<uint32_t>(over_us) > TX_OVERSHOOT_WARN_US) {
+      tx_overshoot_count_++;
+    }
+  }
+}
+
+/// @brief RMT TX ISR callback, fired the moment a transmission completes.
+/// @param tx_chan Handle to the RMT TX channel (unused).
+/// @param edata Event data (unused).
+/// @param user_ctx Pointer to the Uart9Bit instance.
+/// @return Always false (no high-priority task wake requested).
+bool IRAM_ATTR Uart9Bit::rmt_tx_done_callback_(rmt_channel_handle_t tx_chan,
+                                               const rmt_tx_done_event_data_t *edata,
+                                               void *user_ctx) {
+  (void) tx_chan;
+  (void) edata;
+  // Also fires for the idle-latching transaction in setup(), where nothing was ever asserted;
+  // note_tx_complete_() handles that by leaving the direction line alone.
+  static_cast<Uart9Bit *>(user_ctx)->note_tx_complete_();
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +394,28 @@ bool IRAM_ATTR Uart9Bit::rmt_rx_done_callback_(
 
   uint32_t skip_ticks = self->tx_echo_ticks_;
   self->tx_echo_ticks_ = 0;
+
+  // Cancel an armed echo skip that cannot possibly be ours.
+  //
+  // The callback fires after the burst has ended plus the idle threshold, so arrival time is not
+  // directly available; reconstruct it by summing the symbol durations. A burst that began after
+  // the transmitter stopped contains no echo of ours, and skipping into it would eat the start of
+  // a genuine reply. The guard may only cancel, never resize: the skip magnitude stays exactly
+  // the transmitted frame's tick count. See uart9bit.h.
+  if (skip_ticks > 0 && num_symbols > 0) {
+    uint32_t span_ticks = 0;
+    for (size_t i = 0; i < num_symbols; i++) {
+      span_ticks += received_buf[i].duration0 + received_buf[i].duration1;
+    }
+    const uint32_t burst_start_us =
+        static_cast<uint32_t>(esp_timer_get_time()) - span_ticks / 10;
+    // Wrap-safe: the quantity being tested is a single frame time, so the signed difference is
+    // correct across the 32-bit microsecond rollover.
+    if (static_cast<int32_t>(burst_start_us - self->tx_end_us_) >= 0) {
+      skip_ticks = 0;
+      self->stats_.echo_skip_cancelled++;
+    }
+  }
 
   // Decode symbols directly in ISR and push decoded 9-bit chars to ring buffer
   if (num_symbols > 0) {
@@ -504,7 +594,8 @@ size_t Uart9Bit::available() const {
 ///
 /// Converts each 9-bit character into Start bit, 8 data bits, 9th address bit, and 2 stop
 /// bits, emitting the entire frame with 0 ns inter-byte gap to maintain auto-direction
-/// transceiver engagement. Deasserts hardware DE immediately upon transmission completion.
+/// transceiver engagement. The hardware direction line is released from the RMT TX-done ISR,
+/// not from here.
 /// @param chars Array of 9-bit characters to transmit.
 /// @param len Number of characters in @p chars.
 void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
@@ -524,12 +615,6 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
     ESP_LOGE(TAG, "TX frame too large: %u chars need %u symbols (max %u). Dropping frame.",
              (unsigned) len, (unsigned) required_symbols, (unsigned) RMT_TX_MAX_SYMBOLS);
     return;
-  }
-
-  // Assert Direction Enable (TX Mode) if hardware DE pin configured
-  if (de_pin_ >= 0) {
-    gpio_set_level(static_cast<gpio_num_t>(de_pin_), 1);
-    esp_rom_delay_us(5);
   }
 
   // Q16 fixed-point math for zero-drift bit timing at 10 MHz resolution (100 ns/tick)
@@ -590,9 +675,6 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
   if (overflow) {
     ESP_LOGE(TAG, "Internal TX symbol overflow while encoding frame (%u chars). Dropping frame.",
              (unsigned) len);
-    if (de_pin_ >= 0) {
-      gpio_set_level(static_cast<gpio_num_t>(de_pin_), 0);
-    }
     return;
   }
 
@@ -606,10 +688,24 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
     sym_idx++;
   }
 
+  // Echo skip window: the exact duration of the transmitted frame, up to the end of Stop Bit 2.
+  // Armed only on transceivers that actually loop our transmission back into RX -- one whose /RE
+  // is tied to DE is deaf while driving, and skipping there would eat the reply instead. See
+  // rs485.h. The magnitude is always the frame's own tick count, never anything time-derived.
+  tx_frame_ticks_ = bit_cursor_q16 >> 16;
+  tx_echo_ticks_ = profile_.tx_echoes_rx ? tx_frame_ticks_ : 0;
+
+  // Assert the direction line as late as possible: after encoding, immediately before handing the
+  // frame to the hardware. Every microsecond it is asserted is a microsecond a tied-/RE receiver
+  // is deaf, so the encode pass does not belong inside that window.
+  if (profile_.has_direction_control()) {
+    de_asserted_ = true;
+    rs485_write_pin(profile_.de_pin, profile_.de_active_high, true);
+    esp_rom_delay_us(profile_.de_assert_settle_us);
+  }
+  tx_start_us_ = static_cast<uint32_t>(esp_timer_get_time());
+
   // Blast out full frame continuously via hardware RMT.
-  // Set echo skip window to the exact duration of the transmitted frame (end of Stop Bit 2).
-  // This suppresses the loopback echo of our own transmission without cutting into monitor replies.
-  tx_echo_ticks_ = bit_cursor_q16 >> 16;
   rmt_transmit_config_t tx_config = {};
   tx_config.loop_count = 0;
   tx_config.flags.eot_level = 1;  // End-of-transmission level: 1 (Idle HIGH / Mark)
@@ -618,14 +714,20 @@ void Uart9Bit::write(const Uart9BitChar *chars, size_t len) {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "rmt_transmit failed: %s (err=0x%x, syms=%u)",
              esp_err_to_name(err), err, (unsigned)sym_idx);
-  } else {
-    rmt_tx_wait_all_done(rmt_tx_chan_, 100);
+    tx_echo_ticks_ = 0;
+    this->note_tx_complete_();  // Nothing was queued, so no TX-done ISR will fire.
+    return;
+  }
 
-    // Return to Receive (RX Mode) immediately after transmission completes
-    if (de_pin_ >= 0) {
-      esp_rom_delay_us(5);
-      gpio_set_level(static_cast<gpio_num_t>(de_pin_), 0);
-    }
+  // Wait for ordering, not for direction control: the TX-done ISR has already dropped the line by
+  // the time this returns. Without the wait a second write() could queue behind the first, and
+  // the first transaction's completion would release the line in the middle of the second frame.
+  // It is also what lets callers assume write() is synchronous (see hub.cpp send_frame_twice).
+  err = rmt_tx_wait_all_done(rmt_tx_chan_, 100);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "rmt_tx_wait_all_done failed: %s", esp_err_to_name(err));
+    // A wedged channel must not leave the bus driven.
+    this->note_tx_complete_();
   }
 }
 

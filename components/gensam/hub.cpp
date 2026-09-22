@@ -58,54 +58,51 @@ constexpr uint32_t STANDBY_SETTLE_MS = 5000;
 
 }  // namespace
 
-void GenSAMHub::drive_output_pin_(int pin, bool pull_up, const char *description) {
-  gpio_config_t cfg = {};
-  cfg.pin_bit_mask = (1ULL << pin);
-  cfg.mode = GPIO_MODE_OUTPUT;
-  cfg.pull_up_en = pull_up ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE;
-  cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  cfg.intr_type = GPIO_INTR_DISABLE;
-  gpio_config(&cfg);
-  gpio_set_level(static_cast<gpio_num_t>(pin), 1);
-  ESP_LOGI(TAG, "%s (GPIO%d) asserted HIGH", description, pin);
+void GenSAMHub::assert_output_pin_(int pin, bool active_high, bool pull_up,
+                                   const char *description) {
+  if (pin < 0) {
+    return;
+  }
+  rs485_configure_output(pin, active_high, true, pull_up);
+  ESP_LOGI(TAG, "%s (GPIO%d) asserted %s", description, pin, active_high ? "HIGH" : "LOW");
 }
 
 void GenSAMHub::setup_transceiver_pins_() {
   // 1. Assert RS485 DC-DC Power Enable (T-CAN485: GPIO16 = 1 powers 5V boost converter)
-  if (power_pin_ >= 0) {
-    this->drive_output_pin_(power_pin_, false, "RS485 5V Power Enable pin");
+  if (rs485_.power_pin >= 0) {
+    this->assert_output_pin_(rs485_.power_pin, rs485_.power_active_high, false,
+                             "RS485 5V Power Enable pin");
     delay(50);  // Allow 5V DC-DC booster to stabilize
   }
 
   // 2. Assert Transceiver Enable (T-CAN485: GPIO19 = 1 turns ON NPN shifter to enable MAX13487)
-  if (se_pin_ >= 0) {
-    this->drive_output_pin_(se_pin_, false, "RS485 Transceiver Enable pin");
-  }
+  this->assert_output_pin_(rs485_.se_pin, rs485_.se_active_high, false,
+                           "RS485 Transceiver Enable pin");
 
   // 3. Assert Receiver Enable / AutoDirection (T-CAN485: GPIO17 = 1 turns ON NPN shifter -> Receiver & AutoDirection ON)
-  if (re_pin_ >= 0) {
-    this->drive_output_pin_(re_pin_, false, "RS485 Receiver Enable pin");
-  }
+  this->assert_output_pin_(rs485_.re_pin, rs485_.re_active_high, false,
+                           "RS485 Receiver Enable pin");
 }
 
 void GenSAMHub::setup_uart_() {
   // Initialize 9-bit driver (RMT RX + RMT TX continuous zero-gap bitstream)
+  Rs485Profile profile = rs485_;
   if (listen_only_) {
     // In listen-only mode, drive TX pin HIGH (DE deasserted on RS-485 transceiver)
     // and do not initialize the RMT TX transmitter channel.
-    this->drive_output_pin_(tx_pin_, true, "RS485 TX pin (listen-only, idle)");
-    uart9_.setup(1, -1, rx_pin_, de_pin_, baud_rate_, rx_buffer_size_);
-  } else {
-    uart9_.setup(1, tx_pin_, rx_pin_, de_pin_, baud_rate_, rx_buffer_size_);
+    this->assert_output_pin_(rs485_.tx_pin, !rs485_.tx_inverted, true,
+                             "RS485 TX pin (listen-only, idle)");
+    profile.tx_pin = -1;
   }
+  uart9_.setup(profile, baud_rate_, rx_buffer_size_);
 }
 
 void GenSAMHub::setup() {
   ESP_LOGI(TAG, "Initializing GenSAM Hub on RS485 bus...");
   boot_time_ = millis();
 
-  if (tx_pin_ < 0 || rx_pin_ < 0) {
-    ESP_LOGE(TAG, "Invalid TX (%d) or RX (%d) pin configuration", tx_pin_, rx_pin_);
+  if (rs485_.tx_pin < 0 || rs485_.rx_pin < 0) {
+    ESP_LOGE(TAG, "Invalid TX (%d) or RX (%d) pin configuration", rs485_.tx_pin, rs485_.rx_pin);
     this->mark_failed();
     return;
   }
@@ -143,8 +140,9 @@ void GenSAMHub::setup() {
   this->update_bus_status_();
 
   ESP_LOGI(TAG, "GenSAM Hub initialized successfully (baud=%lu, TX=%s, RX=GPIO%d, yield_to_glm=%s, cooldown=%u ms)",
-           (unsigned long)baud_rate_, listen_only_ ? "DISABLED (listen_only)" : ("GPIO" + std::to_string(tx_pin_)).c_str(),
-           rx_pin_, YESNO(yield_to_glm_), (unsigned)glm_inactivity_cooldown_ms_);
+           (unsigned long)baud_rate_,
+           listen_only_ ? "DISABLED (listen_only)" : ("GPIO" + std::to_string(rs485_.tx_pin)).c_str(),
+           rs485_.rx_pin, YESNO(yield_to_glm_), (unsigned)glm_inactivity_cooldown_ms_);
 }
 
 void GenSAMHub::set_active_group(uint8_t index) {
@@ -198,8 +196,8 @@ const GroupDevice *GenSAMHub::find_group_device(const GroupPreset &group, uint32
 
 void GenSAMHub::dump_config() {
   ESP_LOGCONFIG(TAG, "GenSAM Hub:");
-  ESP_LOGCONFIG(TAG, "  TX Pin: GPIO%d", tx_pin_);
-  ESP_LOGCONFIG(TAG, "  RX Pin: GPIO%d", rx_pin_);
+  ESP_LOGCONFIG(TAG, "  TX Pin: GPIO%d", rs485_.tx_pin);
+  ESP_LOGCONFIG(TAG, "  RX Pin: GPIO%d", rs485_.rx_pin);
   ESP_LOGCONFIG(TAG, "  Volume Bounds: [%.1f dB, %.1f dB] (Startup: %.1f dB)",
                 min_volume_db_, max_volume_db_, startup_volume_db_);
   if (volume_number_ != nullptr) {
@@ -237,18 +235,20 @@ void GenSAMHub::dump_config() {
                     (unsigned)dev.band_count);
     }
   }
-  if (de_pin_ >= 0) {
-    ESP_LOGCONFIG(TAG, "  Hardware DE (Direction) Pin: GPIO%d", de_pin_);
+  if (rs485_.de_pin >= 0) {
+    ESP_LOGCONFIG(TAG, "  Hardware DE (Direction) Pin: GPIO%d (active %s)", rs485_.de_pin,
+                  rs485_.de_active_high ? "high" : "low");
   }
-  if (re_pin_ >= 0) {
-    ESP_LOGCONFIG(TAG, "  Receiver Enable Pin: GPIO%d", re_pin_);
+  if (rs485_.re_pin >= 0) {
+    ESP_LOGCONFIG(TAG, "  Receiver Enable Pin: GPIO%d", rs485_.re_pin);
   }
-  if (power_pin_ >= 0) {
-    ESP_LOGCONFIG(TAG, "  5V Power Pin: GPIO%d", power_pin_);
+  if (rs485_.power_pin >= 0) {
+    ESP_LOGCONFIG(TAG, "  5V Power Pin: GPIO%d", rs485_.power_pin);
   }
-  if (se_pin_ >= 0) {
-    ESP_LOGCONFIG(TAG, "  Transceiver Pin: GPIO%d", se_pin_);
+  if (rs485_.se_pin >= 0) {
+    ESP_LOGCONFIG(TAG, "  Transceiver Pin: GPIO%d", rs485_.se_pin);
   }
+  ESP_LOGCONFIG(TAG, "  TX Echoes into RX: %s", YESNO(rs485_.tx_echoes_rx));
   ESP_LOGCONFIG(TAG, "  Baud Rate: %lu bps (fixed GLM standard)", (unsigned long)baud_rate_);
   ESP_LOGCONFIG(TAG, "  RX Buffer Size: %u characters", (unsigned)rx_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Listen Only: %s", YESNO(listen_only_));
@@ -959,11 +959,13 @@ void GenSAMHub::log_stats_() {
   RxDecodeSnapshot rx = uart9_.rx_stats();
   ESP_LOGD(TAG,
            "Stats: %lu chars (%lu addr, %lu data), %lu bursts | rx: %lu start rej, %lu stop2, "
-           "%lu framing errs | frames: %lu ok, %lu invalid, %lu crc errs, %lu C0 alias%s "
-           "[Monitors: %u]",
+           "%lu framing errs | tx: %lu echo cancelled, %lu slow rel (max %lu us) | "
+           "frames: %lu ok, %lu invalid, %lu crc errs, %lu C0 alias%s [Monitors: %u]",
            (unsigned long)rx.chars, (unsigned long)rx.addr_chars, (unsigned long)rx.data_chars,
            (unsigned long)uart9_.rx_burst_count(), (unsigned long)rx.start_rejects,
            (unsigned long)rx.stopbit2_rescues, (unsigned long)rx.framing_errs,
+           (unsigned long)rx.echo_skip_cancelled, (unsigned long)uart9_.tx_overshoot_count(),
+           (unsigned long)uart9_.tx_overshoot_max_us(),
            (unsigned long)parser_.valid_count(), (unsigned long)parser_.invalid_count(),
            (unsigned long)parser_.crc_mismatch_count(), (unsigned long)parser_.c0_alias_count(),
            arbiter_.is_active() ? " [GLM ACTIVE - YIELDING]" : "",

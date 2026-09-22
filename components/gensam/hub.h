@@ -57,9 +57,10 @@
 ///      and restoring active volume.
 ///
 /// 4. Hardware Transceiver Abstraction:
-///    Supports both auto-direction transceivers (M5Stack Atomic RS-485 Base) and discrete
-///    enable pins (LilyGO T-CAN485 with 5V booster `power_pin`, transceiver enable `se_pin`,
-///    and receiver enable `re_pin`, or standard boards with hardware direction control `de_pin`).
+///    Every board-specific property of the RS-485 front end lives in an Rs485Profile; the hub
+///    holds one and does nothing with it beyond the boot-time enable sequence in
+///    setup_transceiver_pins_(). See rs485.h for the supported topologies and why the difference
+///    between them reaches into the receive path.
 ///
 /// 5. Audio Source Selection & AES3 Routing:
 ///    SAM monitors support Analog vs Digital (AES3) routing via CMD_SELECT_AUDIO_SOURCE (0x40).
@@ -84,6 +85,7 @@
 #include "groups.h"
 #include "monitor.h"
 #include "registry.h"
+#include "rs485.h"
 #include "uart9bit.h"
 #include "util.h"
 
@@ -151,22 +153,44 @@ struct GroupApplyState {
 class GenSAMHub : public Component {
  public:
   /// @brief Set the GPIO pin used for UART TX (RMT pulse generator).
-  void set_tx_pin(int pin) { tx_pin_ = pin; }
+  void set_tx_pin(int pin, bool inverted = false) {
+    rs485_.tx_pin = pin;
+    rs485_.tx_inverted = inverted;
+  }
 
   /// @brief Set the GPIO pin used for UART RX (RMT pulse digitizer).
-  void set_rx_pin(int pin) { rx_pin_ = pin; }
+  void set_rx_pin(int pin, bool inverted = false) {
+    rs485_.rx_pin = pin;
+    rs485_.rx_inverted = inverted;
+  }
 
   /// @brief Set the optional GPIO pin for RS-485 dynamic Driver Enable (DE).
-  void set_de_pin(int pin) { de_pin_ = pin; }
+  void set_de_pin(int pin, bool inverted = false) {
+    rs485_.de_pin = pin;
+    rs485_.de_active_high = !inverted;
+  }
 
-  /// @brief Set the optional GPIO pin for RS-485 Receiver Enable (RE / held HIGH).
-  void set_re_pin(int pin) { re_pin_ = pin; }
+  /// @brief Set the optional GPIO pin for RS-485 Receiver Enable (RE / held asserted).
+  void set_re_pin(int pin, bool inverted = false) {
+    rs485_.re_pin = pin;
+    rs485_.re_active_high = !inverted;
+  }
 
   /// @brief Set the optional GPIO pin for RS-485 module DC-DC power booster.
-  void set_power_pin(int pin) { power_pin_ = pin; }
+  void set_power_pin(int pin, bool inverted = false) {
+    rs485_.power_pin = pin;
+    rs485_.power_active_high = !inverted;
+  }
 
   /// @brief Set the optional GPIO pin for RS-485 transceiver enable / shutdown.
-  void set_se_pin(int pin) { se_pin_ = pin; }
+  void set_se_pin(int pin, bool inverted = false) {
+    rs485_.se_pin = pin;
+    rs485_.se_active_high = !inverted;
+  }
+
+  /// @brief Set whether this board's transceiver loops transmissions back into RX.
+  /// @see Rs485Profile::tx_echoes_rx
+  void set_tx_echoes_rx(bool echoes) { rs485_.tx_echoes_rx = echoes; }
 
   /// @brief Set the RX ring buffer capacity in 9-bit character units.
   void set_rx_buffer_size(size_t size) { rx_buffer_size_ = size; }
@@ -492,11 +516,12 @@ class GenSAMHub : public Component {
   const GenSAMMonitor *get_monitor(uint8_t address) const { return registry_.find(address); }
 
  protected:
-  /// @brief Configure a GPIO as a push-pull output and drive it HIGH.
-  /// @param pin GPIO number.
+  /// @brief Configure a GPIO as a push-pull output and drive it to its asserted state.
+  /// @param pin GPIO number; negative is a no-op.
+  /// @param active_high False when the pin is wired active-low.
   /// @param pull_up Whether to enable the internal pull-up (used for the idle TX line).
   /// @param description Human-readable pin role, for the confirmation log line.
-  void drive_output_pin_(int pin, bool pull_up, const char *description);
+  void assert_output_pin_(int pin, bool active_high, bool pull_up, const char *description);
 
   /// @brief Power and enable the RS-485 transceiver, in the order the hardware requires.
   void setup_transceiver_pins_();
@@ -682,12 +707,7 @@ class GenSAMHub : public Component {
   /// @brief Evaluate and publish operational bus status ("Active", "GLM Active", "Discovering", "Configuring", "Offline").
   void update_bus_status_();
 
-  int tx_pin_{-1};
-  int rx_pin_{-1};
-  int de_pin_{-1};
-  int re_pin_{-1};
-  int power_pin_{-1};
-  int se_pin_{-1};
+  Rs485Profile rs485_{};
   uint32_t baud_rate_{BAUDRATE};
   size_t rx_buffer_size_{512};
   bool listen_only_{false};

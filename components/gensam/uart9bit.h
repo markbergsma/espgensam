@@ -38,6 +38,51 @@
 ///   Incoming characters are decoded continuously without blocking delay in write(), avoiding
 ///   race conditions with fast monitor replies. Echo rejection and GLM address filtering are
 ///   performed deterministically at the protocol stream layer.
+///
+/// Echo suppression, and why it is conditional:
+///   Whether any of a transmission reaches RX is a property of the board, not of the protocol.
+///   A transceiver whose direction line is driven deliberately, asserted before the first bit,
+///   is deaf for the whole frame and leaks nothing. An auto-direction module also ties /RE to DE
+///   and so does not loop whole frames back either -- but its one-shot is triggered by our own
+///   start bit, so it is necessarily late and the opening bits escape. That leak is short and
+///   forms its own RX burst; it is what the skip below actually absorbs. See rs485.h topology
+///   (a) for the measurements. The skip is armed only when Rs485Profile::tx_echoes_rx says so,
+///   and a guard in the RX ISR may *cancel* an armed skip but may never create or resize one.
+///
+///   That asymmetry is what makes the arrangement safe, and it matters more than it looks. The
+///   armed skip is a whole frame long, while the leak it is meant to absorb is a fragment. If
+///   the leak's burst never materialises, the next burst is the monitor's reply -- and on the
+///   auto-direction board that is the common case, 613 of 618 post-transmission bursts. Applying
+///   a frame-length skip there would destroy the reply outright. The guard cancels it, because
+///   that burst began after the transmitter stopped. A skip that is too long or wrongly applied
+///   eats the start bit of a reply arriving 5-10 us after our last stop bit, which is the
+///   failure mode AGENTS.md records as having been introduced and reverted twice. A skip that
+///   fails to apply merely lets a fragment through, and BusArbiter::classify() discards it at
+///   the frame layer.
+///
+///   The guard works by timestamp. write() records when the transmitter actually stopped (in the
+///   TX-done ISR, not from task context, so queueing latency is excluded), and the RX ISR
+///   reconstructs when its burst began by summing the symbol durations -- the callback fires
+///   after the burst ends plus the idle threshold, so arrival is not otherwise knowable. A burst
+///   that began after the transmitter stopped cannot contain our echo, so the skip is dropped and
+///   @ref RxDecodeSnapshot::echo_skip_cancelled counts it. The discriminant is a whole frame time
+///   (250-500 us at 288 kbaud) against single-digit-microsecond ISR latency, so the margin is two
+///   orders of magnitude. The skip *magnitude* stays exactly the transmitted frame's tick count
+///   and is never derived from a timestamp.
+///
+///   This relies on the TX-done ISR running before the RX-done ISR for the same exchange, which
+///   it does by construction: RMT reports a burst complete only after the idle threshold (50 us)
+///   has elapsed past its last edge, whereas TX-done fires at the final stop bit. Should that
+///   ordering ever be violated, the guard compares against the *previous* transmission and
+///   cancels, so our echo reaches the frame layer and BusArbiter::classify() discards it -- the
+///   degraded outcome, not the destructive one. Every failure here is arranged to fall that way.
+///
+///   Rejected alternatives, so they are not re-proposed:
+///   - Comparing the burst's span against the skip length ("too short to be ours"). Fails
+///     whenever the reply is longer than the query, which is the normal case.
+///   - Matching the burst's first decoded character against the first transmitted one. Cheap and
+///     nearly exact, but it puts protocol knowledge inside the driver and collides whenever a
+///     reply happens to open with the same byte.
 /// ===================================================================================
 
 #include <cstddef>
@@ -53,6 +98,7 @@
 #include "freertos/ringbuf.h"
 #include "soc/soc_caps.h"
 
+#include "rs485.h"
 #include "uart9bit_char.h"
 
 namespace esphome {
@@ -73,6 +119,12 @@ namespace gensam {
 ///                       hardware change. Framing errors are the lagging indicator.
 /// - @ref framing_errs   Neither stop position sampled HIGH; the character is lost outright.
 ///
+/// @ref echo_skip_cancelled is not a fault count. It tallies how often the guard described at the
+/// top of this file suppressed an armed echo skip because the burst began after the transmitter
+/// stopped. On an auto-direction board it should sit at or near zero; a climbing count there means
+/// echo bursts are going missing between transmission and reception, which is worth chasing. On a
+/// board whose /RE is tied to DE the skip is never armed, so this stays at zero by construction.
+///
 /// This is the snapshot type handed to reporting code. Each counter is a naturally aligned
 /// 32-bit word so an individual read cannot tear, and copying the whole set at once means a
 /// log line's arithmetic and its printed columns describe the same instant, rather than
@@ -84,6 +136,7 @@ struct RxDecodeSnapshot {
   uint32_t start_rejects{0};     ///< Falling edges rejected at the Start bit center check.
   uint32_t stopbit2_rescues{0};  ///< Characters salvaged only by sampling Stop Bit 2.
   uint32_t framing_errs{0};      ///< Characters lost: neither stop bit position sampled HIGH.
+  uint32_t echo_skip_cancelled{0};  ///< Armed echo skips suppressed by the timestamp guard.
 };
 
 /// @brief Character-level decode tally.
@@ -97,6 +150,7 @@ struct RxDecodeStats {
   volatile uint32_t start_rejects{0};
   volatile uint32_t stopbit2_rescues{0};
   volatile uint32_t framing_errs{0};
+  volatile uint32_t echo_skip_cancelled{0};
 
   RxDecodeSnapshot snapshot() const {
     RxDecodeSnapshot s;
@@ -106,6 +160,7 @@ struct RxDecodeStats {
     s.start_rejects = start_rejects;
     s.stopbit2_rescues = stopbit2_rescues;
     s.framing_errs = framing_errs;
+    s.echo_skip_cancelled = echo_skip_cancelled;
     return s;
   }
 };
@@ -123,14 +178,14 @@ class Uart9Bit {
   Uart9Bit &operator=(const Uart9Bit &) = delete;
 
   /// Initialize the RMT RX and RMT TX drivers.
-  /// @param port Reserved for compatibility.
-  /// @param tx_pin GPIO number for TX.
-  /// @param rx_pin GPIO number for RX.
-  /// @param de_pin Optional GPIO number for RS485 DE/RE direction control (-1 if unused).
+  ///
+  /// A profile whose Rs485Profile::tx_pin is negative brings up the receiver only, leaving the
+  /// RMT TX channel uncreated; that is how listen-only mode guarantees bus silence.
+  /// @param profile The board's RS-485 front end. Copied; the caller need not keep it alive.
   /// @param baud_rate Baud rate in bps (288000 for GLM RS485 bus).
   /// @param rx_buffer_size RX ring buffer capacity in Uart9BitChar units.
-  void setup(int port, int tx_pin, int rx_pin, int de_pin = -1,
-             uint32_t baud_rate = 288000, size_t rx_buffer_size = 512);
+  void setup(const Rs485Profile &profile, uint32_t baud_rate = 288000,
+             size_t rx_buffer_size = 512);
 
   /// Read up to @p max_chars 9-bit characters from the RX ring buffer.
   /// @param buf Output buffer for received characters.
@@ -177,11 +232,48 @@ class Uart9Bit {
   /// Consistent snapshot of the full decode tally.
   RxDecodeSnapshot rx_stats() const { return stats_.snapshot(); }
 
+  /// @brief Worst observed overshoot past a frame's own duration before the direction line was
+  /// released, in microseconds. Zero on boards without a direction pin.
+  ///
+  /// This is an **upper bound** on release latency, not a measurement of it, and the distinction
+  /// matters when comparing hardware. The anchor is taken in task context immediately before
+  /// rmt_transmit(), so anything delaying the hardware from actually starting -- most often the
+  /// WiFi or API task preempting us -- is charged here despite elapsing *before* the frame goes
+  /// out, where no monitor is replying and it cannot cost a reply. Only the portion after the
+  /// final stop bit is harmful, and separating the two needs a scope on the direction line.
+  ///
+  /// Read it together with @ref tx_overshoot_count *and* the reply-loss counters. The count on
+  /// its own does not separate a harmless delay from a harmful one. A large overshoot on a
+  /// sizeable fraction of transmissions, alongside @ref framing_errs and CRC counts that stay at
+  /// zero, can only mean the delay falls ahead of the frame, where the bus is idle and no monitor
+  /// is answering. So a rising count beside flat reply-loss counters is scheduling noise; a
+  /// rising count beside rising reply loss is a real release stall. Neither number means much
+  /// alone, and neither is comparable across builds that release the line differently.
+  uint32_t tx_overshoot_max_us() const { return tx_overshoot_max_us_; }
+
+  /// @brief Transmissions whose overshoot exceeded @c TX_OVERSHOOT_WARN_US.
+  uint32_t tx_overshoot_count() const { return tx_overshoot_count_; }
+
  private:
   /// RMT RX event callback (called from ISR when a pulse burst completes).
   static bool rmt_rx_done_callback_(rmt_channel_handle_t rx_chan,
                                     const rmt_rx_done_event_data_t *edata,
                                     void *user_ctx);
+
+  /// RMT TX event callback (called from ISR the moment a transmission completes).
+  ///
+  /// Releasing the direction line here rather than after rmt_tx_wait_all_done() is the whole
+  /// point: see rs485.h section 3.
+  static bool rmt_tx_done_callback_(rmt_channel_handle_t tx_chan,
+                                    const rmt_tx_done_event_data_t *edata,
+                                    void *user_ctx);
+
+  /// Record the moment transmission ended and release the direction line if it is asserted.
+  ///
+  /// Called from the TX-done ISR, and from write()'s error paths where no ISR will fire. Safe to
+  /// call redundantly. The timestamp is recorded unconditionally, including on boards with no
+  /// direction pin, because the RX guard depends on it.
+  void note_tx_complete_();
 
   /// Decodes RMT pulse symbols into 9-bit characters and pushes to ring buffer.
   /// @param symbols Pointer to received RMT symbol words.
@@ -194,7 +286,7 @@ class Uart9Bit {
   rmt_channel_handle_t rmt_tx_chan_{nullptr};
   rmt_encoder_handle_t rmt_tx_encoder_{nullptr};
   RingbufHandle_t rx_ringbuf_{nullptr};
-  int de_pin_{-1};
+  Rs485Profile profile_{};
   bool initialized_{false};
 
   // Ping-pong symbol buffers for continuous RMT reception.
@@ -209,11 +301,30 @@ class Uart9Bit {
   rmt_symbol_word_t tx_symbols_[RMT_TX_MAX_SYMBOLS];
 
   uint32_t baud_rate_{288000};
-  volatile uint32_t tx_echo_ticks_{0};
+
+  // --- TX / RX handover state -----------------------------------------------
+  // Written by write() in task context and by the TX-done ISR; read by the RX ISR.
+  //
+  // The two timestamps are the low 32 bits of esp_timer_get_time(), not the full int64. A 32-bit
+  // word cannot tear when an ISR on the other core reads it mid-update, whereas a 64-bit one can,
+  // and truncation costs nothing: every interval compared here is sub-millisecond, so the
+  // wrap-safe signed difference below stays correct across the ~71 minute rollover.
+  volatile uint32_t tx_echo_ticks_{0};   ///< Armed echo skip for the next burst, in RMT ticks.
+  volatile uint32_t tx_frame_ticks_{0};  ///< Duration of the frame just transmitted, in ticks.
+  volatile uint32_t tx_start_us_{0};     ///< When rmt_transmit() was issued.
+  volatile uint32_t tx_end_us_{0};       ///< When transmission completed.
+  volatile bool de_asserted_{false};     ///< Whether the direction line is currently driving.
+
+  /// Overshoot beyond which a transmission is counted as anomalous, in microseconds.
+  /// 100 us is ~2.4 character times at 288 kbaud: far longer than any legitimate ISR latency,
+  /// far shorter than the millisecond-scale stalls a preempted task produces.
+  static constexpr uint32_t TX_OVERSHOOT_WARN_US = 100;
 
   // Diagnostic counters (updated from ISR, read from main task).
   RxDecodeStats stats_{};
   volatile uint32_t rx_burst_count_{0};
+  volatile uint32_t tx_overshoot_max_us_{0};
+  volatile uint32_t tx_overshoot_count_{0};
 };
 
 }  // namespace gensam

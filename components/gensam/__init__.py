@@ -22,6 +22,7 @@ from esphome.const import (
     ENTITY_CATEGORY_DIAGNOSTIC,
     ENTITY_CATEGORY_CONFIG,
     CONF_DISABLED_BY_DEFAULT,
+    CONF_INVERTED,
 )
 
 from . import sam_import
@@ -34,6 +35,7 @@ CONF_DE_PIN = "de_pin"
 CONF_RE_PIN = "re_pin"
 CONF_POWER_PIN = "power_pin"
 CONF_SE_PIN = "se_pin"
+CONF_TX_ECHOES_RX = "tx_echoes_rx"
 CONF_RX_BUFFER_SIZE = "rx_buffer_size"
 CONF_LISTEN_ONLY = "listen_only"
 CONF_YIELD_TO_GLM = "yield_to_glm"
@@ -679,6 +681,13 @@ def _validate_groups(config):
 
 
 def _validate_hub(config):
+    # A transceiver that drives its direction line is normally one whose /RE is tied to DE, so it
+    # is deaf while transmitting and nothing loops back. Auto-direction modules keep receiving and
+    # do echo. Deriving the default this way means no board config has to state it, while an
+    # explicit value still wins for a board that breaks the correlation.
+    if CONF_TX_ECHOES_RX not in config:
+        config[CONF_TX_ECHOES_RX] = CONF_DE_PIN not in config
+
     # The deviation sensor only means anything when there is a group to deviate from.
     if CONF_GROUPS in config and CONF_GROUP_MODIFIED not in config:
         config[CONF_GROUP_MODIFIED] = binary_sensor.binary_sensor_schema(
@@ -729,6 +738,16 @@ _CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_RE_PIN): pins.gpio_output_pin_schema,
         cv.Optional(CONF_POWER_PIN): pins.gpio_output_pin_schema,
         cv.Optional(CONF_SE_PIN): pins.gpio_output_pin_schema,
+        # Whether any of our own transmission can reach RX. Defaults to "no de_pin configured",
+        # which is right for every board supported so far. Note this is not about whole frames
+        # looping back: auto-direction modules tie /RE to DE too, but their one-shot is triggered
+        # by our own start bit and so is necessarily late, letting the opening bits escape. A
+        # deliberately driven direction line is asserted before the first bit and leaks nothing.
+        # Set it explicitly only for a board that drives DE but leaves its receiver permanently
+        # enabled. See components/gensam/rs485.h.
+        # Note: `inverted:` is honoured on all of the pins above; `mode:` is not, since the
+        # driver configures pull-ups itself and RMT rebinds tx_pin/rx_pin regardless.
+        cv.Optional(CONF_TX_ECHOES_RX): cv.boolean,
         cv.Optional(CONF_RX_BUFFER_SIZE, default=512): cv.positive_int,
         cv.Optional(CONF_LISTEN_ONLY, default=False): cv.boolean,
         cv.Optional(CONF_YIELD_TO_GLM, default=True): cv.boolean,
@@ -890,24 +909,24 @@ async def to_code(config):
         cg.add(group_sel.set_hub(var))
         cg.add(var.set_group_select(group_sel))
 
-    tx_pin = await cg.gpio_pin_expression(config[CONF_TX_PIN])
-    rx_pin = await cg.gpio_pin_expression(config[CONF_RX_PIN])
+    # The GPIO number and its polarity are passed as plain values rather than the GPIOPin object:
+    # the RMT and gpio_ll layers need a gpio_num_t, and the direction line is written from an ISR
+    # where a virtual digital_write() into flash would not be safe. gpio_pin_expression() is still
+    # awaited for each pin so ESPHome's pin-conflict detection sees them.
+    async def _add_pin(key, setter):
+        if key not in config:
+            return
+        pin = await cg.gpio_pin_expression(config[key])
+        cg.add(setter(pin.get_pin(), config[key][CONF_INVERTED]))
 
-    cg.add(var.set_tx_pin(tx_pin.get_pin()))
-    cg.add(var.set_rx_pin(rx_pin.get_pin()))
+    await _add_pin(CONF_TX_PIN, var.set_tx_pin)
+    await _add_pin(CONF_RX_PIN, var.set_rx_pin)
+    await _add_pin(CONF_DE_PIN, var.set_de_pin)
+    await _add_pin(CONF_RE_PIN, var.set_re_pin)
+    await _add_pin(CONF_POWER_PIN, var.set_power_pin)
+    await _add_pin(CONF_SE_PIN, var.set_se_pin)
 
-    if CONF_DE_PIN in config:
-        de_pin = await cg.gpio_pin_expression(config[CONF_DE_PIN])
-        cg.add(var.set_de_pin(de_pin.get_pin()))
-    if CONF_RE_PIN in config:
-        re_pin = await cg.gpio_pin_expression(config[CONF_RE_PIN])
-        cg.add(var.set_re_pin(re_pin.get_pin()))
-    if CONF_POWER_PIN in config:
-        power_pin = await cg.gpio_pin_expression(config[CONF_POWER_PIN])
-        cg.add(var.set_power_pin(power_pin.get_pin()))
-    if CONF_SE_PIN in config:
-        se_pin = await cg.gpio_pin_expression(config[CONF_SE_PIN])
-        cg.add(var.set_se_pin(se_pin.get_pin()))
+    cg.add(var.set_tx_echoes_rx(config[CONF_TX_ECHOES_RX]))
 
     cg.add(var.set_rx_buffer_size(config[CONF_RX_BUFFER_SIZE]))
     cg.add(var.set_listen_only(config[CONF_LISTEN_ONLY]))
