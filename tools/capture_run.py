@@ -75,6 +75,14 @@ def main():
     ap.add_argument("--frames", type=int, default=4000, help="frames to accumulate (default 4000)")
     ap.add_argument("--settle", type=int, default=2,
                     help="Stats lines to discard after discovery (default 2)")
+    ap.add_argument("--passive", action="store_true",
+                    help="listen-only run: another master drives the bus and we yield to it, "
+                         "so do not treat yielding as a fault. Measures the receive path "
+                         "alone, with nothing of ours on the wire")
+    ap.add_argument("--expect-monitors", type=int, default=None,
+                    help="abort unless exactly this many monitors are registered; a phantom "
+                         "from a corrupted discovery reply is polled forever and never "
+                         "answers, which skews every rate against a clean run")
     args = ap.parse_args()
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -103,14 +111,20 @@ def main():
         with open(logpath, "w") as raw:
             for line in proc.stdout:
                 raw.write(line)
+                raw.flush()
                 s = parse_stats(line)
                 if s is None:
                     continue
 
-                if s["yielding"]:
+                if s["yielding"] and not args.passive:
                     print("[capture] ABORT: yielded to an external GLM master. "
-                          "Take the adapter off the bus and rerun.")
+                          "Take the adapter off the bus and rerun, or pass --passive.")
                     status = "aborted-yielding"
+                    break
+                if args.passive and not s["yielding"] and base is not None:
+                    print("\n[capture] ABORT: stopped yielding mid-run, so the bus went quiet "
+                          "and we are no longer measuring another master's traffic.")
+                    status = "aborted-not-yielding"
                     break
 
                 if base is None:
@@ -121,6 +135,11 @@ def main():
                     seen_since_discovery += 1
                     if seen_since_discovery <= args.settle:
                         continue
+                    if args.expect_monitors is not None and s["monitors"] != args.expect_monitors:
+                        print(f"[capture] ABORT: {s['monitors']} monitors registered, expected "
+                              f"{args.expect_monitors}. Rediscover and rerun.")
+                        status = "aborted-monitor-count"
+                        break
                     base = s
                     print(f"[capture] marked at {s['chars']} chars / {s['frames']} frames "
                           f"({s['monitors']} monitors). Accumulating...", flush=True)
@@ -130,6 +149,12 @@ def main():
                     print("[capture] ABORT: counters went backwards - the device rebooted "
                           "mid-run. Sample discarded.")
                     status = "aborted-reboot"
+                    break
+
+                if s["monitors"] != base["monitors"]:
+                    print(f"\n[capture] ABORT: monitor count changed {base['monitors']} -> "
+                          f"{s['monitors']} mid-run. Sample discarded.")
+                    status = "aborted-monitor-change"
                     break
 
                 last = s
