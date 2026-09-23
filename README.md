@@ -25,6 +25,7 @@ packages:
   # --- Board selection: exactly one of these ---
   board: !include packages/board_m5stack_atoms3_rs485_base.yaml
   # board: !include packages/board_waveshare_esp32s3_rs485_can.yaml
+  # board: !include packages/board_m5stack_atoms3_rs485_iso.yaml
 
   gensam: !include packages/gensam.yaml
 ```
@@ -52,7 +53,11 @@ While this hardware does work fine in practice, it has proven not to be ideal ha
 - **Status RGB LED**: none — the onboard LEDs are power and bus-activity indicators. Bus state is reported through the **Bus Status** sensor in Home Assistant.
 - **Rediscover button**: none — use the **Rediscover Monitors** button entity.
 
-Under evaluation, to test whether an explicitly driven direction line and a better receive path reduce the reply loss seen on the auto-direction module. Two things to be aware of before relying on it:
+Under evaluation. It is by a wide margin the best of the three on frame-level integrity — zero CRC errors, zero framing errors and zero invalid frames across 100,000 characters as bus master, where entry 1 loses 1.59% of frames.
+
+**Its long-run behaviour is unproven, though.** The longest run here is about 25 minutes with the system idle, and entry 3 showed that a board can look excellent on these counters and still drop the bus in prolonged real use. Like entry 3 this board is galvanically isolated with no ground reference, so if that mechanism is common-mode drift it would apply here too. Soak it under load before relying on it.
+
+Two things to be aware of before relying on it:
 
 - **Make sure the bus has exactly one terminator at the controller end.** This matters more than anything else in the wiring, and it is easy to get wrong in both directions. Measured on this board, 4,000+ frames per run:
 
@@ -64,6 +69,25 @@ Under evaluation, to test whether an explicitly driven direction line and a bett
   Unterminated, the line takes ~4.7 µs to coast back to its idle level after the driver releases — longer than a bit time — so monitors replying 5–10 µs later lose their start edge. Frames still arrive intact either way, but only because the address-alias workaround is repairing 71% of them.
 
   In practice: the board ships with its 120 Ω fitted, and a GLM adapter carries one too — a passive resistor, so it terminates whether or not the adapter is powered. **Adapter attached → pull the Waveshare jumper. Waveshare alone → leave it in.**
+
+### 3. M5Stack AtomS3 Lite + Isolated RS485 Unit (RS485-ISO)
+- **MCU**: ESP32-S3 dual-core
+- **RS485 TX**: `GPIO2` — Grove Port A, yellow wire
+- **RS485 RX**: `GPIO1` — Grove Port A, white wire
+- **Direction Control**: Automatic (CA-IS3082W with `/RE` tied to `DE`, `DI` grounded, and our TX line inverted onto that pin — the driver is on only while a `0` is on the wire, and a `1` is the line released to the bias)
+- **Isolation**: Galvanically isolated RS-485 with its own isolated DC-DC, rated 1000 V<sub>RMS</sub>; 4.7 kΩ fail-safe bias, **no termination fitted**
+- **Status RGB LED**: `GPIO35` (WS2812)
+- **Rediscover button**: `GPIO41`
+
+> **Not recommended.** In three hours of normal listening this combination lost the entire monitor bus several times. It recovers unaided, but recovery re-runs speaker configuration, which deliberately silences output — so each event is a few seconds of audio dropout. An earlier session also enumerated a phantom monitor from a corrupted discovery reply. Entry 1 has never done either in weeks of use.
+>
+> Note this is *despite* better frame-level integrity than entry 1 (0.38% CRC against 1.59%). Its failures are at enumeration level rather than frame level, and only the former is audible. See [docs/rs485-transceiver-comparison.md](docs/rs485-transceiver-comparison.md) §4.
+
+It pairs the controller of entry 1 with an isolated front end like entry 2's, so it is the combination that would tell you whether the Atomic Base's reply loss is the auto-direction circuit or the receive path around it. Three things to be aware of:
+
+- **This is a Grove unit, not a stacking base, so the pins are not entry 1's.** It plugs into the AtomS3 Lite's HY2.0 Port A (`GPIO2`/`GPIO1`); the Atomic RS485 Base's `GPIO6`/`GPIO5` are the bottom header, a different connector entirely.
+- **Fit the 120 Ω that comes in the box, or terminate elsewhere.** Nothing is fitted on the unit and there is no jumper for one. Entry 1 is also unterminated and does not communicate at all standalone, so assume the same here before concluding the unit is faulty.
+- **Reception at 288 kbaud is clean; the problems are on the transmit side.** Listening to GLM traffic, this board decodes 4,101 frames with a single CRC error. Everything degrades 3–4× once it starts driving the bus itself.
 
 ---
 
@@ -78,7 +102,7 @@ Connect the RS-485 transceiver terminal block to a standard CAT5/6 RJ45 patch ca
 | **Pin 8** | Brown | **GND** (bus ground reference) | `GND` |
 | Pins 3–7 | — | *Unconnected* | — |
 
-The `GND` row is board-dependent. **The Waveshare's RS-485 terminal block has only `A` and `B`** — there is no ground terminal, so pin 8 is simply left unconnected there, and the board works correctly that way. Its fail-safe bias network ties `A` to the isolated 3V3 rail and `B` to the isolated ground, so the isolated side already self-references to the bus through 4.7 kΩ and never actually floats.
+The `GND` row is board-dependent. **The Waveshare's RS-485 terminal block has only `A` and `B`** — there is no ground terminal, so pin 8 is simply left unconnected there, and the board works correctly that way. Its fail-safe bias network ties `A` to the isolated 3V3 rail and `B` to the isolated ground, so the isolated side already self-references to the bus through 4.7 kΩ and never actually floats. The Isolated RS485 Unit is the same in this respect: its four-way terminal is `SHIELD` / unconnected / `A` / `B`, the bus-side ground reaches the `SHIELD` pin only through 1 MΩ ∥ 1 nF, and it biases `A`/`B` against its isolated 5 V rail through the same 4.7 kΩ pair.
 
 A defined ground reference is still better practice on long runs or in electrically noisy installations, where common-mode could otherwise drift outside the transceiver's −7 V…+12 V input range. On this board the only access is the internal pin header. It would create no ground loop — the isolation barrier blocks any return path through mains earth — but it has not proved necessary in practice.
 

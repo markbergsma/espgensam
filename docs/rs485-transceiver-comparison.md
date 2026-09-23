@@ -11,8 +11,8 @@ For why the code is shaped the way it is, see [`rs485.h`](../components/gensam/r
 
 ## Setup
 
-Sections 1 and 2 are the Waveshare; section 3 compares it against the M5Stack AtomS3 Lite +
-Atomic RS485 Base and states that run's configuration separately.
+The table below is the Waveshare, and applies to sections 1 and 2. Sections 3 to 5 involve other
+boards or other bus configurations and each states its own.
 
 | | |
 |---|---|
@@ -211,10 +211,132 @@ isolated and exposes no ground terminal. Each is wired the only way it can be.
   per 4,000 frames (§2). A board without a direction line cannot benefit from it. That is the
   mechanism, not a confound.
 
+## 4. M5Stack Isolated RS485 Unit (RS485-ISO)
+
+The AtomS3 paired with an isolated front end and a third direction topology — CA-IS3082W, `DI`
+grounded, the direction line driven by inverted TX bit by bit. Intended to separate "auto-direction
+as an approach" from "the Atomic Base's particular circuit". Same bus as §3: 120 Ω terminator, no
+GLM adapter, master mode.
+
+### `tx_echoes_rx`, measured both ways
+
+| | `false` (4,005 frames) | `true` (3,449 frames) |
+|---|---|---|
+| `start rej` / chars | 113,895 (**106%**) | **33 (0.036%)** |
+| `echo cancelled` | 0 | 0 |
+| `crc errs` / frames | 0.375% | 0.377% |
+| `C0 alias` / frames | 2.971% | 2.696% |
+| `framing errs` / chars | 0.894% | 0.938% |
+| bursts : frames | 2.93 : 1 | 3.01 : 1 |
+
+Because `DE` is inverted TX bit by bit, every *mark* bit releases the driver and re-enables the
+receiver mid-transmission, so our own traffic reaches RX as chatter. With the skip disarmed the
+decoder rejected more start edges than it decoded characters. Arming it removes that completely
+and changes nothing else: **`true` is correct here, but it was cosmetic.** The board's error rates
+were never caused by decoding its own transmission.
+
+`echo cancelled` stayed at 0 throughout, so the leak burst reliably precedes any reply and the
+skip is safe on this board.
+
+### Receive path, isolated: listen-only with GLM driving
+
+The CA-IS3082W is specified to 500 kbps, and its driver enable/disable time (3 µs typ, 5 µs max)
+is not smaller than a 3.47 µs bit at 288 kbaud — which on a per-bit `DE` topology looked like it
+might make the part unusable at this rate. Testing that means taking our own transmissions off the
+wire: in `listen_only` the TX line rests at mark, `DE` stays deasserted, the receiver is
+continuously enabled, and nothing toggles per bit. The GLM adapter drove the bus; monitors were
+learned by snooping.
+
+| | master (`tx_echoes_rx: true`) | **listen-only** |
+|---|---|---|
+| chars / frames | 91,123 / 3,449 | 38,803 / 4,101 |
+| bursts : frames | 3.01 : 1 | **0.93 : 1** |
+| `crc errs` | 0.377% | **0.024%** (1) |
+| `framing errs` | 0.938% | **0.330%** |
+| `C0 alias` | 2.696% | **0.634%** |
+| `start rej` | 33 | **0** |
+
+**The receive path is not the problem.** With nothing of ours on the wire, CRC essentially
+vanishes, framing improves 3×, aliases 4× and start rejects go to zero. The burst ratio inverts:
+0.93 per frame, below 1.0 because GLM packs several frames into a burst, against 3.01 when we
+transmit. The transceiver decodes 288 kbaud perfectly well.
+
+So the switching-time concern does not apply to reception — it cannot, since `DE` never toggles
+while listening. Whether it applies to *transmission* is untested, and that is now the only place
+this board's problems can originate: its own driving, through the per-bit `DE` topology.
+
+Two limits on this run. The residual 0.330% framing is not zero, and since this measures GLM's
+transmissions it could be the adapter's driving rather than our receiving. And a passive run
+cannot reproduce the bus losses below, which happened over hours in master mode.
+
+### The finding that actually matters
+
+**It loses the whole bus, repeatedly, in normal use.** One controlled run aborted when all three
+monitors timed out at ~3,500 frames; across three hours of real listening it happened several
+times. It recovers unaided, but recovery re-runs device configuration, and that path silences
+output deliberately to avoid pops — so each event is **a few seconds of audible silence**. An
+earlier attempt also enumerated a phantom monitor from a corrupted discovery reply.
+
+Weeks of use on the Atomic RS485 Base have never produced this.
+
+### Why the counters did not predict it
+
+This board has the better frame-level integrity of the two auto-direction front ends — 0.377% CRC
+against the Atomic Base's 1.594% — and is nonetheless the worse board to live with. Frame-level
+loss is absorbed by retries and is inaudible. Enumeration-level failure is not: it drops the
+registry, triggers rediscovery, and interrupts audio.
+
+**Per-frame error rates are not a proxy for user-visible reliability, and every metric in this
+document is a per-frame rate.** A board should not be recommended on the strength of §1–§4 alone.
+The acceptance test is hours of real use under load, and the metric is bus losses per hour, not
+CRC percent. `grep -c "operational status changed to: Offline"` over a long `esphome logs` capture
+counts them.
+
+### Untested on the other boards
+
+Three hours of playback with amplifiers driving is a condition neither §3 board has been measured
+under; the longest Waveshare run here is ~25 minutes with the system idle. That matters
+specifically because **the Waveshare is also galvanically isolated with no ground reference** — its
+terminal block has no ground pin, and the ISO unit reaches SHIELD only through 1 MΩ ∥ 1 nF. If the
+mechanism is common-mode drift accumulating on a floating isolated side, it would apply to the
+Waveshare as well. Do not read §3 as evidence of long-run reliability.
+
+## 5. Refactor regression check, AtomS3
+
+Before/after on the same board, back to back, with only the firmware changing. Both runs yielded
+to a GLM adapter driving the bus, so neither transmitted.
+
+| | `main` | `Rs485Profile` refactor |
+|---|---|---|
+| chars / frames | 34,495 / 3,663 | 43,234 / 4,598 |
+| `start rej` | 0 | 0 |
+| `stop2` / chars | 0.041% | 0.035% |
+| `framing errs` / chars | 0.293% | 0.294% |
+| `crc errs` / frames | 0.055% | 0.043% |
+| `C0 alias` / frames | 0.655% | 0.609% |
+
+Every difference is inside noise: **the refactor is behaviour-neutral on the receive path.**
+
+Two limits worth being explicit about. Because both runs were yielding, neither exercised the
+refactor's *transmit*-side changes — the conditional echo-skip arming and the cancel-only guard
+never ran, and the ISR direction release is a no-op on a board with no direction pin. And the
+absolute rates come from a bus configuration later abandoned (two controllers plus an adapter
+attached), so they are comparable with each other and with nothing else in this document.
+
 ## Not yet measured
 
-- **Whether the `Rs485Profile` refactor is behaviour-neutral on the AtomS3.** Needs a before/after
-  pair on that board, terminated. §3 measures the board, not the refactor.
+- **The refactor's transmit path on the AtomS3.** §5 covers reception only. Exercising the echo
+  skip and its guard on that board needs a master-mode before/after, which means flashing `main`
+  onto it again.
+- **Long-run behaviour under load, on any board other than the ISO unit.** This is the gap that
+  matters most. §4's bus losses only appeared over hours of real listening; the longest run for
+  §3's two boards is ~25 minutes with the system idle, which is not the same test. Until the
+  Waveshare has been soaked under load it is unproven on the axis that disqualified the ISO unit —
+  and being isolated with no ground reference, it shares the characteristic that is the leading
+  suspect.
+- **What on the ISO unit's transmit side is actually at fault.** §4 localises it to its own
+  driving and rules out the receive path, but distinguishing the per-bit `DE` switching time from
+  anything else needs a scope on the direction line against the A−B differential.
 - **Double-ended termination**, i.e. one terminator at the controller and one at the last speaker.
 - **A ground reference.** The board's terminal block has no ground pin; the internal header is the
   only access. Not needed for correct operation in this setup.
@@ -225,15 +347,5 @@ isolated and exposes no ground terminal. Each is wired the only way it can be.
 python3 tools/capture_run.py --label "<what is different about this run>" \
     --yaml espgensam-waveshare-local.yaml --device espgensam-waveshare.local
 ```
-
-Rules that make the numbers comparable, learned the hard way:
-
-- **One variable per run**, named in the label.
-- **Mark after discovery.** Errors cluster during RACE discovery and then stop; including them
-  makes a steady-state rate meaningless.
-- **Nothing else on the bus.** An oscilloscope probe is a variable — it adds capacitance and, on
-  an isolated board, an earth reference.
-- **Never compare across a reboot or a reflash** unless that is the variable.
-- Counters are cumulative since boot, so every figure here is a delta.
 
 Raw logs are written to `captures/` (gitignored) with the run label in the filename.

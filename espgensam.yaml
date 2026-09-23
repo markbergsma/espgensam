@@ -28,6 +28,7 @@ packages:
   # --- Board selection: exactly one of these ---
   board: !include packages/board_m5stack_atoms3_rs485_base.yaml
   # board: !include packages/board_waveshare_esp32s3_rs485_can.yaml
+  # board: !include packages/board_m5stack_atoms3_rs485_iso.yaml
 
   gensam: !include packages/gensam.yaml
 

@@ -1,0 +1,107 @@
+# M5Stack AtomS3 Lite + Isolated RS485 Unit (RS485-ISO, SKU U094) — HARDWARE ONLY.
+#
+# See AGENTS.md, "The board seam contract", for what may and may not go in this file.
+#
+# Pins: the unit is a Grove/HY2.0 peripheral hanging off Port A, not a stacking base, so it does
+# NOT use the GPIO6/GPIO5 of the Atomic RS485 Base -- that is the bottom header, a different
+# connector. Established from M5Stack's own pin maps rather than assumed: the AtomS3 Lite's Port A
+# is yellow = G2, white = G1, and the unit puts its own UART_RX on yellow and its UART_TX on
+# white. The schematic settles whose point of view those names are: the net named UART_Rx drives
+# the direction transistor's gate, so it is the unit's input, ours to drive. M5Stack's Core wiring
+# table says the same thing from the other end -- host U2TXD (G17, which is Port C's yellow pin)
+# goes to the unit's "RS485 RXD".
+#
+# RS-485: CA-IS3082W (U1), a half-duplex transceiver with the galvanic barrier inside the chip,
+# bus side fed by a B0505ST16-W5 isolated DC-DC. Its direction circuit is a third topology, and
+# not the Atomic Base's:
+#   - /RE (pin 4) and DE (pin 5) share one net, as on the Waveshare.
+#   - DI (pin 6) is tied to ground. No data of ours crosses the barrier as data.
+#   - Our TX line drives an inverter -- Q1 (BSS138) against a 4.7k pull-up (R7) -- straight onto
+#     that net. There is no monostable and no timing capacitor: DE is TX, inverted, bit by bit.
+# So a `0' is driven actively (DI low => A low, B high) and a `1' is the driver released and the
+# line pulled back to mark by the fail-safe bias. Two things follow. An inter-byte gap cannot drop
+# DE mid-frame the way it does on the Atomic Base, because a gap is indistinguishable from a stop
+# bit -- the zero-gap RMT requirement in AGENTS.md is not load-bearing here. And every mark bit
+# re-enables the receiver, so this board is not deaf during transmission the way the Waveshare is.
+#
+# Three things to know before trusting a measurement taken on this board:
+#   - No terminator is fitted, and there is no jumper for one. M5Stack ships a loose 120 ohm
+#     resistor in the box for you to screw across A/B. The Atomic RS485 Base, also unterminated,
+#     does not communicate at all standalone; see README.md and section 1 of
+#     docs/rs485-transceiver-comparison.md before assuming this one is broken.
+#   - The fail-safe bias is 4.7k from A to the isolated 5 V rail and 4.7k from B to isolated
+#     ground: 9.4k across the pair, the same figure whose 4.7 us unterminated coast that section
+#     blames for the C0 alias. Terminated it holds only ~63 mV of idle differential, but unlike
+#     the SP3485 that is not ambiguous -- the CA-IS3082W's receiver thresholds are offset negative
+#     (VIT+ is -100 mV typ, -20 mV max), so a biased idle line reads mark by design.
+#   - The chip is specified to 500 kbps and GLM runs at 288 kbaud. The datasheet's driver
+#     enable/disable table puts one of the two transitions at 3 us typ / 5 us max -- the symbols
+#     and the descriptions disagree about which -- against a 3.47 us bit time, and on this module
+#     that transition is what shapes every bit. Verify passively (listen_only) before trusting
+#     active-mode results.
+#
+# Wiring: the VH-3.96 terminal block is SHIELD / unconnected / A / B. As on the Waveshare there is
+# no isolated ground terminal -- the bus-side ground reaches the SHIELD pin only through 1M || 1nF
+# -- so RJ45 pin 8 has nowhere to land. See README.md.
+
+esp32:
+  variant: esp32s3
+  framework:
+    type: esp-idf
+
+# Onboard WS2812 RGB LED (GPIO35). Consumes a third RMT channel alongside the two the bus uses.
+light:
+  - platform: esp32_rmt_led_strip
+    id: atom_led
+    name: "Status LED"
+    pin: GPIO35
+    num_leds: 1
+    chipset: WS2812
+    channel_colors: GRB
+    rmt_symbols: 96
+
+gensam:
+  id: gensam_hub
+  tx_pin: GPIO2
+  rx_pin: GPIO1
+
+  # This began as `false', reasoned from the schematic: /RE is tied to DE and the same edge that
+  # becomes the start bit turns Q1 off, so in principle nothing of ours reaches RX and an armed
+  # skip would fast-forward into the reply. That reasoning missed what the topology does between
+  # bits. DE is inverted TX bit by bit, so every *mark* bit releases the driver and re-enables the
+  # receiver -- mid-transmission, ~3.5 us at a time, on a line nothing is driving.
+  #
+  # Measured `false', master mode, 120 ohm terminated, 107,414 chars / 4,005 frames:
+  #
+  #   start rej   113,895   106% of characters -- more rejected edges than characters decoded
+  #   bursts      11,734    2.93 per frame, where an explicit-DE board runs exactly 1.00
+  #
+  # Those are the symptoms the original note named as the trigger for putting the skip back on.
+  # See docs/rs485-transceiver-comparison.md.
+  #
+  # Note the skip absorbs one burst per transmission and there are ~3, so this is not expected to
+  # clear the flood -- the underlying problem is that the CA-IS3082W's driver enable/disable time
+  # (3 us typ, 5 us max) is not smaller than a 3.47 us bit period, so on a per-bit DE topology the
+  # transceiver cannot settle within the bit it is switching for. No firmware setting fixes that.
+  tx_echoes_rx: true
+
+  status_led:
+    light: atom_led
+    mode: bus_status
+    brightness: 50%
+
+# Physical button on the AtomS3 Lite (GPIO41, active-low) triggers monitor rediscovery.
+# The button *entity* is board-independent and lives in packages/gensam.yaml; only this physical
+# GPIO binding belongs to the board.
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO41
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "Rediscover Button"
+    on_press:
+      then:
+        - lambda: id(gensam_hub).rediscover_monitors();
