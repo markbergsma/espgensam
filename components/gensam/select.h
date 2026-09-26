@@ -1,7 +1,7 @@
 #pragma once
 
 /// @file select.h
-/// @brief ESPHome Select entities for per-monitor input routing and group preset selection.
+/// @brief ESPHome Select entities for per-monitor input routing and crossover, and group presets.
 ///
 /// ===================================================================================
 /// ARCHITECTURAL DESIGN RATIONALE
@@ -34,29 +34,44 @@
 ///    component does not implement.  A snooped 0x03 is handled defensively in
 ///    snoop_audio_source_().
 ///
-/// 2. Group Preset Selection (GenSAMGroupSelect):
+/// 2. Bass Management Crossover (GenSAMCrossoverSelect):
+///    CMD_BASS_MANAGE_XO (0x3B) carries one big-endian 16-bit word: a crossover frequency in
+///    Hz on a 5 Hz grid from 50 to 120, or CROSSOVER_FULL_BAND (0x0001), which turns bass
+///    management off for a system with no subwoofer.  GLM's setup file stores the same 1.
+///
+///    That is an enum, not a quantity, so it is a select ("Full band", "50 Hz" ... "120 Hz")
+///    rather than a number: a number entity would have to clamp 1 to 50 Hz, silently turning
+///    bass management back on.  crossover.h holds the option strings and their conversion.
+///
+///    Monitors NACK (0x11) an empty 0x3B, so the stored setting cannot be read back; the
+///    select reads "unknown" until something sets it.  A snooped value that is not one of the
+///    options (neither project has seen one) is stored and re-sent, but not published.
+///
+/// 3. Group Preset Selection (GenSAMGroupSelect):
 ///    Selecting a group re-pushes a whole calibrated DSP block - filters, levels, delays,
 ///    crossover and input routing - to every speaker, which is what GLM does.  A group push
 ///    also drives the input selects above, so they show what the speakers were last told.
 ///
-/// 3. Manual Overrides Are Temporary By Construction:
-///    Changing a monitor's input by hand transmits immediately and updates its binding, but
+/// 4. Manual Overrides Are Temporary By Construction:
+///    Changing a monitor's input or crossover by hand transmits immediately and updates its binding, but
 ///    nothing about the active group changes, so the next group push - a group switch, a
-///    standby cycle, or a rediscovery - restores that group's routing.  The deviation is
+///    standby cycle, or a rediscovery - restores that group's setting.  The deviation is
 ///    visible meanwhile through the hub's "Group Modified" binary sensor.
 ///
-/// 4. Non-Destructive Boot:
-///    Monitors hold their input routing in their own flash.  A binding starts unconfigured and
-///    transmits nothing until a group is applied, Home Assistant selects something, or a GLM
-///    frame is snooped, so powering this component up never overwrites what the speakers had.
+/// 5. Non-Destructive Boot:
+///    Monitors hold their input routing and crossover in their own flash.  A binding starts
+///    unconfigured and transmits nothing until a group is applied, Home Assistant selects
+///    something, or a GLM frame is snooped, so powering this component up never overwrites
+///    what the speakers had.
 ///
-/// 5. Volatile Persistence & Standby Wakeup Retransmission:
-///    Monitors lose volatile DSP state in amplifier sleep, so the configured routing is
-///    re-transmitted during CONFIGURING_DEVICES after every rediscovery.
+/// 6. Volatile Persistence & Standby Wakeup Retransmission:
+///    Monitors lose volatile DSP state in amplifier sleep, so the configured routing and
+///    crossover are re-transmitted during CONFIGURING_DEVICES after every rediscovery.
 ///
-/// 6. Passive Bus Snooping:
-///    0x40 frames from external GLM software are snooped, updating the owning monitor's select
-///    without bus contention.
+/// 7. Passive Bus Snooping:
+///    0x40 and 0x3B frames from external GLM software are snooped, updating the owning
+///    monitor's selects without bus contention.  That is not only cosmetic: the
+///    re-transmission above would otherwise reassert the stale value.
 /// ===================================================================================
 
 #include "esphome/core/component.h"
@@ -110,6 +125,30 @@ class GenSAMInputSelect : public select::Select {
   void control(const std::string &value) override {
     if (hub_ != nullptr) {
       hub_->set_monitor_input_by_name(serial_or_id_, value);
+    }
+  }
+
+  GenSAMHub *hub_{nullptr};
+  std::string serial_or_id_{};
+};
+
+/// @brief Select entity that sets one monitor's bass management crossover, or full band.
+class GenSAMCrossoverSelect : public select::Select {
+ public:
+  /// @brief Set the parent GenSAMHub instance.
+  /// @param hub Pointer to the GenSAMHub.
+  void set_hub(GenSAMHub *hub) { hub_ = hub; }
+
+  /// @brief Set the target speaker's factory serial number or unique ID string.
+  /// @param id Serial number string or unique ID string.
+  void set_serial_or_id(const std::string &id) { serial_or_id_ = id; }
+
+ protected:
+  /// @brief Action executed when the user selects a crossover option in Home Assistant.
+  /// @param value "Full band" or "<n> Hz", as produced by crossover_to_str().
+  void control(const std::string &value) override {
+    if (hub_ != nullptr) {
+      hub_->set_monitor_crossover_by_name(serial_or_id_, value);
     }
   }
 

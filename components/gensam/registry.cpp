@@ -38,6 +38,22 @@ bool monitor_matches_identifier(const GenSAMMonitor &mon, const std::string &ser
   return mon.binding != nullptr && binding_matches_identifier(*mon.binding, serial_or_id);
 }
 
+/// Publish a binding's crossover to its select, if the value is one of the select's options.
+/// A value that is not stays stored, and is still re-sent to the speaker, but publishing it
+/// would give the select a state outside its option list.
+void publish_crossover(const GenSAMMonitorBinding &b) {
+  if (b.crossover_select == nullptr) {
+    return;
+  }
+  char buf[CROSSOVER_STR_SIZE];
+  crossover_to_str(b.crossover_freq, buf, sizeof(buf));
+  if (!is_valid_crossover(b.crossover_freq)) {
+    ESP_LOGW(TAG, "Crossover %s for '%s' is not a selectable option; not shown", buf, b.name.c_str());
+    return;
+  }
+  b.crossover_select->publish_state(buf);
+}
+
 /// Log-friendly model name for a monitor whose device query may not have completed yet.
 const char *model_or(const GenSAMMonitor &mon, const char *fallback) {
   return mon.model.empty() ? fallback : mon.model.c_str();
@@ -95,8 +111,8 @@ void MonitorRegistry::bind_if_matched(GenSAMMonitor &mon) {
              mon.address, model_or(mon, "(querying)"), mon.serial_number.c_str(), b.name.c_str());
     this->publish_metadata(mon);
     this->publish_online(mon);
-    if (b.crossover_number != nullptr && b.crossover_configured) {
-      b.crossover_number->publish_state(b.crossover_freq);
+    if (b.crossover_configured) {
+      publish_crossover(b);
     }
     if (b.input_select != nullptr && b.input_configured) {
       b.input_select->publish_state(input_to_str(b.source, b.aes3_channel));
@@ -209,9 +225,7 @@ void MonitorRegistry::set_mute(GenSAMMonitor &mon, bool mute) {
 void MonitorRegistry::set_binding_crossover(GenSAMMonitorBinding &b, uint16_t freq_hz) {
   b.crossover_freq = freq_hz;
   b.crossover_configured = true;
-  if (b.crossover_number != nullptr) {
-    b.crossover_number->publish_state(freq_hz);
-  }
+  publish_crossover(b);
 }
 
 void MonitorRegistry::set_binding_input(GenSAMMonitorBinding &b, uint8_t source, uint8_t channel) {

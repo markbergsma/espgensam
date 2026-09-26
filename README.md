@@ -190,8 +190,9 @@ Each monitor gets an **Input** select listing `Analog`, `AES3 Channel A (Left)`,
 how the hardware works: a GLM group can perfectly well run the subwoofer on AES3 while both
 main monitors are analog, so there is no single system-wide input to select.
 
-Each monitor also gets three calibration controls: **Bass Management Crossover Frequency**
-(50-120 Hz), **Level** (-60 to 0 dB, attenuation only) and **Delay** (0-192 ms). They are
+Each monitor also gets three calibration controls: **Bass Management Crossover** (`Full band`
+for no bass management, or 50-120 Hz), **Level** (-60 to 0 dB, attenuation only) and
+**Delay** (0-192 ms). They are
 disabled by default, because a group preset normally owns them and overwrites them at its next
 push — enable them in Home Assistant for a speaker you want to trim by hand.
 
@@ -224,7 +225,7 @@ gensam:
   devices:
     - unique_id: 1842915          # matches a monitor's unique_id above
       source: aes3_sum            # analog | aes3_a | aes3_b | aes3_sum
-      crossover: 90               # Hz
+      crossover: 90               # Hz, or full_band for a system without a subwoofer
       level_db: -1.9258           # per-speaker trim from AutoCal
       delay_samples: 289          # alignment delay, 48 kHz samples (max 9216 = 192 ms)
       lfe_channel: aes3_b         # subwoofers in surround setups only; default none

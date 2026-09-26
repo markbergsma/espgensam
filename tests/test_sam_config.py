@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "components"))
 
-from sam_fixture import GHOST_ID, check, make_sam, run, write_sam  # noqa: E402
+from sam_fixture import GHOST_ID, check, full_band_sam, make_sam, run, write_sam  # noqa: E402
 
 import esphome.config_validation as cv  # noqa: E402
 from esphome.core import CORE  # noqa: E402
@@ -124,6 +124,46 @@ def test_imported_groups_pass_the_cross_checks_unchanged():
           "every imported device ends up with an explicit crossover")
     # The fixture's two-way omits its own crossover and inherits the group's 90 Hz.
     check(devices[1][gensam.CONF_CROSSOVER] == 90, "the inherited crossover is the group's")
+
+
+def test_a_full_band_setup_file_builds():
+    # The failure this replaced: "value must be at least 50 (devices[0].crossover)".
+    config = gensam._validate_groups(expand(text=full_band_sam())[0])
+    devices = config[gensam.CONF_GROUPS][0][gensam.CONF_DEVICES]
+    check(all(d[gensam.CONF_CROSSOVER] == gensam.CROSSOVER_FULL_BAND for d in devices),
+          "a full-band group validates to the full-band wire value")
+
+
+def test_crossover_spellings():
+    def device(crossover):
+        return gensam.GROUP_DEVICE_SCHEMA({gensam.CONF_UNIQUE_ID: 1, gensam.CONF_CROSSOVER: crossover})
+
+    check(device("full_band")[gensam.CONF_CROSSOVER] == gensam.CROSSOVER_FULL_BAND,
+          "full_band is accepted")
+    check(device("Full_Band")[gensam.CONF_CROSSOVER] == gensam.CROSSOVER_FULL_BAND,
+          "full_band is case-insensitive")
+    check(device(90)[gensam.CONF_CROSSOVER] == 90, "a frequency is still accepted")
+    for bad, why in ((1, "the bare wire value 1"), (40, "below the range"), (125, "above the range"),
+                     (87, "off the 5 Hz grid"), ("none", "an unknown keyword")):
+        try:
+            device(bad)
+            check(False, f"{why} is rejected")
+        except cv.Invalid:
+            check(True, f"{why} is rejected")
+
+    group = gensam._validate_groups({
+        gensam.CONF_GROUPS: [gensam.GROUP_SCHEMA({
+            "name": "No Sub", "crossover": "full_band", "devices": [{"unique_id": 1}],
+        })],
+    })
+    check(group[gensam.CONF_GROUPS][0][gensam.CONF_DEVICES][0][gensam.CONF_CROSSOVER]
+          == gensam.CROSSOVER_FULL_BAND, "a device inherits a group-level full_band")
+
+
+def test_the_crossover_options_match_crossover_h():
+    # The same list tests/test_crossover.cpp checks crossover_to_str() against.
+    check(gensam.CROSSOVER_OPTIONS == ["Full band"] + [f"{hz} Hz" for hz in range(50, 121, 5)],
+          "the select offers full band, then 50 to 120 Hz in 5 Hz steps")
 
 
 def test_a_name_collision_with_a_hand_written_group_is_rejected():

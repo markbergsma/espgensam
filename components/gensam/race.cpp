@@ -514,7 +514,7 @@ bool GenSAMHub::configure_monitor_(const GenSAMMonitor &mon) {
   // 2. Bass management crossover frequency
   // Gated on crossover_configured alone, which already means "somebody set this deliberately"
   // (it defaults false, so an unconfigured monitor is never sent the default frequency).  The
-  // presence of a Home Assistant number entity is not a precondition: a crossover snooped from
+  // presence of a Home Assistant select entity is not a precondition: a crossover snooped from
   // GLM sets crossover_configured on a binding that may have no entity at all, and that value
   // still has to be reapplied here, since monitors reset it when passing through standby.
   if (mon.binding != nullptr && mon.binding->crossover_configured) {
@@ -522,7 +522,9 @@ bool GenSAMHub::configure_monitor_(const GenSAMMonitor &mon) {
       delay(CONFIG_FRAME_GAP_MS);
     }
     uint16_t freq = mon.binding->crossover_freq;
-    ESP_LOGI(TAG, "Configuring bass management crossover frequency for monitor 0x%02X: %u Hz", addr, freq);
+    char buf[CROSSOVER_STR_SIZE];
+    ESP_LOGI(TAG, "Configuring bass management crossover for monitor 0x%02X: %s", addr,
+             crossover_to_str(freq, buf, sizeof(buf)));
     this->send_frame(make_crossover(addr, freq));
     configured_anything = true;
   }

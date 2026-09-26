@@ -141,6 +141,17 @@ KNOWN = {1842915, 1654321}
 GHOST_ID = 2468013
 
 
+def full_band_sam():
+    """The fixture with bass management off everywhere, which GLM writes as a crossover of 1.
+
+    The subwoofer keeps its AutoPhase angles, so this also exercises a phase with no
+    crossover to realise it at.
+    """
+    return (make_sam()
+            .replace("CrossoverFrequency(Hz):90", "CrossoverFrequency(Hz):1")
+            .replace("Group_Crossover:90", "Group_Crossover:1"))
+
+
 def write_sam(directory, text=None, name="fixture.sam"):
     """Write the fixture into `directory` and return its path."""
     path = os.path.join(directory, name)

@@ -77,7 +77,7 @@ struct GroupDevice {
   /// than reconfigured, so its DSP state is left alone.
   bool enabled{true};
 
-  uint16_t crossover_hz{DEFAULT_CROSSOVER_HZ};  ///< Bass management crossover for this device.
+  uint16_t crossover_hz{DEFAULT_CROSSOVER_HZ};  ///< Bass management crossover in Hz, or CROSSOVER_FULL_BAND.
   uint8_t source{SOURCE_ANALOG};                ///< SOURCE_ANALOG or SOURCE_DIGITAL_AES3.
   uint8_t aes3_channel{AES3_CHANNEL_A};         ///< AES3 sub-channel; ignored when analog.
 

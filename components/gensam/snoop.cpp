@@ -112,6 +112,8 @@ void GenSAMHub::snoop_crossover_(const Frame &frame) {
     return;
   }
   uint16_t freq = (static_cast<uint16_t>(frame.payload[0]) << 8) | frame.payload[1];
+  char buf[CROSSOVER_STR_SIZE];
+  crossover_to_str(freq, buf, sizeof(buf));
 
   // An external controller has moved the crossover off what the active group specified; the
   // same deviation a hand override creates. See set_group_modified().
@@ -121,22 +123,22 @@ void GenSAMHub::snoop_crossover_(const Frame &frame) {
     for (auto &kv : registry_.monitors()) {
       registry_.set_crossover(kv.second, freq);
     }
-    ESP_LOGI(TAG, "[Sniffed] Global bass management crossover frequency set to %u Hz", freq);
+    ESP_LOGI(TAG, "[Sniffed] Global bass management crossover set to %s", buf);
     return;
   }
 
   GenSAMMonitor *known = registry_.find(frame.address);
   if (known != nullptr) {
     registry_.set_crossover(*known, freq);
-    ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X bass management crossover frequency set to %u Hz",
-             frame.address, freq);
+    ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X bass management crossover set to %s",
+             frame.address, buf);
   } else if (frame.address >= MONITOR_START_ADDR && frame.address < 0x80) {
     GenSAMMonitor &mon = registry_.get_or_create(frame.address);
     this->mark_monitor_seen_(mon);
     registry_.bind_if_matched(mon);
     registry_.set_crossover(mon, freq);
-    ESP_LOGI(TAG, "[Sniffed] Discovered monitor 0x%02X bass management crossover frequency set to %u Hz",
-             frame.address, freq);
+    ESP_LOGI(TAG, "[Sniffed] Discovered monitor 0x%02X bass management crossover set to %s",
+             frame.address, buf);
   }
 }
 

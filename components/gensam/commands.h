@@ -84,10 +84,10 @@ Frame make_query(uint8_t addr, uint8_t cmd);
 /// @return CMD_BYPASS frame carrying the packed control byte.
 Frame make_bypass(uint8_t addr, bool mute, bool pulsing = false);
 
-/// @brief Build a bass management crossover frequency frame (CMD_BASS_MANAGE_XO 0x3B).
+/// @brief Build a bass management crossover frame (CMD_BASS_MANAGE_XO 0x3B).
 /// @param addr Target address (monitor, multicast, or broadcast).
-/// @param freq_hz Crossover filter frequency in Hz, sent big-endian.
-/// @return CMD_BASS_MANAGE_XO frame carrying the 16-bit frequency.
+/// @param freq_hz Crossover filter frequency in Hz, or CROSSOVER_FULL_BAND; sent big-endian.
+/// @return CMD_BASS_MANAGE_XO frame carrying the 16-bit word.
 Frame make_crossover(uint8_t addr, uint16_t freq_hz);
 
 /// @brief Build an audio source selection frame (CMD_SELECT_AUDIO_SOURCE 0x40).

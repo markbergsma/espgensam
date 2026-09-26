@@ -41,6 +41,9 @@ Two fields that look droppable are not:
 * The ``LFE_*`` family is carried, except ``LFE_CrossoverFrequency(Hz)``, which GLM fixes at
   120 Hz and never transmits. ``LFE_Channel`` becomes the subwoofer's input-1 routing and
   ``LFE_Level`` plus ``LFE_+10`` become one effective level. See ``convert()``.
+* A crossover of 1 is not a frequency but GLM's full-band mode (bass management off, for a
+  group with no subwoofer), and is the value transmitted for it. It is emitted as
+  ``full_band``.
 """
 
 import logging
@@ -76,6 +79,10 @@ CLASS_DESIGN_RATE = {"SubwooferGen2": 12000, "TwowayGen2": 48000}
 # Time-of-flight sample counts are at 48 kHz on every device class, including subwoofers,
 # whose PEQ is designed at 12 kHz. Confirmed against captured AutoPhase delays.
 DELAY_RATE_HZ = 48000
+
+# What GLM stores as the crossover of a group with bass management off, which is also the
+# 0x3B word sent for it; CROSSOVER_FULL_BAND in const.h.
+CROSSOVER_FULL_BAND = 1
 
 # Levels at or below this are not real settings. GLM writes -999 for "not calibrated", and
 # anything near it would encode as digital silence.
@@ -257,8 +264,10 @@ def phase_to_delay(phase_deg, crossover_hz):
     GLM does not send the phase; it sends a time-of-flight delay in 48 kHz samples that
     realises that phase shift at the crossover frequency. This reproduced all three captured
     subwoofer delays exactly.
+
+    Full band has no crossover for the phase to be realised at, so it gives no delay.
     """
-    if crossover_hz is None or crossover_hz <= 0:
+    if crossover_hz is None or crossover_hz <= CROSSOVER_FULL_BAND:
         return 0
     return int(round((phase_deg % 360.0) / 360.0 / crossover_hz * DELAY_RATE_HZ))
 
@@ -322,6 +331,11 @@ def convert(model, known_ids=None):
             phase = _num(fields.get("Phase(degrees)"))
             if phase is not None:
                 delay = phase_to_delay(phase, crossover)
+                if crossover == CROSSOVER_FULL_BAND and phase % 360.0:
+                    warn(
+                        f"{where}: Phase(degrees) is {phase:g} but the group is full band, "
+                        f"so there is no crossover to align at; no delay is applied for it"
+                    )
 
             for field, unset in DROPPED_FIELDS.items():
                 value = _num(fields.get(field))
@@ -422,7 +436,9 @@ def to_group_config(groups):
                 "source": dev["source"],
             }
             # Left out entirely when the file gave none, so the group default still applies.
-            if dev["crossover"] is not None:
+            if dev["crossover"] == CROSSOVER_FULL_BAND:
+                entry["crossover"] = "full_band"
+            elif dev["crossover"] is not None:
                 entry["crossover"] = int(dev["crossover"])
             entry["level_db"] = float(dev["level_db"])
             entry["delay_samples"] = int(dev["delay_samples"])

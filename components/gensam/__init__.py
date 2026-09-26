@@ -99,6 +99,11 @@ PEQ_BAND_COUNT = 20
 DEFAULT_CROSSOVER_HZ = 85
 MIN_CROSSOVER_HZ = 50
 MAX_CROSSOVER_HZ = 120
+CROSSOVER_STEP_HZ = 5
+# The 0x3B word that turns bass management off; CROSSOVER_FULL_BAND in const.h. Spelled
+# `full_band` in YAML, because a GLM setup file's "1" is not a frequency.
+CROSSOVER_FULL_BAND = 1
+CROSSOVER_FULL_BAND_KEY = "full_band"
 
 # Per-device level trim and time-of-flight delay bounds; mirror const.h.
 #
@@ -153,12 +158,12 @@ GenSAMHub = gensam_ns.class_("GenSAMHub", cg.Component)
 GenSAMMuteSwitch = gensam_ns.class_("GenSAMMuteSwitch", switch.Switch)
 GenSAMIdentifyButton = gensam_ns.class_("GenSAMIdentifyButton", button.Button)
 GenSAMRediscoverButton = gensam_ns.class_("GenSAMRediscoverButton", button.Button)
-GenSAMCrossoverNumber = gensam_ns.class_("GenSAMCrossoverNumber", number.Number)
 GenSAMLevelNumber = gensam_ns.class_("GenSAMLevelNumber", number.Number)
 GenSAMDelayNumber = gensam_ns.class_("GenSAMDelayNumber", number.Number)
 GenSAMVolumeNumber = gensam_ns.class_("GenSAMVolumeNumber", number.Number)
 GenSAMInputSelect = gensam_ns.class_("GenSAMInputSelect", select.Select)
 GenSAMGroupSelect = gensam_ns.class_("GenSAMGroupSelect", select.Select)
+GenSAMCrossoverSelect = gensam_ns.class_("GenSAMCrossoverSelect", select.Select)
 GenSAMBusStatusSensor = gensam_ns.class_("GenSAMBusStatusSensor", text_sensor.TextSensor)
 GenSAMStatusLED = gensam_ns.class_("GenSAMStatusLED", cg.Component)
 StatusLEDMode = gensam_ns.enum("StatusLEDMode", is_class=True)
@@ -175,6 +180,30 @@ INPUT_OPTIONS = [
     "AES3 Channel B (Right)",
     "AES3 Channel A+B (Sum)",
 ]
+
+# Select options for a monitor's crossover, in order. Must match what crossover_to_str() in
+# crossover.h produces for every valid setting; tests/test_crossover.cpp spells the same list.
+CROSSOVER_OPTIONS = ["Full band"] + [
+    f"{hz} Hz" for hz in range(MIN_CROSSOVER_HZ, MAX_CROSSOVER_HZ + 1, CROSSOVER_STEP_HZ)
+]
+
+
+def _crossover(value):
+    """A group crossover: `full_band`, or a frequency in Hz on the 5 Hz grid.
+
+    Returns the 0x3B word. The integer 1 is rejected even though it is what goes on the wire,
+    so that a typo cannot switch bass management off.
+    """
+    if isinstance(value, str) and value.strip().lower() == CROSSOVER_FULL_BAND_KEY:
+        return CROSSOVER_FULL_BAND
+    try:
+        hz = cv.int_range(min=MIN_CROSSOVER_HZ, max=MAX_CROSSOVER_HZ)(value)
+    except cv.Invalid as err:
+        raise cv.Invalid(f"{err.msg}, or '{CROSSOVER_FULL_BAND_KEY}' for no bass management") from err
+    if (hz - MIN_CROSSOVER_HZ) % CROSSOVER_STEP_HZ:
+        raise cv.Invalid(f"crossover must be a multiple of {CROSSOVER_STEP_HZ} Hz, got {hz}")
+    return hz
+
 
 # Accepted spellings for a monitor's `input:`, sharing GROUP_SOURCES' keys so a hand-written
 # monitor and a generated group describe routing the same way.
@@ -311,20 +340,19 @@ def _validate_monitor(conf):
 
     if CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY not in conf:
         c = {
-            CONF_NAME: f"{name} Bass Management Crossover Frequency",
+            CONF_NAME: f"{name} Bass Management Crossover",
             CONF_DISABLED_BY_DEFAULT: True,
         }
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
-        conf[CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY] = number.number_schema(
-            GenSAMCrossoverNumber,
+        conf[CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY] = select.select_schema(
+            GenSAMCrossoverSelect,
             icon="mdi:sine-wave",
-            unit_of_measurement="Hz",
             entity_category=ENTITY_CATEGORY_CONFIG,
         )(c)
 
     # Level and delay are box-entry rather than sliders: at 0.1 resolution their ranges are
-    # 600 and 1920 positions, unlike the crossover's 14.
+    # 600 and 1920 positions, unlike the crossover select's 16 options.
     if CONF_LEVEL_DB not in conf:
         c = {
             CONF_NAME: f"{name} Level",
@@ -433,10 +461,9 @@ MONITOR_SCHEMA = cv.All(
             cv.Optional(CONF_HARDWARE_ID): text_sensor.text_sensor_schema(
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
-            cv.Optional(CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY): number.number_schema(
-                GenSAMCrossoverNumber,
+            cv.Optional(CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY): select.select_schema(
+                GenSAMCrossoverSelect,
                 icon="mdi:sine-wave",
-                unit_of_measurement="Hz",
                 entity_category=ENTITY_CATEGORY_CONFIG,
             ),
             cv.Optional(CONF_LEVEL_DB): number.number_schema(
@@ -517,7 +544,7 @@ GROUP_DEVICE_SCHEMA = cv.All(
             cv.Required(CONF_UNIQUE_ID): cv.positive_int,
             cv.Optional(CONF_ENABLED, default=True): cv.boolean,
             cv.Optional(CONF_SOURCE, default="analog"): cv.one_of(*GROUP_SOURCES, lower=True),
-            cv.Optional(CONF_CROSSOVER): cv.int_range(min=MIN_CROSSOVER_HZ, max=MAX_CROSSOVER_HZ),
+            cv.Optional(CONF_CROSSOVER): _crossover,
             # Attenuation only. A GLM setup file writes -999 for "not calibrated", and anything
             # at or below -130 dB encodes as digital silence, so the floor is deliberately well
             # above both: a sentinel leaking through here would mute the speaker.
@@ -550,9 +577,7 @@ GROUP_DEVICE_SCHEMA = cv.All(
 GROUP_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_NAME): cv.string_strict,
-        cv.Optional(CONF_CROSSOVER, default=DEFAULT_CROSSOVER_HZ): cv.int_range(
-            min=MIN_CROSSOVER_HZ, max=MAX_CROSSOVER_HZ
-        ),
+        cv.Optional(CONF_CROSSOVER, default=DEFAULT_CROSSOVER_HZ): _crossover,
         cv.Required(CONF_DEVICES): cv.All(cv.ensure_list(GROUP_DEVICE_SCHEMA), cv.Length(min=1)),
     }
 )
@@ -1017,18 +1042,16 @@ async def to_code(config):
 
             hw_id_sens = await text_sensor.new_text_sensor(mon_conf[CONF_HARDWARE_ID])
 
-            # 10. Bass management crossover frequency number
-            xo_num = "nullptr"
+            # 10. Bass management crossover select
+            xo_sel = "nullptr"
             if CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY in mon_conf:
-                xo_var = await number.new_number(
+                xo_var = await select.new_select(
                     mon_conf[CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY],
-                    min_value=50.0,
-                    max_value=120.0,
-                    step=5.0,
+                    options=CROSSOVER_OPTIONS,
                 )
                 cg.add(xo_var.set_hub(var))
                 cg.add(xo_var.set_serial_or_id(target_id))
-                xo_num = f"{xo_var}"
+                xo_sel = f"{xo_var}"
 
             # 10b. Level trim and time-of-flight delay numbers
             lvl_num = "nullptr"
@@ -1074,7 +1097,7 @@ async def to_code(config):
                         f"{temp_sens}, {in_sens}, {out_sens}, {online_sens}, "
                         f"{mute_sw}, "
                         f"{model_sens}, {serial_sens}, {fw_sens}, {hw_id_sens}, "
-                        f"{xo_num}, 85U, false, "
+                        f"{xo_sel}, {DEFAULT_CROSSOVER_HZ}U, false, "
                         f"{lvl_num}, 0.0f, false, "
                         f"{dly_num}, 0U, false, "
                         f"{input_sel}, {src_c}, {ch_c}, "

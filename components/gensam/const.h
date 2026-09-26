@@ -52,7 +52,7 @@ static constexpr uint8_t CMD_DSP = 0x10;              ///< DSP parameter update 
 static constexpr uint8_t CMD_PREPARE_CONFIG = 0x17;   ///< Prepare for a block of DSP settings
 static constexpr uint8_t CMD_SOFTWARE_QUERY = 0x39;   ///< Firmware version query
 static constexpr uint8_t CMD_WAKEUP = 0x3A;           ///< Wakeup / standby control (0x3A)
-static constexpr uint8_t CMD_BASS_MANAGE_XO = 0x3B;   ///< Bass management crossover frequency configuration
+static constexpr uint8_t CMD_BASS_MANAGE_XO = 0x3B;   ///< Bass management: crossover in Hz, or CROSSOVER_FULL_BAND
 static constexpr uint8_t CMD_UNKNOWN_3C = 0x3C;       ///< Subwoofer only, always 00 00; see below
 static constexpr uint8_t CMD_INPUT_SYNC = 0x3D;       ///< Input-select sync; see the block below
 static constexpr uint8_t CMD_SUB_LFE_LEVEL = 0x3E;    ///< Subwoofer LFE level; see the block below
@@ -209,6 +209,10 @@ static constexpr uint16_t DEFAULT_CROSSOVER_HZ = 85;  ///< Factory default bass 
 static constexpr uint16_t MIN_CROSSOVER_HZ = 50;      ///< Minimum allowable crossover frequency (Hz)
 static constexpr uint16_t MAX_CROSSOVER_HZ = 120;     ///< Maximum allowable crossover frequency (Hz)
 static constexpr uint16_t CROSSOVER_STEP_HZ = 5;      ///< Supported Genelec crossover frequency step resolution (Hz)
+
+/// CMD_BASS_MANAGE_XO word that turns bass management off: the speaker plays full band, for a
+/// system with no subwoofer.
+static constexpr uint16_t CROSSOVER_FULL_BAND = 0x0001;
 
 // --- Per-device level trim and time-of-flight delay ------------------------
 /// @name Level trim bounds

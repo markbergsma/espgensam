@@ -81,6 +81,7 @@
 #include "arbiter.h"
 #include "const.h"
 #include "frame.h"
+#include "crossover.h"
 #include "input.h"
 #include "groups.h"
 #include "monitor.h"
@@ -366,13 +367,18 @@ class GenSAMHub : public Component {
 
   /// @brief Set bass management crossover frequency for an individual monitor by logical address.
   /// @param address Logical bus address (0x02..0x7F).
-  /// @param freq_hz Crossover filter frequency in Hz (typically 50..120 Hz, step 5 Hz).
+  /// @param freq_hz Crossover filter frequency in Hz (50..120 Hz, step 5 Hz), or CROSSOVER_FULL_BAND.
   void set_monitor_crossover(uint8_t address, uint16_t freq_hz);
 
   /// @brief Set bass management crossover frequency for an individual monitor by serial number or unique ID string.
   /// @param serial_or_id Serial number string (e.g. "7350APM88123456") or decimal unique ID string.
-  /// @param freq_hz Crossover filter frequency in Hz (typically 50..120 Hz, step 5 Hz).
+  /// @param freq_hz Crossover filter frequency in Hz (50..120 Hz, step 5 Hz), or CROSSOVER_FULL_BAND.
   void set_monitor_crossover_by_serial(const std::string &serial_or_id, uint16_t freq_hz);
+
+  /// @brief Set bass management crossover for an individual monitor by select option string.
+  /// @param serial_or_id Serial number string or decimal unique ID string.
+  /// @param option "Full band" or "<n> Hz", as produced by crossover_to_str().
+  void set_monitor_crossover_by_name(const std::string &serial_or_id, const std::string &option);
 
   /// @brief Set the per-device level trim for an individual monitor by logical address.
   ///

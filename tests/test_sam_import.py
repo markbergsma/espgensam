@@ -22,6 +22,7 @@ from sam_fixture import (  # noqa: E402
     check,
     collect_warnings,
     convert,
+    full_band_sam,
     make_sam,
     run,
     sam_import,
@@ -320,6 +321,26 @@ def test_crossover_is_absent_when_the_file_gives_none():
           "no crossover anywhere in the file means no crossover key")
     doc = sam_import.to_group_config(convert()[0])
     check(doc[0]["devices"][0]["crossover"] == 90, "a crossover in the file is carried across")
+
+
+def test_full_band_is_carried_by_name():
+    # GLM writes 1 for a group with bass management off. It is not 1 Hz: it is emitted as
+    # full_band, and it is also the value the component puts on the wire for it.
+    groups, warnings = convert(full_band_sam())
+    check(all(d["crossover"] == sam_import.CROSSOVER_FULL_BAND for g in groups for d in g["devices"]),
+          "a crossover of 1 is kept as the full-band value, not dropped as falsy")
+    doc = sam_import.to_group_config(groups)
+    check(all(d["crossover"] == "full_band" for g in doc for d in g["devices"]),
+          "full band is emitted as full_band")
+    # The device that inherits the group crossover must inherit full band too.
+    check(doc[0]["devices"][1]["crossover"] == "full_band", "an inherited full band is full band")
+
+    # At "1 Hz" the phase formula would produce a delay of up to a second.
+    check(all(d["delay_samples"] == 0 for g in groups for d in g["devices"]),
+          "an AutoPhase angle gives no delay when there is no crossover")
+    check("Phase(degrees) is -165" in warnings and "full band" in warnings,
+          "dropping a real AutoPhase angle is reported")
+    check("Phase(degrees) is 0 " not in warnings, "a zero angle drops nothing and is not reported")
 
 
 def test_load_groups_is_the_composition_it_claims_to_be():

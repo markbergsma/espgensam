@@ -38,6 +38,7 @@
 #include <string>
 #include <vector>
 
+#include "crossover.h"
 #include "input.h"
 #include "monitor.h"
 #include "util.h"
@@ -137,9 +138,10 @@ class MonitorRegistry {
   /// @param mute New mute state.
   void set_mute(GenSAMMonitor &mon, bool mute);
 
-  /// @brief Store a crossover frequency on a binding and publish it to the bound number entity.
+  /// @brief Store a crossover setting on a binding and publish it to the bound select entity.
   /// @param b The binding to update.
-  /// @param freq_hz Crossover filter frequency in Hz.
+  /// @param freq_hz Crossover filter frequency in Hz, or CROSSOVER_FULL_BAND. Stored even when
+  ///                it is not one of the select's options, but then not published.
   void set_binding_crossover(GenSAMMonitorBinding &b, uint16_t freq_hz);
 
   /// @brief Store an input routing on a binding and publish it to the bound select entity.
@@ -159,9 +161,9 @@ class MonitorRegistry {
   ///                milliseconds, since samples are the stored form and ms the presented one.
   void set_binding_delay(GenSAMMonitorBinding &b, uint32_t samples);
 
-  /// @brief Store a monitor's crossover frequency on its binding and publish it.
+  /// @brief Store a monitor's crossover setting on its binding and publish it.
   /// @param mon The monitor to update; no-op if unbound.
-  /// @param freq_hz Crossover filter frequency in Hz.
+  /// @param freq_hz Crossover filter frequency in Hz, or CROSSOVER_FULL_BAND.
   void set_crossover(GenSAMMonitor &mon, uint16_t freq_hz);
 
   /// @brief Store a monitor's input routing on its binding and publish it.

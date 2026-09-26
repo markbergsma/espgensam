@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
 
-from sam_fixture import check, convert, make_sam, run, sam_import  # noqa: E402
+from sam_fixture import check, convert, full_band_sam, make_sam, run, sam_import  # noqa: E402
 
 import sam2yaml  # noqa: E402
 import yaml  # noqa: E402  (a dependency of sam2yaml, so importable if it is)
@@ -68,6 +68,12 @@ def test_emitted_yaml_is_what_the_component_would_have_validated():
     loaded = yaml.safe_load(sam2yaml.emit_yaml(groups, "fixture.sam"))
     check(loaded == sam_import.to_group_config(groups),
           "the emitted YAML reloads to exactly what the component validates")
+
+    groups, _ = convert(full_band_sam())
+    loaded = yaml.safe_load(sam2yaml.emit_yaml(groups, "fixture.sam"))
+    check(loaded == sam_import.to_group_config(groups),
+          "a full-band file reloads to exactly what the component validates")
+    check(loaded[0]["devices"][0]["crossover"] == "full_band", "full band is emitted as full_band")
 
 
 def test_emitted_yaml_keeps_precision():

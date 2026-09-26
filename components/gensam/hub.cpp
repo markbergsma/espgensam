@@ -228,10 +228,11 @@ void GenSAMHub::dump_config() {
           active++;
         }
       }
-      ESP_LOGCONFIG(TAG, "        id %lu: %s, %s, %u Hz, %.2f dB, %lu samples, %u/%u bands",
+      char xo[CROSSOVER_STR_SIZE];
+      ESP_LOGCONFIG(TAG, "        id %lu: %s, %s, %s, %.2f dB, %lu samples, %u/%u bands",
                     (unsigned long)dev.unique_id, dev.enabled ? "on" : "off",
                     input_to_str(dev.source, dev.aes3_channel),
-                    (unsigned)dev.crossover_hz, dev.level_db, (unsigned long)dev.delay_samples, active,
+                    crossover_to_str(dev.crossover_hz, xo, sizeof(xo)), dev.level_db, (unsigned long)dev.delay_samples, active,
                     (unsigned)dev.band_count);
     }
   }
@@ -652,7 +653,8 @@ void GenSAMHub::set_monitor_crossover(uint8_t address, uint16_t freq_hz) {
 
   registry_.set_crossover(*mon, freq_hz);
 
-  ESP_LOGI(TAG, "Set monitor 0x%02X crossover frequency: %u Hz", address, freq_hz);
+  char buf[CROSSOVER_STR_SIZE];
+  ESP_LOGI(TAG, "Set monitor 0x%02X crossover: %s", address, crossover_to_str(freq_hz, buf, sizeof(buf)));
 }
 
 void GenSAMHub::set_monitor_crossover_by_serial(const std::string &serial_or_id, uint16_t freq_hz) {
@@ -664,11 +666,21 @@ void GenSAMHub::set_monitor_crossover_by_serial(const std::string &serial_or_id,
 
   GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
   if (mon == nullptr) {
-    ESP_LOGW(TAG, "Crossover set for '%s' to %u Hz (stored; monitor not currently discovered on bus)",
-             serial_or_id.c_str(), freq_hz);
+    char buf[CROSSOVER_STR_SIZE];
+    ESP_LOGW(TAG, "Crossover set for '%s' to %s (stored; monitor not currently discovered on bus)",
+             serial_or_id.c_str(), crossover_to_str(freq_hz, buf, sizeof(buf)));
     return;
   }
   this->set_monitor_crossover(mon->address, freq_hz);
+}
+
+void GenSAMHub::set_monitor_crossover_by_name(const std::string &serial_or_id, const std::string &option) {
+  uint16_t freq_hz = DEFAULT_CROSSOVER_HZ;
+  if (!str_to_crossover(option.c_str(), freq_hz)) {
+    ESP_LOGW(TAG, "Unknown crossover option '%s' for '%s'", option.c_str(), serial_or_id.c_str());
+    return;
+  }
+  this->set_monitor_crossover_by_serial(serial_or_id, freq_hz);
 }
 
 // Level and delay follow the crossover pattern above, with one deliberate difference: no
