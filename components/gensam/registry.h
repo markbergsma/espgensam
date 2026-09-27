@@ -161,6 +161,11 @@ class MonitorRegistry {
   ///                milliseconds, since samples are the stored form and ms the presented one.
   void set_binding_delay(GenSAMMonitorBinding &b, uint32_t samples);
 
+  /// @brief Store a per-monitor calibration bypass on a binding and publish it to its switch.
+  /// @param b The binding to update.
+  /// @param bypass True to bypass this monitor's group calibration.
+  void set_binding_calibration_bypass(GenSAMMonitorBinding &b, bool bypass);
+
   /// @brief Store a monitor's crossover setting on its binding and publish it.
   /// @param mon The monitor to update; no-op if unbound.
   /// @param freq_hz Crossover filter frequency in Hz, or CROSSOVER_FULL_BAND.

@@ -253,6 +253,13 @@ void MonitorRegistry::set_binding_delay(GenSAMMonitorBinding &b, uint32_t sample
   }
 }
 
+void MonitorRegistry::set_binding_calibration_bypass(GenSAMMonitorBinding &b, bool bypass) {
+  b.calibration_bypass = bypass;
+  if (b.calibration_bypass_switch != nullptr) {
+    b.calibration_bypass_switch->publish_state(bypass);
+  }
+}
+
 void MonitorRegistry::set_crossover(GenSAMMonitor &mon, uint16_t freq_hz) {
   if (mon.binding != nullptr) {
     this->set_binding_crossover(*mon.binding, freq_hz);

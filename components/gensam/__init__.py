@@ -69,6 +69,7 @@ CONF_VOLUME_DB = "volume_db"
 CONF_INPUT = "input"
 CONF_INITIAL_INPUT = "initial_input"
 CONF_GROUP_MODIFIED = "group_modified"
+CONF_CALIBRATION_BYPASS = "calibration_bypass"
 CONF_BUS_STATUS = "bus_status"
 CONF_STATUS_LED = "status_led"
 CONF_MODE = "mode"
@@ -156,6 +157,10 @@ PEQ_TYPES = {
 gensam_ns = cg.esphome_ns.namespace("gensam")
 GenSAMHub = gensam_ns.class_("GenSAMHub", cg.Component)
 GenSAMMuteSwitch = gensam_ns.class_("GenSAMMuteSwitch", switch.Switch)
+GenSAMCalibrationBypassSwitch = gensam_ns.class_("GenSAMCalibrationBypassSwitch", switch.Switch)
+GenSAMMonitorCalibrationBypassSwitch = gensam_ns.class_(
+    "GenSAMMonitorCalibrationBypassSwitch", switch.Switch
+)
 GenSAMIdentifyButton = gensam_ns.class_("GenSAMIdentifyButton", button.Button)
 GenSAMRediscoverButton = gensam_ns.class_("GenSAMRediscoverButton", button.Button)
 GenSAMLevelNumber = gensam_ns.class_("GenSAMLevelNumber", number.Number)
@@ -238,6 +243,18 @@ def _parse_input(val):
             + ", ".join(sorted(set(INPUT_ALIASES.values())))
         )
     return GROUP_SOURCES[key] + (True,)
+
+# Calibration bypass (switch.h section 3). The hub-wide switch is the primary control, as in
+# GLM; the per-monitor one sits with the other per-speaker settings, hidden until wanted.
+CALIBRATION_BYPASS_SCHEMA = switch.switch_schema(
+    GenSAMCalibrationBypassSwitch,
+    icon="mdi:equalizer",
+)
+MONITOR_CALIBRATION_BYPASS_SCHEMA = switch.switch_schema(
+    GenSAMMonitorCalibrationBypassSwitch,
+    icon="mdi:equalizer",
+    entity_category=ENTITY_CATEGORY_CONFIG,
+)
 
 
 def _validate_monitor(conf):
@@ -444,6 +461,7 @@ MONITOR_SCHEMA = cv.All(
                 GenSAMMuteSwitch,
                 icon="mdi:volume-off",
             ),
+            cv.Optional(CONF_CALIBRATION_BYPASS): MONITOR_CALIBRATION_BYPASS_SCHEMA,
             cv.Optional(CONF_IDENTIFY): button.button_schema(
                 GenSAMIdentifyButton,
                 device_class=DEVICE_CLASS_IDENTIFY,
@@ -720,6 +738,26 @@ def _validate_hub(config):
             icon="mdi:tune-vertical-variant",
         )({CONF_NAME: "Group Modified"})
 
+    # So does bypassing it: only a group push ever sends calibration, so without one there is
+    # nothing to take away, and turning the bypass off again could not give back whatever a
+    # speaker holds from GLM. Filled here rather than in _validate_monitor, which cannot see
+    # the groups, and after _import_sam_groups, so a sam_file counts.
+    if CONF_GROUPS in config:
+        if CONF_CALIBRATION_BYPASS not in config:
+            config[CONF_CALIBRATION_BYPASS] = CALIBRATION_BYPASS_SCHEMA(
+                {CONF_NAME: "Bypass Calibration"}
+            )
+        for mon_conf in config.get(CONF_MONITORS, []):
+            if CONF_CALIBRATION_BYPASS in mon_conf:
+                continue
+            c = {
+                CONF_NAME: f"{mon_conf[CONF_NAME]} Bypass Calibration",
+                CONF_DISABLED_BY_DEFAULT: True,
+            }
+            if mon_conf.get(CONF_DEVICE_ID):
+                c[CONF_DEVICE_ID] = mon_conf[CONF_DEVICE_ID]
+            mon_conf[CONF_CALIBRATION_BYPASS] = MONITOR_CALIBRATION_BYPASS_SCHEMA(c)
+
     if CONF_STATUS_LED in config:
         led_conf = config[CONF_STATUS_LED]
         mode = led_conf.get(CONF_MODE, "bus_status")
@@ -811,6 +849,7 @@ _CONFIG_SCHEMA = cv.Schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             icon="mdi:tune-vertical-variant",
         ),
+        cv.Optional(CONF_CALIBRATION_BYPASS): CALIBRATION_BYPASS_SCHEMA,
         cv.Optional(CONF_BUS_STATUS): text_sensor.text_sensor_schema(
             GenSAMBusStatusSensor,
             icon="mdi:information-outline",
@@ -984,6 +1023,11 @@ async def to_code(config):
         modified_sens = await binary_sensor.new_binary_sensor(config[CONF_GROUP_MODIFIED])
         cg.add(var.set_group_modified_sensor(modified_sens))
 
+    if CONF_CALIBRATION_BYPASS in config:
+        bypass_sw = await switch.new_switch(config[CONF_CALIBRATION_BYPASS])
+        cg.add(bypass_sw.set_hub(var))
+        cg.add(var.set_calibration_bypass_switch(bypass_sw))
+
     bus_sens = None
     if CONF_BUS_STATUS in config:
         bus_sens = await text_sensor.new_text_sensor(config[CONF_BUS_STATUS])
@@ -1088,6 +1132,14 @@ async def to_code(config):
             cg.add(input_sel.set_hub(var))
             cg.add(input_sel.set_serial_or_id(target_id))
 
+            # 13. Calibration bypass switch, present only when there are groups
+            bypass_sw = "nullptr"
+            if CONF_CALIBRATION_BYPASS in mon_conf:
+                bypass_var = await switch.new_switch(mon_conf[CONF_CALIBRATION_BYPASS])
+                cg.add(bypass_var.set_hub(var))
+                cg.add(bypass_var.set_serial_or_id(target_id))
+                bypass_sw = f"{bypass_var}"
+
             # Register binding in C++ hub
             cg.add(
                 var.add_monitor_binding(
@@ -1101,7 +1153,8 @@ async def to_code(config):
                         f"{lvl_num}, 0.0f, false, "
                         f"{dly_num}, 0U, false, "
                         f"{input_sel}, {src_c}, {ch_c}, "
-                        f"{'true' if configured else 'false'}, {design_rate}U}}"
+                        f"{'true' if configured else 'false'}, {design_rate}U, "
+                        f"{bypass_sw}, false}}"
                     )
                 )
             )

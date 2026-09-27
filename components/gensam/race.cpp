@@ -634,8 +634,8 @@ bool GenSAMHub::start_group_apply_(uint32_t now) {
     return false;
   }
 
-  ESP_LOGI(TAG, "Applying group preset '%s' (%u devices)", group->name,
-           (unsigned) group->device_count);
+  ESP_LOGI(TAG, "Applying group preset '%s' (%u devices%s)", group->name,
+           (unsigned) group->device_count, calibration_bypass_ ? ", calibration bypassed" : "");
 
   apply_ = GroupApplyState{};
   apply_.active = true;
@@ -723,6 +723,10 @@ bool GenSAMHub::send_group_step_(const GenSAMMonitor &mon, const GroupDevice &de
     return false;
   }
 
+  // A bypassed monitor gets the values that make each of these frames a no-op, as GLM's "Cal
+  // bypassed" does: flat filters, no trim, no delay. Everything else is still the group's.
+  const bool bypassed = this->is_calibration_bypassed_(mon);
+
   switch (step) {
     case GROUP_STEP_KEEPALIVE:
       this->send_frame(make_stay_online());
@@ -733,11 +737,11 @@ bool GenSAMHub::send_group_step_(const GenSAMMonitor &mon, const GroupDevice &de
       return true;
 
     case GROUP_STEP_DELAY:
-      this->send_frame(make_delay(addr, dev.delay_samples));
+      this->send_frame(make_delay(addr, bypassed ? 0 : dev.delay_samples));
       return true;
 
     case GROUP_STEP_LEVEL:
-      this->send_frame(make_level(addr, dev.level_db));
+      this->send_frame(make_level(addr, bypassed ? 0.0f : dev.level_db));
       return true;
 
     case GROUP_STEP_CROSSOVER:
@@ -783,7 +787,7 @@ bool GenSAMHub::send_group_step_(const GenSAMMonitor &mon, const GroupDevice &de
   // Slots past the configured bands are still transmitted, as the bypass vector: the monitor
   // holds whatever the previous group left in them otherwise, and a stale filter is worse
   // than an unnecessary frame.
-  const PeqBand &spec = (band < dev.band_count) ? dev.bands[band] : PeqBand{};
+  const PeqBand &spec = (band < dev.band_count && !bypassed) ? dev.bands[band] : PeqBand{};
   const BiquadCoeffs coeffs =
       design_biquad(spec.type, spec.frequency_hz, spec.gain_db, spec.q, peq_design_rate_for(mon));
   this->send_frame(make_peq_band(addr, band, coeffs));
@@ -849,12 +853,14 @@ void GenSAMHub::race_step_applying_group_(uint32_t now) {
     // Device finished. Mirror what was pushed onto the binding so the per-monitor entities
     // show the active group's values, and so a later rediscovery re-sends the same thing.
     // Through the registry rather than the hub setters: those transmit and raise
-    // group_modified, which finish_group_apply_() is about to clear.
+    // group_modified, which finish_group_apply_() is about to clear. A bypassed monitor
+    // mirrors the defaults it was actually sent, not the calibration it was spared.
     if (mon->binding != nullptr && dev.enabled) {
+      const bool bypassed = this->is_calibration_bypassed_(*mon);
       registry_.set_binding_crossover(*mon->binding, dev.crossover_hz);
       registry_.set_binding_input(*mon->binding, dev.source, dev.aes3_channel);
-      registry_.set_binding_level(*mon->binding, dev.level_db);
-      registry_.set_binding_delay(*mon->binding, dev.delay_samples);
+      registry_.set_binding_level(*mon->binding, bypassed ? 0.0f : dev.level_db);
+      registry_.set_binding_delay(*mon->binding, bypassed ? 0 : dev.delay_samples);
     }
     apply_.configured++;
     apply_.device_idx++;

@@ -10,6 +10,7 @@
 #include "esphome/core/log.h"
 #include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
+#include "esphome/components/switch/switch.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "driver/gpio.h"
 
@@ -125,6 +126,12 @@ void GenSAMHub::setup() {
     if (b.input_select != nullptr && b.input_configured) {
       b.input_select->publish_state(input_to_str(b.source, b.aes3_channel));
     }
+    if (b.calibration_bypass_switch != nullptr) {
+      b.calibration_bypass_switch->publish_state(b.calibration_bypass);
+    }
+  }
+  if (calibration_bypass_switch_ != nullptr) {
+    calibration_bypass_switch_->publish_state(calibration_bypass_);
   }
 
   // Show the group that discovery is about to apply, rather than leaving the entity unknown
@@ -831,6 +838,46 @@ void GenSAMHub::set_group_modified(bool modified) {
   group_modified_ = modified;
   if (group_modified_sensor_ != nullptr) {
     group_modified_sensor_->publish_state(modified);
+  }
+}
+
+void GenSAMHub::set_calibration_bypass(bool bypass) {
+  calibration_bypass_ = bypass;
+  // Published on acceptance, like the group select: the push that makes it true follows.
+  if (calibration_bypass_switch_ != nullptr) {
+    calibration_bypass_switch_->publish_state(bypass);
+  }
+  ESP_LOGI(TAG, "Calibration bypass %s for all monitors", bypass ? "on" : "off");
+  this->request_group_repush_();
+}
+
+void GenSAMHub::set_monitor_calibration_bypass_by_serial(const std::string &serial_or_id, bool bypass) {
+  GenSAMMonitorBinding *b = registry_.find_binding_by_serial_or_id(serial_or_id);
+  if (b == nullptr) {
+    ESP_LOGW(TAG, "Cannot bypass calibration for '%s': no such configured monitor", serial_or_id.c_str());
+    return;
+  }
+  registry_.set_binding_calibration_bypass(*b, bypass);
+  ESP_LOGI(TAG, "Calibration bypass %s for '%s'", bypass ? "on" : "off", b->name.c_str());
+  this->request_group_repush_();
+}
+
+bool GenSAMHub::is_calibration_bypassed_(const GenSAMMonitor &mon) const {
+  return calibration_bypass_ || (mon.binding != nullptr && mon.binding->calibration_bypass);
+}
+
+void GenSAMHub::request_group_repush_() {
+  if (pending_group_ >= 0) {
+    return;
+  }
+  // A push in flight has already sent some of its devices the old state, so it is followed by
+  // another rather than trusted to pick the change up part way through.
+  if (apply_.active) {
+    pending_group_ = apply_.group_idx;
+  } else if (active_group_ >= 0) {
+    pending_group_ = active_group_;
+  } else {
+    ESP_LOGI(TAG, "No group is active; the calibration bypass applies from the next group push");
   }
 }
 

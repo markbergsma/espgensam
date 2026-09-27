@@ -110,6 +110,12 @@ struct GenSAMMonitorBinding {
   /// the discovered model (PEQ_RATE_SUBWOOFER_HZ for a 7xxx, PEQ_RATE_DEFAULT_HZ otherwise).
   /// Only needed for a model whose rate is not yet known; see const.h.
   uint32_t peq_design_rate{0};
+
+  switch_::Switch *calibration_bypass_switch{nullptr}; ///< Per-monitor calibration bypass switch entity.
+
+  /// True while this monitor's group calibration is bypassed on its own, whatever the hub-wide
+  /// switch says; see switch.h section 3. Never restored: every boot starts calibrated.
+  bool calibration_bypass{false};
 };
 
 /// @brief Represents a single Genelec SAM monitor or subwoofer discovered on the RS-485 bus.

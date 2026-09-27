@@ -9,7 +9,7 @@
 - **Native Home Assistant Integration**: Discovered automatically through the ESPHome Native API
 - **Standalone Autonomy**: Controls monitors locally with zero dependency on the GLM network adapter, the GLM software or the Home Assistant server status.
 - **Speaker Controls**: Direct volume, mute, power/standby, input select, and telemetry reporting.
-- **Group Presets**: Switch between named calibrations (GLM's "groups") from Home Assistant, each with its own room EQ, level, delay, crossover and input routing per speaker. Read straight from your existing GLM 5 setup file.
+- **Group Presets**: Switch between named calibrations (GLM's "groups") from Home Assistant, each with its own room EQ, level, delay, crossover and input routing per speaker. Read straight from your existing GLM 5 setup file. A Bypass Calibration switch turns the calibration off for a quick before-and-after comparison.
 - **Direct 9-Bit RS485 Transceiver**: Uses ESP32 RMT (10 MHz pulse digitization) for RX and RMT pulse generation for TX to cleanly handle the 9-bit/2-stop-bit GLM bus.
 
 > **Use of this code is entirely at your own risk!** I can't rule out that this could damage your Genelec or computer hardware, eat your tweeters, void your warranty, cause hearing damage, or, last but not least, ruin your audio fidelity. You have been warned.
@@ -257,6 +257,18 @@ last told. Changing one by hand takes effect immediately but does
 not alter the group, so the next group push - switching group, waking from standby, or a
 rediscovery - puts the group's own values back. While the two disagree, the hub's **Group
 Modified** diagnostic sensor is on.
+
+**Bypass Calibration** works like GLM's "Cal bypassed" button, for comparing the system with
+and without its calibration. While it is on, every speaker plays with flat EQ, no level trim
+and no delay. Crossover, input routing and LFE stay as the group has them. Turning it off puts
+the calibration back. It stays in effect across group switches and standby.
+
+- Each speaker also has its own **Bypass Calibration** switch, disabled by default, for
+  comparing one speaker at a time. A speaker is bypassed while either switch is on.
+- Both switches are off after every restart.
+- They only exist when groups are configured.
+- Because the level trim is removed as well, bypassed speakers can play louder than
+  calibrated ones.
 
 ### 4. Importing an existing GLM setup (`gensam: sam_file:`)
 

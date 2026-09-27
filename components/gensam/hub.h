@@ -322,6 +322,26 @@ class GenSAMHub : public Component {
   /// @param sensor Pointer to the binary sensor entity.
   void set_group_modified_sensor(binary_sensor::BinarySensor *sensor) { group_modified_sensor_ = sensor; }
 
+  /// @brief Register the hub-wide calibration bypass switch entity.
+  void set_calibration_bypass_switch(switch_::Switch *sw) { calibration_bypass_switch_ = sw; }
+
+  /// @brief Bypass the active group's calibration on every monitor, or put it back.
+  ///
+  /// GLM's "Cal bypassed": while on, a group push sends every PEQ slot as the bypass vector, a
+  /// 0 dB level trim and no delay, and leaves crossover, input routing and LFE as the group
+  /// has them. Takes effect by re-pushing the active group; see switch.h section 3.
+  /// @param bypass True to bypass, false to restore the group's own calibration.
+  void set_calibration_bypass(bool bypass);
+
+  /// @brief Bypass one monitor's calibration, independently of the hub-wide switch.
+  ///
+  /// A monitor is bypassed while either switch is on. Held on the binding rather than the
+  /// discovered monitor, so it can be set while the speaker is offline and applies to it at
+  /// its next push.
+  /// @param serial_or_id Serial number string or decimal unique ID string.
+  /// @param bypass True to bypass, false to restore the group's own calibration.
+  void set_monitor_calibration_bypass_by_serial(const std::string &serial_or_id, bool bypass);
+
   /// @brief Register a callback for when volume, mute, or power changes (from commands or passive snooping).
   void add_state_callback(std::function<void(float, bool, bool)> cb) {
     state_callbacks_.push_back(std::move(cb));
@@ -599,6 +619,16 @@ class GenSAMHub : public Component {
   /// @brief Resolve the sample rate a monitor's PEQ bands must be designed at.
   static uint32_t peq_design_rate_for(const GenSAMMonitor &mon);
 
+  /// @brief Whether a group push should send this monitor defaults instead of calibration.
+  /// @return True while the hub-wide or this monitor's own calibration bypass is on.
+  bool is_calibration_bypassed_(const GenSAMMonitor &mon) const;
+
+  /// @brief Queue the group that is active, or being pushed, to be pushed again.
+  ///
+  /// How a calibration bypass change reaches the speakers. A request already pending is left
+  /// alone, since it will read the new state when it runs.
+  void request_group_repush_();
+
   /// @brief Transmit one monitor's audio source and crossover configuration.
   /// @param mon The monitor to configure.
   /// @return True if any configuration frame was sent, false if the monitor needed nothing.
@@ -799,6 +829,8 @@ class GenSAMHub : public Component {
   number::Number *volume_number_{nullptr};
   binary_sensor::BinarySensor *group_modified_sensor_{nullptr};
   bool group_modified_{false};
+  switch_::Switch *calibration_bypass_switch_{nullptr};
+  bool calibration_bypass_{false};  ///< Hub-wide; never restored, so every boot starts calibrated.
   std::vector<std::function<void(float, bool, bool)>> state_callbacks_;
   std::vector<std::function<void(const std::string &)>> bus_status_callbacks_;
 };

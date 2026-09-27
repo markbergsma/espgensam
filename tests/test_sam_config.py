@@ -236,6 +236,64 @@ def test_a_missing_file_is_rejected_before_anything_else():
         CORE.config_path = previous
 
 
+# --- calibration bypass entities ----------------------------------------------------------
+
+def validate_hub(config):
+    """_validate_hub on a fresh entity registry.
+
+    Every auto-created entity registers its name with CORE, which rejects a second one of the
+    same name, so running the validator once per test needs the registry cleared in between.
+    """
+    CORE.unique_ids = {}
+    return gensam._validate_hub(config)
+
+
+def bypass_config(groups=True, monitor=None):
+    """A hub config as _validate_hub sees it, with one monitor and optionally one group."""
+    config = {gensam.CONF_MONITORS: [monitor or {gensam.CONF_NAME: "Left", gensam.CONF_UNIQUE_ID: 1842915}]}
+    if groups:
+        config[gensam.CONF_GROUPS] = [hand_written()]
+    return validate_hub(config)
+
+
+def test_calibration_bypass_switches_come_with_groups():
+    config = bypass_config()
+    hub_switch = config.get(gensam.CONF_CALIBRATION_BYPASS)
+    check(hub_switch is not None and hub_switch[gensam.CONF_NAME] == "Bypass Calibration",
+          "a hub-wide Bypass Calibration switch is created when there are groups")
+    check(hub_switch is not None and not hub_switch[gensam.CONF_DISABLED_BY_DEFAULT],
+          "the hub-wide switch is enabled by default")
+    mon_switch = config[gensam.CONF_MONITORS][0].get(gensam.CONF_CALIBRATION_BYPASS)
+    check(mon_switch is not None and mon_switch[gensam.CONF_NAME] == "Left Bypass Calibration",
+          "each monitor gets its own Bypass Calibration switch")
+    check(mon_switch is not None and mon_switch[gensam.CONF_DISABLED_BY_DEFAULT],
+          "the per-monitor switch is disabled by default, like the other per-speaker settings")
+
+
+def test_calibration_bypass_switches_come_with_a_setup_file():
+    config, _ = expand(monitors=[{gensam.CONF_NAME: "Left", gensam.CONF_UNIQUE_ID: 1842915}])
+    config = validate_hub(config)
+    check(gensam.CONF_CALIBRATION_BYPASS in config
+          and gensam.CONF_CALIBRATION_BYPASS in config[gensam.CONF_MONITORS][0],
+          "groups imported from sam_file count, since the import runs first")
+
+
+def test_no_groups_means_nothing_to_bypass():
+    config = bypass_config(groups=False)
+    check(gensam.CONF_CALIBRATION_BYPASS not in config,
+          "no hub-wide bypass switch without groups")
+    check(gensam.CONF_CALIBRATION_BYPASS not in config[gensam.CONF_MONITORS][0],
+          "no per-monitor bypass switch without groups")
+
+
+def test_an_explicit_calibration_bypass_switch_is_kept():
+    explicit = gensam.MONITOR_CALIBRATION_BYPASS_SCHEMA({gensam.CONF_NAME: "Left EQ Off"})
+    config = bypass_config(monitor={gensam.CONF_NAME: "Left", gensam.CONF_UNIQUE_ID: 1842915,
+                                    gensam.CONF_CALIBRATION_BYPASS: explicit})
+    check(config[gensam.CONF_MONITORS][0][gensam.CONF_CALIBRATION_BYPASS][gensam.CONF_NAME]
+          == "Left EQ Off", "a declared per-monitor switch is not replaced")
+
+
 # --- paths outside the configuration directory --------------------------------------------
 
 def test_the_path_may_point_outside_the_config_directory():

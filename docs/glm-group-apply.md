@@ -334,6 +334,12 @@ Each of these is a choice, not an oversight.
   is nothing to say what the LFE routing should be. A group push sets it properly.
 - **No flash commit.** Neither does GLM: there is no `0x15` anywhere in the group-switch
   capture, so a group switch is a RAM-only operation on both sides.
+- **Calibration bypass is a re-push of the group.** GLM's "Cal bypassed" resets the EQ, level
+  calibration, time-of-flight delay and system delay (GLM 5 manual, FAQ 11.4). No capture has
+  it and no setup field stores it. espgensam re-pushes the active group with all 20 PEQ slots
+  as the bypass vector, a 0 dB level and no delay, and leaves `3B`, `40` and `3E` as the group
+  has them. That is the full push measured in §8, so the bypass costs one duck, the same as a
+  group switch. Whether GLM sends the same frames, or fewer, is an open question below.
 
 ---
 
@@ -378,6 +384,12 @@ group afterwards.
 **Does the tail do anything observable?** The `2B 04` re-assert and the `3D 00 00` sweep are
 cheap and constant, so they could be added at any time. Worth knowing first whether a speaker
 ever comes out of a DSP reload muted, which is the behaviour they would be guarding against.
+
+**What does GLM send for "Cal bypassed"?** espgensam's bypass (§7) re-sends the defaults,
+which is the obvious reading of the manual but has not been observed. *Experiment:* capture
+GLM toggling the Calibrated button on a calibrated group. See whether it sends flat `10 0E`
+bands, a zero `10 01 00` and `10 02`, only the bands that differ, or something that is not a
+DSP frame at all.
 
 **What is `0x10 01 09`?** Constant `000000` on every device, paired 1:1 with the level frame.
 Not decoded here, deliberately: read as a level it would mean −130 dB and mute the speaker.
