@@ -47,9 +47,10 @@ different crossover — and lives outside the repository, in GLM's own directory
 configs that read it are `espgensam-lfe-local.yaml` and `espgensam-lfe-capture-local.yaml`.
 Counts quoted as "across the captures" are over all eight logs.
 
-A caveat that shapes everything below: **no acoustic measurement has been taken.** What is known
-about espgensam's own pushes is that monitors ACK every frame and Home Assistant reports the
-push complete. That is not evidence the DSP configuration lands. §8 says what would be.
+espgensam's own pushes have been **measured acoustically on one 8330A**: PEQ, level and
+crossover all take effect (§8). That covers a two-way monitor only. The subwoofer side,
+meaning its 12 kHz PEQ design and the LFE opcodes, is derived from captures and ACKs and has
+not been measured.
 
 ---
 
@@ -338,10 +339,28 @@ Each of these is a choice, not an oversight.
 
 ## 8. Open questions
 
-**Does a group push actually land?** This is the question that decides whether any of the
-unsent frames matter. Monitors ACK and Home Assistant reports success, but nothing has been
-measured. *Experiment:* apply two groups whose calibration differs audibly — a large level
-trim, or a deep notch — and measure, rather than trusting the ACKs.
+**Does a group push actually land? Yes, measured on a two-way monitor.** The setup (2026-09-27):
+- one 8330A on the bench, the only device on the bus;
+- groups applied from espgensam's Group Preset select, with the system on;
+- a REW sweep for each group against an all-bypass, full-band baseline.
+
+Each group changed one thing, and each change measured as designed:
+- A −12 dB, Q 2 peaking band at 1 kHz dipped at 1 kHz, which confirms the 48 kHz design rate.
+- A +6 dB band at 3 kHz measured as a boost, so the gain survives the coefficient sign inversion.
+- A −6 dB low shelf at 200 Hz (slot 0) and a −6 dB high shelf at 6 kHz (slot 2) shaped the two
+  ends of the response.
+- A band in slot 19 took effect, so all twenty slots are written.
+- `level_db: -10` lowered the whole response by 10 dB.
+- `crossover: 85` rolled the monitor off below 85 Hz with no subwoofer present, which
+  `full_band` does not.
+
+None of the frames espgensam leaves out (§3) were sent, so they are not needed for the DSP
+configuration to take effect.
+
+Still unmeasured:
+- delay (`10 02`);
+- a subwoofer (the 12 kHz design, `3E`);
+- a push made during a standby-recovery discovery (next entry).
 
 **What are `0x3C` and `0x42`?** Subwoofer-only, `00 00` in all eight logs, and now known not
 to be LFE fields (§6). Nothing in either setup file has moved them. *Experiment:* none
