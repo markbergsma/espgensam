@@ -6,11 +6,13 @@
 
 ## Features
 
-- **Native Home Assistant Integration**: Discovered automatically through the ESPHome Native API
-- **Standalone Autonomy**: Controls monitors locally with zero dependency on the GLM network adapter, the GLM software or the Home Assistant server status.
 - **Speaker Controls**: Direct volume, mute, power/standby, input select, and telemetry reporting.
 - **Group Presets**: Switch between named calibrations (GLM's "groups") from Home Assistant, each with its own room EQ, level, delay, crossover and input routing per speaker. Read straight from your existing GLM 5 setup file. A Bypass Calibration switch turns the calibration off for a quick before-and-after comparison.
-- **Direct 9-Bit RS485 Transceiver**: Uses ESP32 RMT (10 MHz pulse digitization) for RX and RMT pulse generation for TX to cleanly handle the 9-bit/2-stop-bit GLM bus.
+- **No GLM software or GLM network adapter required**: Control monitors locally, using a cheap ESP32 microcontroller and RS-485 transceiver.
+- **Native Home Assistant Integration**: Control your Genelec SAM system from Home Assistant (optional)
+
+<img src="docs/images/hub.png" alt="screenshot of hub device in Home Assistant">
+<img src="docs/images/speaker.png" alt="screenshot of speaker device in Home Assistant">
 
 > **Use of this code is entirely at your own risk!** I can't rule out that this could damage your Genelec or computer hardware, eat your tweeters, void your warranty, cause hearing damage, or, last but not least, ruin your audio fidelity. You have been warned.
 
@@ -20,7 +22,7 @@ You may also want to take a look at [HLM, the Homebrew Loudspeaker Manager](http
 
 ## Supported Hardware
 
-There is one config, `espgensam.yaml`. Selecting a board is a one-line change to its `packages:` block:
+Selecting a board is a one-line change to its `packages:` block in `espgensam.yaml`:
 
 ```yaml
 packages:
@@ -32,11 +34,11 @@ packages:
   gensam: !include packages/gensam.yaml
 ```
 
-Everything else — monitors, entities, tunables — lives in `packages/gensam.yaml` and is shared. Adding a board means adding one `packages/board_*.yaml`.
+Everything else — monitors, entities, tunables — lives in `packages/gensam.yaml` and is shared.
 
 ### Recommended boards:
 
-#### 1. Waveshare ESP32-S3-RS485-CAN
+#### 1. [Waveshare ESP32-S3-RS485-CAN](https://www.waveshare.com/esp32-s3-rs485-can.htm?srsltid=AU7gw4XHCvv7kp2jIgnAUvVmN92_7ne11_kTLRfJZ86YqEoc0iASMILK)
 - **MCU**: ESP32-S3 dual-core
 - **RS485 TX**: `GPIO17`
 - **RS485 RX**: `GPIO18`
@@ -45,7 +47,7 @@ Everything else — monitors, entities, tunables — lives in `packages/gensam.y
 - **Status RGB LED**: none — the onboard LEDs are power and bus-activity indicators. Bus state is reported through the **Bus Status** sensor in Home Assistant.
 - **Rediscover button**: none — use the **Rediscover Monitors** button entity.
 
-- **Make sure the bus has exactly one terminator at the controller end.**  In practice: the board ships with its 120 Ω enabled through a jumper, and a GLM adapter carries one too — a passive resistor, so it terminates whether or not the adapter is powered. **Adapter attached → pull the Waveshare jumper. Waveshare alone → leave it in.**
+**Make sure the bus has exactly one terminator at the controller end.**  In practice: the board ships with its 120 Ω enabled through a jumper, and a GLM adapter carries one too — a passive resistor, so it terminates whether or not the adapter is powered. **Adapter attached → pull the Waveshare jumper. Waveshare alone → leave it in.**
 
 ### NOT recommended:
 
