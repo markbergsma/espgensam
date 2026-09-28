@@ -146,6 +146,7 @@ gensam:
 
   # Timing and filtering
   poll_interval: 1s                   # RS-485 physical keep-alive sampling
+  volume_tx_interval: 50ms            # Fastest rate volume changes are sent to the monitors
   telemetry_averaging_period: 60s     # In-memory averaging window for signal levels
 
   # Master volume mapping boundaries

@@ -118,6 +118,7 @@ void GenSAMHub::setup() {
   }
 
   current_volume_db_ = startup_volume_db_;
+  last_tx_volume_db_ = startup_volume_db_;
   if (volume_number_ != nullptr) {
     volume_number_->publish_state(current_volume_db_);
   }
@@ -409,6 +410,9 @@ void GenSAMHub::process_rx_() {
       if (arbiter_.note_external_activity(now)) {
         ESP_LOGW(TAG, "External GLM master/adapter detected on bus (%s). Yielding bus control (listen-only mode)...",
                  frame.to_string().c_str());
+        if (yield_to_glm_) {
+          this->drop_pending_writes_();
+        }
         this->update_bus_status_();
       }
     } else if (verdict == BusArbiter::Verdict::LOOPBACK_ECHO && !listen_only_) {
@@ -467,6 +471,9 @@ void GenSAMHub::check_monitor_timeouts_() {
 void GenSAMHub::evaluate_system_mute_() {
   if (registry_.empty()) {
     return;
+  }
+  if (mute_tx_pending_) {
+    return;  // An accepted mute has not reached the bus yet; telemetry still shows the old state
   }
   bool any_online = false;
   bool all_muted = registry_.all_online_muted(any_online);
@@ -560,16 +567,11 @@ void GenSAMHub::set_volume_db(float db) {
     ESP_LOGW(TAG, "Cannot send volume command: Bus is not available for TX");
     return;
   }
-  // Broadcast master volume (0xFF) to all monitors on bus
-  if (!this->send_frame(make_broadcast_volume_db(target_db))) {
-    ESP_LOGW(TAG, "Volume command was not transmitted; keeping previous state");
-    return;
-  }
 
+  // Accept only; service_pending_writes_() transmits it in the next safe slot.
   current_volume_db_ = target_db;
-
-  ESP_LOGI(TAG, "Set system volume: %.1f dB (int24=%u)", current_volume_db_,
-           (unsigned)volume_db_to_int24(target_db));
+  volume_tx_pending_ = true;
+  ESP_LOGD(TAG, "Volume request accepted: %.1f dB", target_db);
   this->notify_state_callbacks_();
 }
 
@@ -578,6 +580,53 @@ void GenSAMHub::set_group_mute(bool mute) {
     ESP_LOGW(TAG, "Cannot send mute command: Bus is not available for TX");
     return;
   }
+
+  // Accept only; service_pending_writes_() transmits it in the next safe slot.
+  current_mute_ = mute;
+  mute_tx_pending_ = true;
+  ESP_LOGD(TAG, "Mute request accepted: %s", YESNO(mute));
+  this->notify_state_callbacks_();
+}
+
+void GenSAMHub::service_pending_writes_(uint32_t now) {
+  if (!volume_tx_pending_ && !mute_tx_pending_) {
+    return;
+  }
+
+  // 1. Is the bus in a slot where a frame cannot land on top of anything? Every race phase
+  //    other than these two ends by broadcasting the target volume itself, which clears the
+  //    request.
+  if (!can_transmit()) {
+    return;
+  }
+  if (race_state_ != RaceState::POLLING_MONITORS && race_state_ != RaceState::IDLE) {
+    return;
+  }
+  if (current_query_addr_ != 0) {
+    return;  // A reply is outstanding; transmitting now would drive the bus over it
+  }
+
+  // 2. One item per loop() call, mute first. Volume never goes out in standby, where a
+  //    broadcast would re-establish amplifier gain; set_standby(true) cancels it anyway.
+  if (mute_tx_pending_) {
+    this->transmit_group_mute_();
+  } else if (volume_tx_pending_ && !current_standby_ &&
+             now - last_volume_tx_ms_ >= volume_tx_interval_ms_) {
+    this->transmit_volume_();
+    ESP_LOGI(TAG, "Set system volume: %.1f dB (int24=%u)", current_volume_db_,
+             (unsigned) volume_db_to_int24(current_volume_db_));
+  } else {
+    return;
+  }
+
+  // 3. The frame takes a poll step, so the next status query keeps its usual gap behind it
+  //    instead of following it back to back.
+  last_poll_step_time_ = now;
+}
+
+void GenSAMHub::transmit_group_mute_() {
+  mute_tx_pending_ = false;
+  const bool mute = current_mute_;
   bool transmitted = false;
 
   // 1. Unicast CMD_BYPASS to each discovered monitor individually (as per GLM protocol)
@@ -593,16 +642,39 @@ void GenSAMHub::set_group_mute(bool mute) {
   transmitted = this->send_frame(make_bypass(BROADCAST_ADDRESS, mute)) || transmitted;
 
   if (!transmitted) {
-    ESP_LOGW(TAG, "Mute command was not transmitted; keeping previous state");
+    ESP_LOGW(TAG, "Mute command was not transmitted; reverting to monitor state");
+    this->evaluate_system_mute_();
+    this->notify_state_callbacks_();
     return;
   }
 
-  current_mute_ = mute;
   for (auto &kv : registry_.monitors()) {
     registry_.set_mute(kv.second, mute);
   }
-
   ESP_LOGI(TAG, "Set system mute: %s across %zu monitors", YESNO(mute), registry_.size());
+}
+
+void GenSAMHub::transmit_volume_() {
+  volume_tx_pending_ = false;
+  last_volume_tx_ms_ = millis();
+  if (this->send_frame(make_broadcast_volume_db(current_volume_db_))) {
+    last_tx_volume_db_ = current_volume_db_;
+  }
+}
+
+void GenSAMHub::drop_pending_writes_() {
+  if (!volume_tx_pending_ && !mute_tx_pending_) {
+    return;
+  }
+  ESP_LOGW(TAG, "Dropping volume/mute request the bus never received; GLM now owns the bus");
+  if (volume_tx_pending_) {
+    volume_tx_pending_ = false;
+    current_volume_db_ = last_tx_volume_db_;
+  }
+  if (mute_tx_pending_) {
+    mute_tx_pending_ = false;
+    this->evaluate_system_mute_();
+  }
   this->notify_state_callbacks_();
 }
 
@@ -810,7 +882,7 @@ void GenSAMHub::silence_system_volume_() {
 }
 
 void GenSAMHub::restore_system_volume_() {
-  this->send_frame(make_broadcast_volume_db(current_volume_db_));
+  this->transmit_volume_();
 }
 
 void GenSAMHub::with_transient_silence_(const std::function<void()> &switch_inputs) {
@@ -945,6 +1017,9 @@ void GenSAMHub::set_standby(bool standby) {
 
   current_standby_ = standby;
   last_standby_command_ = millis();
+  if (standby) {
+    volume_tx_pending_ = false;  // Stored as the target; the next wake broadcasts it
+  }
   ESP_LOGI(TAG, "Set system power: %s", standby ? "STANDBY" : "WAKEUP/ON");
   for (auto &kv : registry_.monitors()) {
     kv.second.standby = standby;
@@ -1034,6 +1109,9 @@ void GenSAMHub::log_stats_() {
 void GenSAMHub::loop() {
   this->process_rx_();
   this->check_glm_cooldown_();
+  // After RX, so a reply that has just landed has cleared current_query_addr_; before the state
+  // machine, so the frame is on the wire before it picks its next step.
+  this->service_pending_writes_(millis());
   this->update_race_state_machine_();
   this->check_monitor_timeouts_();
   this->check_identify_timeouts_();

@@ -41,6 +41,7 @@ CONF_LISTEN_ONLY = "listen_only"
 CONF_YIELD_TO_GLM = "yield_to_glm"
 CONF_GLM_INACTIVITY_COOLDOWN = "glm_inactivity_cooldown"
 CONF_POLL_INTERVAL = "poll_interval"
+CONF_VOLUME_TX_INTERVAL = "volume_tx_interval"
 CONF_TELEMETRY_AVERAGING_PERIOD = "telemetry_averaging_period"
 
 CONF_MIN_VOLUME_DB = "min_volume_db"
@@ -816,6 +817,7 @@ _CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_YIELD_TO_GLM, default=True): cv.boolean,
         cv.Optional(CONF_GLM_INACTIVITY_COOLDOWN, default="15s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_POLL_INTERVAL, default="1s"): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_VOLUME_TX_INTERVAL, default="50ms"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_TELEMETRY_AVERAGING_PERIOD, default="60s"): cv.time_period_str_unit,
         cv.Optional(CONF_MIN_VOLUME_DB, default=-80.0): cv.float_,
         cv.Optional(CONF_MAX_VOLUME_DB, default=0.0): cv.float_,
@@ -997,6 +999,7 @@ async def to_code(config):
     cg.add(var.set_yield_to_glm(config[CONF_YIELD_TO_GLM]))
     cg.add(var.set_glm_inactivity_cooldown(config[CONF_GLM_INACTIVITY_COOLDOWN]))
     cg.add(var.set_poll_interval(config[CONF_POLL_INTERVAL]))
+    cg.add(var.set_volume_tx_interval(config[CONF_VOLUME_TX_INTERVAL]))
 
     cg.add(var.set_min_volume_db(config[CONF_MIN_VOLUME_DB]))
     cg.add(var.set_max_volume_db(config[CONF_MAX_VOLUME_DB]))

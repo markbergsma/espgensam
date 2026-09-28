@@ -50,6 +50,8 @@ void GenSAMHub::snoop_volume_(const Frame &frame) {
     return;
   }
   current_volume_db_ = volume_int24_to_db(decode_int24(frame.payload.data()));
+  last_tx_volume_db_ = current_volume_db_;  // What the monitors were told, if not by us
+  volume_tx_pending_ = false;               // GLM's value supersedes a request we never sent
   ESP_LOGI(TAG, "[Sniffed] System volume updated to %.1f dB", current_volume_db_);
   this->notify_state_callbacks_();
 }

@@ -74,6 +74,36 @@
 ///      new input stream (~100 ms), the previous listening volume is automatically restored. System
 ///      volume state callbacks are not triggered during this transient silence so the Home Assistant
 ///      volume slider remains steady.
+///
+/// 6. Deferred External Writes (Volume & Mute):
+///    set_volume_db() and set_group_mute() are called from whatever context requested them - the
+///    Home Assistant API handler, a media_player command - and that context knows nothing about
+///    the bus.  Transmitting there used to be the norm, and it lands frames at arbitrary points:
+///    - Over a monitor's reply.  A CMD_QUERY_STATUS reply begins ~5-10 us after the query and
+///      the API component runs in the same App.loop() pass as the hub, so a write issued in that
+///      window drives the bus on top of the reply.  Both frames are lost - including, possibly,
+///      the volume frame itself, leaving Home Assistant showing a level the monitors never got.
+///    - Inside a group push, lifting the duck for the remainder of the push.
+///    - Inside discovery and configuration, between a query and its answer.
+///    Nothing throttled them either, so a fast knob or an automation could issue a frame per event.
+///
+///    Instead both setters only *accept*: they record the new target as a latest-value-wins
+///    setpoint, publish it at once, and return.  loop() transmits it when the bus is in a safe
+///    slot - polling or idle, no reply outstanding, TX available - at most one item per loop()
+///    call.  Volume additionally waits out standby and goes no more often than
+///    `volume_tx_interval` (50 ms by default).  Once frames are slotted, that cap no longer protects telemetry; it only bounds
+///    bus, log and API churn.  A volume frame is ~0.35 ms of bus time.
+///
+///    Publishing on accept means current_volume_db_ is the system's *target*, which is what it
+///    already meant in standby (stored, published, applied on wake).  Any path that broadcasts
+///    that target - the poll-cycle rebroadcast, the post-duck restore - also satisfies a pending
+///    request; the phases the flush waits out all end in one of those, so a turn made during a
+///    group push lands exactly when the duck lifts.
+///
+///    A pending request is dropped rather than delivered late when it can no longer be honoured:
+///    GLM taking the bus reverts the published state to what was last transmitted (it must not
+///    reach the bus 15 s later over GLM's own setting), a sniffed GLM volume supersedes it, and
+///    standby cancels it (a volume broadcast re-establishes amplifier gain).
 /// ===================================================================================
 
 #include "esphome/core/component.h"
@@ -207,6 +237,9 @@ class GenSAMHub : public Component {
 
   /// @brief Telemetry round-robin polling interval in milliseconds.
   void set_poll_interval(uint32_t interval_ms) { poll_interval_ms_ = interval_ms; }
+
+  /// @brief Minimum spacing between transmitted volume frames; see section 6 of the header comment.
+  void set_volume_tx_interval(uint32_t interval_ms) { volume_tx_interval_ms_ = interval_ms; }
 
   /// @brief Set minimum volume in decibels corresponding to slider 0.0 (e.g. -80.0 dB).
   void set_min_volume_db(float db) { min_volume_db_ = db; }
@@ -367,11 +400,19 @@ class GenSAMHub : public Component {
   /// @brief Current system standby state.
   bool is_standby() const { return current_standby_; }
 
-  /// @brief Set master speaker group volume in decibels.
+  /// @brief Request a master speaker group volume in decibels.
+  ///
+  /// Accepts and publishes the target immediately but does not transmit: loop() sends it in the
+  /// next safe bus slot, coalescing requests that arrive faster than that.  Rejected, with state
+  /// left unchanged, when the bus is unavailable for TX (GLM active, listen-only).  See section 6
+  /// of the header comment.
   /// @param db Target volume level in dB (clamped between min_volume_db_ and max_volume_db_).
   void set_volume_db(float db);
 
-  /// @brief Set master speaker group mute state.
+  /// @brief Request the master speaker group mute state.
+  ///
+  /// Deferred and coalesced exactly like set_volume_db(); the CMD_BYPASS fan-out is sent from
+  /// loop().
   /// @param mute True to mute all speakers via CMD_BYPASS, false to unmute.
   void set_group_mute(bool mute);
 
@@ -567,6 +608,27 @@ class GenSAMHub : public Component {
   /// @brief Check whether the external GLM master inactivity timer has expired to reclaim bus control.
   void check_glm_cooldown_();
 
+  /// @brief Transmit a pending mute or volume request if the bus is in a safe slot.
+  ///
+  /// At most one item per call, mute first.  See section 6 of the header comment for the slot rules.
+  /// @param now Current time in milliseconds.
+  void service_pending_writes_(uint32_t now);
+
+  /// @brief Send the CMD_BYPASS fan-out for current_mute_ and record it in the registry.
+  void transmit_group_mute_();
+
+  /// @brief Broadcast current_volume_db_, satisfying any pending volume request.
+  ///
+  /// The only way the target volume reaches the bus: the flush, the poll-cycle rebroadcast and
+  /// the post-duck restore all go through here, so each of them also clears the pending flag.
+  void transmit_volume_();
+
+  /// @brief Abandon pending volume and mute requests the bus never received.
+  ///
+  /// Reverts the published volume to the last transmitted value and re-derives mute from
+  /// telemetry.  Called when an external GLM master takes the bus.
+  void drop_pending_writes_();
+
   // --- RACE discovery and telemetry polling (implemented in race.cpp) ---------------
   //
   // The phases and protocol are described in section 2 of this file's header comment.
@@ -750,6 +812,7 @@ class GenSAMHub : public Component {
   bool yield_to_glm_{true};
   uint32_t glm_inactivity_cooldown_ms_{30000};
   uint32_t poll_interval_ms_{1000};
+  uint32_t volume_tx_interval_ms_{50};
 
   Uart9Bit uart9_;
   FrameParser parser_;
@@ -812,6 +875,12 @@ class GenSAMHub : public Component {
   float current_volume_db_{-30.0f};
   bool current_mute_{false};
   bool current_standby_{true};
+
+  // Deferred external writes; see section 6 of the header comment.
+  bool volume_tx_pending_{false};   ///< current_volume_db_ has been accepted but not yet transmitted.
+  bool mute_tx_pending_{false};     ///< current_mute_ has been accepted but not yet transmitted.
+  float last_tx_volume_db_{-30.0f}; ///< Volume last sent to the bus, restored if a request is dropped.
+  uint32_t last_volume_tx_ms_{0};   ///< When transmit_volume_() last put a volume frame on the bus.
 
   /// Timestamp (millis) of the last commanded power change, whether issued locally or snooped
   /// from GLM. Telemetry is not allowed to contradict the command until it has had time to

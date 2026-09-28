@@ -234,7 +234,7 @@ void GenSAMHub::broadcast_volume_and_keepalive_() {
   // standby. The keep-alive is not: it refreshes the volatile RACE address leases, and without
   // it monitors stop answering on their assigned addresses a minute or two later.
   if (!current_standby_) {
-    this->send_frame(make_broadcast_volume_db(current_volume_db_));
+    this->transmit_volume_();
     delayMicroseconds(VOLUME_KEEPALIVE_GAP_US);
   }
   this->send_frame(make_stay_online());
