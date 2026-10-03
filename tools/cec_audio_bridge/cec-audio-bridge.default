@@ -1,0 +1,2 @@
+# Installed as /etc/default/cec-audio-bridge. See `cec_audio_bridge.py --help` for all options.
+CEC_AUDIO_BRIDGE_ARGS="--ha-url ws://homeassistant.local:8123/api/websocket --entity media_player.genelec_sam_system"

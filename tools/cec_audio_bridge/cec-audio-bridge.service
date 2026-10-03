@@ -1,0 +1,25 @@
+[Unit]
+Description=HDMI CEC Audio System bridge to Home Assistant
+Documentation=file:///opt/cec_audio_bridge/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+EnvironmentFile=-/etc/default/cec-audio-bridge
+ExecStart=/usr/bin/python3 /opt/cec_audio_bridge/cec_audio_bridge.py --token-file %d/ha_token $CEC_AUDIO_BRIDGE_ARGS
+LoadCredential=ha_token:/etc/cec-audio-bridge/token
+Restart=always
+RestartSec=10
+
+# Unprivileged: /dev/cec* is group 'video', and no capability is needed.
+DynamicUser=yes
+SupplementaryGroups=video
+DeviceAllow=char-cec rw
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

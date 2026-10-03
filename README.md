@@ -10,6 +10,7 @@
 - **Group Presets**: Switch between named calibrations (GLM's "groups") from Home Assistant, each with its own room EQ, level, delay, crossover and input routing per speaker. Read straight from your existing GLM 5 setup file. A Bypass Calibration switch turns the calibration off for a quick before-and-after comparison.
 - **No GLM software or GLM network adapter required**: Control monitors locally, using a cheap ESP32 microcontroller and RS-485 transceiver.
 - **Native Home Assistant Integration**: Control your Genelec SAM system from Home Assistant (optional)
+- **TV Remote Volume**: [`tools/cec_audio_bridge`](tools/cec_audio_bridge/README.md) makes a Raspberry Pi on the HDMI bus act as the CEC audio system, so TV, projector and Apple TV volume keys control the monitors through Home Assistant.
 
 <img src="docs/images/hub.png" alt="screenshot of hub device in Home Assistant">
 <img src="docs/images/speaker.png" alt="screenshot of speaker device in Home Assistant">
