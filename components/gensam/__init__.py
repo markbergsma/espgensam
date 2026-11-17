@@ -1,9 +1,12 @@
+import copy
+import hashlib
 import logging
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
+from esphome import final_validate as fv
 from esphome import pins
-from esphome.components import sensor, binary_sensor, button, text_sensor, switch, number, select, light
+from esphome.components import sensor, binary_sensor, button, text_sensor, switch, number, select, light, web_server
 from esphome.const import (
     CONF_ID,
     CONF_NAME,
@@ -24,12 +27,24 @@ from esphome.const import (
     CONF_DISABLED_BY_DEFAULT,
     CONF_INVERTED,
 )
+from esphome.core import CORE
+from esphome.core.config import Device
 
 from . import sam_import
 
 _LOGGER = logging.getLogger(__name__)
 
-AUTO_LOAD = ["sensor", "binary_sensor", "button", "text_sensor", "switch", "number", "select", "light"]
+AUTO_LOAD = [
+    "sensor",
+    "binary_sensor",
+    "button",
+    "text_sensor",
+    "switch",
+    "number",
+    "select",
+    "light",
+    "web_server_base",
+]
 MULTI_CONF = True
 CONF_DE_PIN = "de_pin"
 CONF_RE_PIN = "re_pin"
@@ -41,6 +56,7 @@ CONF_LISTEN_ONLY = "listen_only"
 CONF_YIELD_TO_GLM = "yield_to_glm"
 CONF_GLM_INACTIVITY_COOLDOWN = "glm_inactivity_cooldown"
 CONF_POLL_INTERVAL = "poll_interval"
+CONF_CONTROL_WINDOW = "control_window"
 CONF_VOLUME_TX_INTERVAL = "volume_tx_interval"
 CONF_TELEMETRY_AVERAGING_PERIOD = "telemetry_averaging_period"
 
@@ -49,6 +65,11 @@ CONF_MAX_VOLUME_DB = "max_volume_db"
 CONF_STARTUP_VOLUME_DB = "startup_volume_db"
 
 CONF_MONITORS = "monitors"
+CONF_DISCOVERY_SLOTS = "discovery_slots"
+CONF_DISCOVERY_SLOT = "_discovery_slot"
+CONF_GENERATED_DEVICE_ID = "_generated_device_id"
+CONF_DISCOVERY_SLOT_SETTINGS = "discovery_slot_settings"
+CONF_SLOT = "slot"
 CONF_SERIAL_NUMBER = "serial_number"
 CONF_UNIQUE_ID = "unique_id"
 
@@ -63,22 +84,24 @@ CONF_MODEL = "model"
 CONF_SERIAL_NUMBER_SENSOR = "serial_number_sensor"
 CONF_FIRMWARE_VERSION = "firmware_version"
 CONF_HARDWARE_ID = "hardware_id"
+CONF_SAM_NAME_SENSOR = "sam_name"
 
 CONF_REDISCOVER_BUTTON = "rediscover_button"
 CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY = "bass_management_crossover_frequency"
 CONF_VOLUME_DB = "volume_db"
+CONF_SYSTEM_POWER = "system_power"
+CONF_SYSTEM_MUTE = "system_mute"
+CONF_SYSTEM_LEDS = "system_leds"
 CONF_INPUT = "input"
 CONF_INITIAL_INPUT = "initial_input"
-CONF_GROUP_MODIFIED = "group_modified"
 CONF_CALIBRATION_BYPASS = "calibration_bypass"
-CONF_BUS_STATUS = "bus_status"
 CONF_STATUS_LED = "status_led"
 CONF_MODE = "mode"
 
 CONF_GROUPS = "groups"
 CONF_SAM_FILE = "sam_file"
+CONF_SAM_UPLOAD = "sam_upload"
 CONF_GROUP_SELECT = "group_select"
-CONF_DEFAULT_GROUP = "default_group"
 CONF_PEQ_DESIGN_RATE = "peq_design_rate"
 CONF_DEVICES = "devices"
 CONF_ENABLED = "enabled"
@@ -157,7 +180,11 @@ PEQ_TYPES = {
 
 gensam_ns = cg.esphome_ns.namespace("gensam")
 GenSAMHub = gensam_ns.class_("GenSAMHub", cg.Component)
+SamUploadComponent = gensam_ns.class_("SamUploadComponent", cg.Component)
 GenSAMMuteSwitch = gensam_ns.class_("GenSAMMuteSwitch", switch.Switch)
+GenSAMSystemPowerSwitch = gensam_ns.class_("GenSAMSystemPowerSwitch", switch.Switch)
+GenSAMSystemMuteSwitch = gensam_ns.class_("GenSAMSystemMuteSwitch", switch.Switch)
+GenSAMSystemLEDSwitch = gensam_ns.class_("GenSAMSystemLEDSwitch", switch.Switch)
 GenSAMCalibrationBypassSwitch = gensam_ns.class_("GenSAMCalibrationBypassSwitch", switch.Switch)
 GenSAMMonitorCalibrationBypassSwitch = gensam_ns.class_(
     "GenSAMMonitorCalibrationBypassSwitch", switch.Switch
@@ -170,7 +197,6 @@ GenSAMVolumeNumber = gensam_ns.class_("GenSAMVolumeNumber", number.Number)
 GenSAMInputSelect = gensam_ns.class_("GenSAMInputSelect", select.Select)
 GenSAMGroupSelect = gensam_ns.class_("GenSAMGroupSelect", select.Select)
 GenSAMCrossoverSelect = gensam_ns.class_("GenSAMCrossoverSelect", select.Select)
-GenSAMBusStatusSensor = gensam_ns.class_("GenSAMBusStatusSensor", text_sensor.TextSensor)
 GenSAMStatusLED = gensam_ns.class_("GenSAMStatusLED", cg.Component)
 StatusLEDMode = gensam_ns.enum("StatusLEDMode", is_class=True)
 STATUS_LED_MODES = {
@@ -245,7 +271,7 @@ def _parse_input(val):
         )
     return GROUP_SOURCES[key] + (True,)
 
-# Calibration bypass (switch.h section 3). The hub-wide switch is the primary control, as in
+# Calibration bypass (switch.h section 5). The hub-wide switch is the primary control, as in
 # GLM; the per-monitor one sits with the other per-speaker settings, hidden until wanted.
 CALIBRATION_BYPASS_SCHEMA = switch.switch_schema(
     GenSAMCalibrationBypassSwitch,
@@ -261,9 +287,10 @@ MONITOR_CALIBRATION_BYPASS_SCHEMA = switch.switch_schema(
 def _validate_monitor(conf):
     name = conf[CONF_NAME]
     dev_id = conf.get(CONF_DEVICE_ID)
+    prefix = "" if dev_id and conf.get(CONF_DISCOVERY_SLOT) else f"{name} "
 
     if CONF_TEMPERATURE not in conf:
-        c = {CONF_NAME: f"{name} Temperature"}
+        c = {CONF_NAME: f"{prefix}Temperature"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_TEMPERATURE] = sensor.sensor_schema(
@@ -275,7 +302,7 @@ def _validate_monitor(conf):
         )(c)
 
     if CONF_INPUT_LEVEL not in conf:
-        c = {CONF_NAME: f"{name} Input Level"}
+        c = {CONF_NAME: f"{prefix}Input Level"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_INPUT_LEVEL] = sensor.sensor_schema(
@@ -286,7 +313,7 @@ def _validate_monitor(conf):
         )(c)
 
     if CONF_OUTPUT_LEVEL not in conf:
-        c = {CONF_NAME: f"{name} Output Level"}
+        c = {CONF_NAME: f"{prefix}Output Level"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_OUTPUT_LEVEL] = sensor.sensor_schema(
@@ -297,7 +324,7 @@ def _validate_monitor(conf):
         )(c)
 
     if CONF_ONLINE not in conf:
-        c = {CONF_NAME: f"{name} Online"}
+        c = {CONF_NAME: f"{prefix}Online"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_ONLINE] = binary_sensor.binary_sensor_schema(
@@ -306,16 +333,17 @@ def _validate_monitor(conf):
         )(c)
 
     if CONF_MUTE not in conf:
-        c = {CONF_NAME: f"{name} Mute"}
+        c = {CONF_NAME: f"{prefix}Mute"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_MUTE] = switch.switch_schema(
             GenSAMMuteSwitch,
             icon="mdi:volume-off",
+            entity_category=ENTITY_CATEGORY_CONFIG,
         )(c)
 
     if CONF_IDENTIFY not in conf:
-        c = {CONF_NAME: f"{name} Identify"}
+        c = {CONF_NAME: f"{prefix}Identify"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_IDENTIFY] = button.button_schema(
@@ -325,7 +353,7 @@ def _validate_monitor(conf):
         )(c)
 
     if CONF_MODEL not in conf:
-        c = {CONF_NAME: f"{name} Model"}
+        c = {CONF_NAME: f"{prefix}Model"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_MODEL] = text_sensor.text_sensor_schema(
@@ -333,7 +361,7 @@ def _validate_monitor(conf):
         )(c)
 
     if CONF_SERIAL_NUMBER_SENSOR not in conf:
-        c = {CONF_NAME: f"{name} Serial Number"}
+        c = {CONF_NAME: f"{prefix}Serial Number"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_SERIAL_NUMBER_SENSOR] = text_sensor.text_sensor_schema(
@@ -341,7 +369,7 @@ def _validate_monitor(conf):
         )(c)
 
     if CONF_FIRMWARE_VERSION not in conf:
-        c = {CONF_NAME: f"{name} Firmware Version"}
+        c = {CONF_NAME: f"{prefix}Firmware Version"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_FIRMWARE_VERSION] = text_sensor.text_sensor_schema(
@@ -349,7 +377,7 @@ def _validate_monitor(conf):
         )(c)
 
     if CONF_HARDWARE_ID not in conf:
-        c = {CONF_NAME: f"{name} Hardware ID"}
+        c = {CONF_NAME: f"{prefix}Hardware ID"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_HARDWARE_ID] = text_sensor.text_sensor_schema(
@@ -358,7 +386,7 @@ def _validate_monitor(conf):
 
     if CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY not in conf:
         c = {
-            CONF_NAME: f"{name} Bass Management Crossover",
+            CONF_NAME: f"{prefix}Bass Management Crossover",
             CONF_DISABLED_BY_DEFAULT: True,
         }
         if dev_id:
@@ -373,7 +401,7 @@ def _validate_monitor(conf):
     # 600 and 1920 positions, unlike the crossover select's 16 options.
     if CONF_LEVEL_DB not in conf:
         c = {
-            CONF_NAME: f"{name} Level",
+            CONF_NAME: f"{prefix}Level",
             CONF_DISABLED_BY_DEFAULT: True,
             CONF_MODE: "box",
         }
@@ -388,7 +416,7 @@ def _validate_monitor(conf):
 
     if CONF_DELAY_MS not in conf:
         c = {
-            CONF_NAME: f"{name} Delay",
+            CONF_NAME: f"{prefix}Delay",
             CONF_DISABLED_BY_DEFAULT: True,
             CONF_MODE: "box",
         }
@@ -405,7 +433,7 @@ def _validate_monitor(conf):
         val = conf[CONF_INPUT]
         if isinstance(val, str):
             conf[CONF_INITIAL_INPUT] = val
-            c = {CONF_NAME: f"{name} Input"}
+            c = {CONF_NAME: f"{prefix}Input"}
             if dev_id:
                 c[CONF_DEVICE_ID] = dev_id
             conf[CONF_INPUT] = select.select_schema(
@@ -416,7 +444,7 @@ def _validate_monitor(conf):
         elif isinstance(val, dict) and "initial" in val:
             conf[CONF_INITIAL_INPUT] = val.pop("initial")
     else:
-        c = {CONF_NAME: f"{name} Input"}
+        c = {CONF_NAME: f"{prefix}Input"}
         if dev_id:
             c[CONF_DEVICE_ID] = dev_id
         conf[CONF_INPUT] = select.select_schema(
@@ -435,6 +463,8 @@ MONITOR_SCHEMA = cv.All(
             cv.Optional(CONF_SERIAL_NUMBER, default=""): cv.string,
             cv.Optional(CONF_UNIQUE_ID, default=0): cv.positive_int,
             cv.Optional(CONF_DEVICE_ID): cv.sub_device_id,
+            cv.Optional(CONF_DISCOVERY_SLOT): cv.boolean,
+            cv.Optional(CONF_GENERATED_DEVICE_ID): cv.declare_id(Device),
             cv.Optional(CONF_TEMPERATURE): sensor.sensor_schema(
                 unit_of_measurement=UNIT_CELSIUS,
                 accuracy_decimals=0,
@@ -461,6 +491,7 @@ MONITOR_SCHEMA = cv.All(
             cv.Optional(CONF_MUTE): switch.switch_schema(
                 GenSAMMuteSwitch,
                 icon="mdi:volume-off",
+                entity_category=ENTITY_CATEGORY_CONFIG,
             ),
             cv.Optional(CONF_CALIBRATION_BYPASS): MONITOR_CALIBRATION_BYPASS_SCHEMA,
             cv.Optional(CONF_IDENTIFY): button.button_schema(
@@ -512,6 +543,68 @@ MONITOR_SCHEMA = cv.All(
     ),
     _validate_monitor,
 )
+
+DISCOVERY_SLOT_SETTINGS_SCHEMA = web_server.WEBSERVER_SORTING_SCHEMA.extend({
+    cv.Required(CONF_SLOT): cv.int_range(min=1, max=32),
+    cv.Optional(CONF_DEVICE_ID): cv.sub_device_id,
+})
+
+MONITOR_DIAGNOSTICS = (
+    CONF_ONLINE, CONF_INPUT_LEVEL, CONF_OUTPUT_LEVEL, CONF_TEMPERATURE, CONF_MODEL,
+    CONF_SERIAL_NUMBER_SENSOR, CONF_FIRMWARE_VERSION, CONF_HARDWARE_ID, CONF_IDENTIFY,
+    CONF_SAM_NAME_SENSOR,
+)
+
+MONITOR_CONTROLS = (
+    CONF_MUTE, CONF_INPUT, CONF_CALIBRATION_BYPASS, CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY,
+    CONF_LEVEL_DB, CONF_DELAY_MS,
+)
+
+MONITOR_WEB_GROUP_BASE_WEIGHT = 0
+
+
+def _monitor_web_cards(config):
+    """Plan one web_server v3 sorting group per monitor holding all of its entities.
+
+    The web page otherwise files per-monitor entities under the shared Configuration and
+    Diagnostic sections, mixing speakers together. A monitor whose entities already carry
+    `web_server:` settings, from `discovery_slot_settings:` or written by hand, is left as
+    configured.
+
+    Returns (group_key, group_name, group_weight, [(entity_id, entity_weight), ...]) tuples,
+    controls first and diagnostics after, in MONITOR_CONTROLS + MONITOR_DIAGNOSTICS order.
+    """
+    cards = []
+    for index, mon_conf in enumerate(config.get(CONF_MONITORS, [])):
+        keys = [k for k in MONITOR_CONTROLS + MONITOR_DIAGNOSTICS if k in mon_conf]
+        if any("web_server" in mon_conf[k] for k in keys):
+            continue
+        entities = [(mon_conf[k][CONF_ID], 10 * (n + 1)) for n, k in enumerate(keys)]
+        cards.append((
+            f"gensam_monitor_{index + 1}_card",
+            mon_conf[CONF_NAME],
+            MONITOR_WEB_GROUP_BASE_WEIGHT + index + 1,
+            entities,
+        ))
+    return cards
+
+
+async def _add_monitor_web_cards(config):
+    web_conf = CORE.config.get("web_server")
+    if not web_conf or web_conf.get("version") != 3:
+        return
+    web_server_var = await cg.get_variable(web_conf[CONF_ID])
+    cg.add_define("USE_WEBSERVER_SORTING")
+    for key, name, weight, entities in _monitor_web_cards(config):
+        # Same 64-bit key space as ESPHome's hash() of a sorting group ID; a stable digest
+        # keeps the generated source reproducible across builds.
+        digest = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "little")
+        group = cg.RawExpression(f"{digest}ULL")
+        cg.add(web_server_var.add_sorting_group(group, name, weight))
+        for entity_id, entity_weight in entities:
+            entity = await cg.get_variable(entity_id)
+            cg.add(web_server_var.add_entity_config(entity, entity_weight, group))
+
 
 def _validate_peq_band(conf):
     """A peaking band needs a Q; the shelving types have a fixed one and must not carry it."""
@@ -606,14 +699,12 @@ def _import_sam_groups(config):
     """Expand `sam_file:` into group presets, ahead of any written out in `groups:`.
 
     Runs before _validate_hub and _validate_groups so that everything downstream -- the
-    group_modified sensor, the duplicate-name check, crossover inheritance, default_group,
-    group_select and the generated C++ table -- only ever sees plain groups and needs no
+    duplicate-name check, crossover inheritance and generated C++ table
+    -- only ever sees plain groups and needs no
     knowledge that a file was involved.
 
-    Imported groups come first, in the order the setup file lists them, because that order is
-    the Home Assistant select's option order and default_group falls to the first entry: a
-    hand-written extra like a mute-all preset belongs after the calibrated positions, not in
-    front of them.
+    Imported groups come first, in the order the setup file lists them, so hand-written extras
+    follow the calibrated positions in the generated table.
 
     This is a whole-config validator rather than a validator on the key because it needs the
     `monitors:` block to know which devices are really yours. _CONFIG_SCHEMA has validated the
@@ -680,11 +771,6 @@ def _validate_groups(config):
     """Cross-check the group table against the monitors it refers to."""
     groups = config.get(CONF_GROUPS)
     if not groups:
-        if CONF_GROUP_SELECT in config:
-            raise cv.Invalid(
-                "'group_select' needs a 'groups' block to choose from; the entity would have "
-                "no options."
-            )
         return config
 
     known = {m.get(CONF_UNIQUE_ID) for m in config.get(CONF_MONITORS, []) if m.get(CONF_UNIQUE_ID)}
@@ -713,18 +799,15 @@ def _validate_groups(config):
             # Inherit the group crossover so the generated table is always explicit.
             dev.setdefault(CONF_CROSSOVER, group[CONF_CROSSOVER])
 
-    chosen = config.get(CONF_DEFAULT_GROUP)
-    if chosen is None:
-        config[CONF_DEFAULT_GROUP] = groups[0][CONF_NAME]
-    elif chosen.lower() != "none" and chosen not in seen_names:
-        raise cv.Invalid(
-            f"default_group '{chosen}' is not one of the configured groups "
-            f"({', '.join(sorted(seen_names))}). Use 'none' to apply no group at startup."
-        )
     return config
 
 
 def _validate_hub(config):
+    if CONF_GROUP_SELECT in config and CONF_SAM_UPLOAD not in config:
+        raise cv.Invalid(
+            "'group_select:' requires 'sam_upload:'; upload a setup to choose groups"
+        )
+
     # A transceiver that drives its direction line is normally one whose /RE is tied to DE, so it
     # is deaf while transmitting and nothing loops back. Auto-direction modules keep receiving and
     # do echo. Deriving the default this way means no board config has to state it, while an
@@ -732,18 +815,57 @@ def _validate_hub(config):
     if CONF_TX_ECHOES_RX not in config:
         config[CONF_TX_ECHOES_RX] = CONF_DE_PIN not in config
 
-    # The deviation sensor only means anything when there is a group to deviate from.
-    if CONF_GROUPS in config and CONF_GROUP_MODIFIED not in config:
-        config[CONF_GROUP_MODIFIED] = binary_sensor.binary_sensor_schema(
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            icon="mdi:tune-vertical-variant",
-        )({CONF_NAME: "Group Modified"})
+    discovery_slots = config.get(CONF_DISCOVERY_SLOTS, 0)
+    if discovery_slots and config.get(CONF_MONITORS):
+        raise cv.Invalid(
+            "'discovery_slots' cannot be combined with static 'monitors:' bindings; "
+            "use one binding mode"
+        )
+    slot_settings = {}
+    for settings in config.get(CONF_DISCOVERY_SLOT_SETTINGS, []):
+        slot = settings[CONF_SLOT]
+        if slot in slot_settings:
+            raise cv.Invalid(f"Duplicate discovery slot settings for slot {slot}")
+        if slot > discovery_slots:
+            raise cv.Invalid(f"Discovery slot {slot} exceeds discovery_slots ({discovery_slots})")
+        slot_settings[slot] = settings
+    if discovery_slots:
+        monitors = config.setdefault(CONF_MONITORS, [])
+        hub_id = config.get(CONF_ID)
+        device_prefix = hub_id.id if hub_id is not None else "gensam"
+        for slot in range(1, discovery_slots + 1):
+            settings = slot_settings.get(slot, {})
+            monitor = {CONF_NAME: f"Monitor {slot}", CONF_DISCOVERY_SLOT: True}
+            if settings.get(CONF_DEVICE_ID):
+                monitor[CONF_DEVICE_ID] = settings[CONF_DEVICE_ID]
+            else:
+                device_id = f"{device_prefix}_monitor_{slot}_device"
+                monitor[CONF_DEVICE_ID] = device_id
+                monitor[CONF_GENERATED_DEVICE_ID] = device_id
+            slot_conf = MONITOR_SCHEMA(monitor)
+            monitors.append(slot_conf)
+
+    if CONF_SAM_UPLOAD in config:
+        for mon_conf in config.get(CONF_MONITORS, []):
+            if CONF_SAM_NAME_SENSOR in mon_conf:
+                continue
+            prefix = (
+                ""
+                if mon_conf.get(CONF_DEVICE_ID) and mon_conf.get(CONF_DISCOVERY_SLOT)
+                else f"{mon_conf[CONF_NAME]} "
+            )
+            c = {CONF_NAME: f"{prefix}SAM Name"}
+            if mon_conf.get(CONF_DEVICE_ID):
+                c[CONF_DEVICE_ID] = mon_conf[CONF_DEVICE_ID]
+            mon_conf[CONF_SAM_NAME_SENSOR] = text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC
+            )(c)
 
     # So does bypassing it: only a group push ever sends calibration, so without one there is
     # nothing to take away, and turning the bypass off again could not give back whatever a
     # speaker holds from GLM. Filled here rather than in _validate_monitor, which cannot see
     # the groups, and after _import_sam_groups, so a sam_file counts.
-    if CONF_GROUPS in config:
+    if CONF_GROUPS in config or CONF_SAM_UPLOAD in config:
         if CONF_CALIBRATION_BYPASS not in config:
             config[CONF_CALIBRATION_BYPASS] = CALIBRATION_BYPASS_SCHEMA(
                 {CONF_NAME: "Bypass Calibration"}
@@ -752,22 +874,32 @@ def _validate_hub(config):
             if CONF_CALIBRATION_BYPASS in mon_conf:
                 continue
             c = {
-                CONF_NAME: f"{mon_conf[CONF_NAME]} Bypass Calibration",
+                CONF_NAME: (
+                    "Bypass Calibration"
+                    if mon_conf.get(CONF_DISCOVERY_SLOT) and mon_conf.get(CONF_DEVICE_ID)
+                    else f"{mon_conf[CONF_NAME]} Bypass Calibration"
+                ),
                 CONF_DISABLED_BY_DEFAULT: True,
             }
             if mon_conf.get(CONF_DEVICE_ID):
                 c[CONF_DEVICE_ID] = mon_conf[CONF_DEVICE_ID]
             mon_conf[CONF_CALIBRATION_BYPASS] = MONITOR_CALIBRATION_BYPASS_SCHEMA(c)
 
-    if CONF_STATUS_LED in config:
-        led_conf = config[CONF_STATUS_LED]
-        mode = led_conf.get(CONF_MODE, "bus_status")
-        if mode == "bus_status" and CONF_BUS_STATUS not in config:
-            config[CONF_BUS_STATUS] = text_sensor.text_sensor_schema(
-                GenSAMBusStatusSensor,
-                icon="mdi:information-outline",
-                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            )({CONF_NAME: "Bus Status"})
+    for slot, settings in slot_settings.items():
+        if "web_server" not in settings:
+            continue
+        mon_conf = config[CONF_MONITORS][slot - 1]
+        web_settings = settings["web_server"]
+        base_weight = web_settings.get(web_server.CONF_SORTING_WEIGHT, 50)
+        entities = MONITOR_CONTROLS + MONITOR_DIAGNOSTICS
+        for index, key in enumerate(entities):
+            if key not in mon_conf:
+                continue
+            entity_web_settings = copy.deepcopy(web_settings)
+            entity_web_settings[web_server.CONF_SORTING_WEIGHT] = (
+                base_weight + 10 * (index - len(MONITOR_CONTROLS))
+            )
+            mon_conf[key]["web_server"] = entity_web_settings
 
     period = config.get(CONF_TELEMETRY_AVERAGING_PERIOD)
     for mon_conf in config.get(CONF_MONITORS, []):
@@ -791,6 +923,33 @@ def _validate_hub(config):
                     {"throttle_average": str(period)},
                 ])
     return config
+
+
+def _final_validate_discovery_devices(config):
+    generated_devices = [
+        monitor
+        for monitor in config.get(CONF_MONITORS, [])
+        if CONF_GENERATED_DEVICE_ID in monitor
+    ]
+    if not generated_devices:
+        return config
+
+    esphome_config = fv.full_config.get().get("esphome")
+    if esphome_config is None:
+        raise cv.Invalid("Generated discovery devices require an 'esphome:' section")
+
+    devices = esphome_config.setdefault("devices", [])
+    for monitor in generated_devices:
+        devices.append(
+            {
+                CONF_ID: monitor[CONF_GENERATED_DEVICE_ID],
+                CONF_NAME: monitor[CONF_NAME],
+            }
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate_discovery_devices
 
 
 _CONFIG_SCHEMA = cv.Schema(
@@ -817,45 +976,47 @@ _CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_YIELD_TO_GLM, default=True): cv.boolean,
         cv.Optional(CONF_GLM_INACTIVITY_COOLDOWN, default="15s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_POLL_INTERVAL, default="1s"): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_CONTROL_WINDOW, default="60s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_VOLUME_TX_INTERVAL, default="50ms"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_TELEMETRY_AVERAGING_PERIOD, default="60s"): cv.time_period_str_unit,
         cv.Optional(CONF_MIN_VOLUME_DB, default=-80.0): cv.float_,
         cv.Optional(CONF_MAX_VOLUME_DB, default=0.0): cv.float_,
         cv.Optional(CONF_STARTUP_VOLUME_DB, default=-30.0): cv.float_,
         cv.Optional(CONF_MONITORS): cv.ensure_list(MONITOR_SCHEMA),
+        cv.Optional(CONF_DISCOVERY_SLOTS, default=0): cv.int_range(min=0, max=32),
+        cv.Optional(CONF_DISCOVERY_SLOT_SETTINGS): cv.ensure_list(DISCOVERY_SLOT_SETTINGS_SCHEMA),
         cv.Optional(CONF_GROUPS): cv.All(cv.ensure_list(GROUP_SCHEMA), cv.Length(min=1)),
         # A GLM 5 setup file to read the groups from, converted while the configuration is
         # validated. cv.file_ resolves it against the directory holding this YAML, expands a
         # leading `~` and takes an absolute path as given, so it can point straight at GLM's
         # own setup directory. See sam_import.py.
         cv.Optional(CONF_SAM_FILE): cv.file_,
-        # Which group to apply once discovery completes. Defaults to the first one: having
-        # configured groups but applied none leaves the speakers in a state nothing here
-        # chose, and the select entity reading "unknown". Set to 'none' to keep the older
-        # behaviour of not touching a monitor's stored settings at boot.
-        cv.Optional(CONF_DEFAULT_GROUP): cv.string,
+        cv.Optional(CONF_SAM_UPLOAD): cv.Schema(
+            {
+                cv.GenerateID(): cv.declare_id(SamUploadComponent),
+            }
+        ),
         cv.Optional(CONF_GROUP_SELECT): select.select_schema(
             GenSAMGroupSelect,
             icon="mdi:tune-variant",
         ),
         cv.Optional(CONF_REDISCOVER_BUTTON): button.button_schema(
             GenSAMRediscoverButton,
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
         cv.Optional(CONF_VOLUME_DB): number.number_schema(
             GenSAMVolumeNumber,
             icon="mdi:volume-high",
             unit_of_measurement="dB",
         ),
-        cv.Optional(CONF_GROUP_MODIFIED): binary_sensor.binary_sensor_schema(
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            icon="mdi:tune-vertical-variant",
-        ),
         cv.Optional(CONF_CALIBRATION_BYPASS): CALIBRATION_BYPASS_SCHEMA,
-        cv.Optional(CONF_BUS_STATUS): text_sensor.text_sensor_schema(
-            GenSAMBusStatusSensor,
-            icon="mdi:information-outline",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        cv.Optional(CONF_SYSTEM_POWER): switch.switch_schema(
+            GenSAMSystemPowerSwitch, icon="mdi:power"
+        ),
+        cv.Optional(CONF_SYSTEM_MUTE): switch.switch_schema(
+            GenSAMSystemMuteSwitch, icon="mdi:volume-off"
+        ),
+        cv.Optional(CONF_SYSTEM_LEDS): switch.switch_schema(
+            GenSAMSystemLEDSwitch, icon="mdi:led-on"
         ),
         cv.Optional(CONF_STATUS_LED): cv.Schema(
             {
@@ -962,18 +1123,29 @@ async def to_code(config):
     if group_count:
         cg.add(var.set_group_table(cg.RawExpression("gensam_group_table"), group_count))
 
-    chosen = config.get(CONF_DEFAULT_GROUP)
-    if group_count and chosen and chosen.lower() != "none":
-        names = [g[CONF_NAME] for g in config[CONF_GROUPS]]
-        cg.add(var.set_default_group(names.index(chosen)))
-
     if CONF_GROUP_SELECT in config:
         group_sel = await select.new_select(
             config[CONF_GROUP_SELECT],
-            options=[g[CONF_NAME] for g in config[CONF_GROUPS]],
+            options=["No uploaded groups"],
         )
         cg.add(group_sel.set_hub(var))
         cg.add(var.set_group_select(group_sel))
+
+    if CONF_SAM_UPLOAD in config:
+        if not CORE.is_esp32:
+            raise cv.Invalid("sam_upload requires an ESP32 target with ESP-IDF partition support")
+        from esphome.components.esp32 import add_partition
+
+        # Two complete slots allow validation and CRC verification before an atomic commit;
+        # the previous valid setup survives power loss while the replacement is written.
+        add_partition("sam_slot_a", "data", 0x40, 0x11000)
+        add_partition("sam_slot_b", "data", 0x40, 0x11000)
+        upload_conf = config[CONF_SAM_UPLOAD]
+        upload = cg.new_Pvariable(upload_conf[CONF_ID])
+        await cg.register_component(upload, upload_conf)
+        cg.add(upload.set_hub(var))
+        if CONF_GROUP_SELECT in config:
+            cg.add(upload.set_group_select(group_sel))
 
     # The GPIO number and its polarity are passed as plain values rather than the GPIOPin object:
     # the RMT and gpio_ll layers need a gpio_num_t, and the direction line is written from an ISR
@@ -999,6 +1171,7 @@ async def to_code(config):
     cg.add(var.set_yield_to_glm(config[CONF_YIELD_TO_GLM]))
     cg.add(var.set_glm_inactivity_cooldown(config[CONF_GLM_INACTIVITY_COOLDOWN]))
     cg.add(var.set_poll_interval(config[CONF_POLL_INTERVAL]))
+    cg.add(var.set_control_window(config[CONF_CONTROL_WINDOW]))
     cg.add(var.set_volume_tx_interval(config[CONF_VOLUME_TX_INTERVAL]))
 
     cg.add(var.set_min_volume_db(config[CONF_MIN_VOLUME_DB]))
@@ -1022,20 +1195,22 @@ async def to_code(config):
         cg.add(vol_num.set_hub(var))
         cg.add(var.set_volume_number(vol_num))
 
-    if CONF_GROUP_MODIFIED in config:
-        modified_sens = await binary_sensor.new_binary_sensor(config[CONF_GROUP_MODIFIED])
-        cg.add(var.set_group_modified_sensor(modified_sens))
-
     if CONF_CALIBRATION_BYPASS in config:
         bypass_sw = await switch.new_switch(config[CONF_CALIBRATION_BYPASS])
         cg.add(bypass_sw.set_hub(var))
         cg.add(var.set_calibration_bypass_switch(bypass_sw))
 
-    bus_sens = None
-    if CONF_BUS_STATUS in config:
-        bus_sens = await text_sensor.new_text_sensor(config[CONF_BUS_STATUS])
-        cg.add(bus_sens.set_hub(var))
-        cg.add(var.set_bus_status_sensor(bus_sens))
+    if CONF_SYSTEM_MUTE in config:
+        mute_sw = await switch.new_switch(config[CONF_SYSTEM_MUTE])
+        cg.add(mute_sw.set_hub(var))
+
+    if CONF_SYSTEM_POWER in config:
+        power_sw = await switch.new_switch(config[CONF_SYSTEM_POWER])
+        cg.add(power_sw.set_hub(var))
+
+    if CONF_SYSTEM_LEDS in config:
+        leds_sw = await switch.new_switch(config[CONF_SYSTEM_LEDS])
+        cg.add(leds_sw.set_hub(var))
 
     if CONF_STATUS_LED in config:
         led_conf = config[CONF_STATUS_LED]
@@ -1046,14 +1221,13 @@ async def to_code(config):
         cg.add(led_var.set_mode(led_conf[CONF_MODE]))
         cg.add(led_var.set_brightness(led_conf[CONF_BRIGHTNESS]))
         cg.add(led_var.set_hub(var))
-        if bus_sens is not None:
-            cg.add(led_var.set_source_sensor(bus_sens))
 
     if CONF_MONITORS in config:
         for mon_conf in config[CONF_MONITORS]:
             name = mon_conf[CONF_NAME]
             serial = mon_conf.get(CONF_SERIAL_NUMBER, "")
             unique_id = mon_conf.get(CONF_UNIQUE_ID, 0)
+            discovery_slot = mon_conf.get(CONF_DISCOVERY_SLOT, False)
 
             # 1. Temperature sensor
             temp_sens = await sensor.new_sensor(mon_conf[CONF_TEMPERATURE])
@@ -1070,7 +1244,7 @@ async def to_code(config):
             # 5. Mute switch
             mute_sw = await switch.new_switch(mon_conf[CONF_MUTE])
             cg.add(mute_sw.set_hub(var))
-            target_id = serial if serial else str(unique_id)
+            target_id = name if discovery_slot else (serial if serial else str(unique_id))
             cg.add(mute_sw.set_serial_or_id(target_id))
 
             # 6. Identify button
@@ -1088,6 +1262,11 @@ async def to_code(config):
             fw_sens = await text_sensor.new_text_sensor(mon_conf[CONF_FIRMWARE_VERSION])
 
             hw_id_sens = await text_sensor.new_text_sensor(mon_conf[CONF_HARDWARE_ID])
+            sam_name_sens = "nullptr"
+            if CONF_SAM_NAME_SENSOR in mon_conf:
+                sam_name_sens = await text_sensor.new_text_sensor(
+                    mon_conf[CONF_SAM_NAME_SENSOR]
+                )
 
             # 10. Bass management crossover select
             xo_sel = "nullptr"
@@ -1157,7 +1336,10 @@ async def to_code(config):
                         f"{dly_num}, 0U, false, "
                         f"{input_sel}, {src_c}, {ch_c}, "
                         f"{'true' if configured else 'false'}, {design_rate}U, "
-                        f"{bypass_sw}, false}}"
+                        f"{bypass_sw}, false, "
+                        f"{'true' if discovery_slot else 'false'}, {sam_name_sens}}}"
                     )
                 )
             )
+
+        await _add_monitor_web_cards(config)

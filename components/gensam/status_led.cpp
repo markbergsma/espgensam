@@ -32,15 +32,6 @@ const char *GenSAMStatusLED::mode_to_string(StatusLEDMode mode) {
   }
 }
 
-void GenSAMStatusLED::set_source_sensor(text_sensor::TextSensor *sensor) {
-  source_sensor_ = sensor;
-  if (source_sensor_ != nullptr) {
-    source_sensor_->add_on_state_callback([this](const std::string &status) {
-      this->on_status_changed_(status);
-    });
-  }
-}
-
 void GenSAMStatusLED::set_hub(GenSAMHub *hub) {
   hub_ = hub;
   if (hub_ != nullptr) {
@@ -50,6 +41,9 @@ void GenSAMStatusLED::set_hub(GenSAMHub *hub) {
       }
       standby_ = standby;
       this->update_led_();
+    });
+    hub_->add_bus_status_callback([this](const std::string &status) {
+      this->on_status_changed_(status);
     });
   }
 }
@@ -75,9 +69,7 @@ void GenSAMStatusLED::setup() {
   // read once at startup or the LED would assume standby until the first transition.
   if (hub_ != nullptr) {
     standby_ = hub_->is_standby();
-  }
-  if (source_sensor_ != nullptr && source_sensor_->has_state()) {
-    bus_status_ = source_sensor_->state;
+    bus_status_ = hub_->get_bus_status();
   }
 
   if (mode_ == StatusLEDMode::BUS_STATUS) {
@@ -104,7 +96,7 @@ void GenSAMStatusLED::update_led_() {
   // Yielding the bus outranks power state: whether we are in control matters more than whether
   // the speakers happen to be on. Otherwise amplifiers being off dims the indication.
   std::string status = bus_status_;
-  if (status != "GLM Active" && standby_) {
+  if (status != "GLM Active" && status != "Bus Silent" && standby_) {
     status = "Standby";
   }
 
@@ -133,7 +125,7 @@ void GenSAMStatusLED::update_led_() {
     // Same hue as the healthy Active state so the difference reads as intensity, not as a
     // different condition, and distinct from the white used for idle.
     this->set_color_(0.0f, 1.0f, 0.0f, true, LEVEL_STANDBY);
-  } else if (status == "Offline" || status == "Idle") {
+  } else if (status == "Offline" || status == "Idle" || status == "Bus Silent") {
     // Dim White: Standalone idle, no monitors discovered.
     // Dimming must come from color_brightness, not a scaled RGB triple: LightCall::validate_
     // normalizes the triple by its largest channel, turning any grey into full white.

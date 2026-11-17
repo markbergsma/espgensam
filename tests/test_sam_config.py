@@ -27,11 +27,31 @@ from sam_fixture import GHOST_ID, check, full_band_sam, make_sam, run, write_sam
 
 import esphome.config_validation as cv  # noqa: E402
 from esphome.core import CORE  # noqa: E402
+from esphome import final_validate as fv  # noqa: E402
 
 import gensam  # noqa: E402
 
 
 MONITORS = [{"unique_id": 1842915}, {"unique_id": 1654321}]
+
+def test_runtime_group_select_requires_uploader():
+    try:
+        gensam._validate_hub({gensam.CONF_GROUP_SELECT: {}})
+        check(False, "the selector rejects a configuration without the uploader")
+    except cv.Invalid:
+        check(True, "the selector rejects a configuration without the uploader")
+    config = gensam._validate_hub({
+        gensam.CONF_GROUP_SELECT: {},
+        gensam.CONF_SAM_UPLOAD: {},
+        gensam.CONF_MONITORS: [
+            {gensam.CONF_NAME: "Left", gensam.CONF_UNIQUE_ID: 1842915},
+            {gensam.CONF_NAME: "Right", gensam.CONF_UNIQUE_ID: 1654321},
+        ],
+    })
+    check(gensam.CONF_GROUP_SELECT in gensam._validate_groups(config),
+          "the runtime selector works before any groups have been uploaded")
+    config = validate_hub({gensam.CONF_SAM_UPLOAD: {}})
+    check(gensam.CONF_SAM_UPLOAD in config, "the uploader needs no configured monitor IDs")
 
 
 class _Collector(logging.Handler):
@@ -80,16 +100,13 @@ def hand_written(name="Mute Everything"):
 
 # --- where the imported groups land ------------------------------------------------------
 
-def test_imported_groups_come_first_and_default_group_follows():
+def test_imported_groups_come_first_without_a_yaml_default():
     config, _ = expand(groups=[hand_written()])
     names = [g[gensam.CONF_NAME] for g in config[gensam.CONF_GROUPS]]
     check(names == ["Listening Position A", "Listening Position B", "Mute Everything"],
           "the file's groups keep their order and precede the hand-written one")
-    # default_group is resolved by _validate_groups from the first entry, so the order above
-    # is also what the hub applies at startup and what the select lists.
     config = gensam._validate_groups(config)
-    check(config[gensam.CONF_DEFAULT_GROUP] == "Listening Position A",
-          "default_group falls to the setup file's first group")
+    check("default_group" not in config, "YAML groups do not create a startup default")
 
 
 def test_without_sam_file_nothing_changes():
@@ -285,6 +302,216 @@ def test_no_groups_means_nothing_to_bypass():
     check(gensam.CONF_CALIBRATION_BYPASS not in config[gensam.CONF_MONITORS][0],
           "no per-monitor bypass switch without groups")
 
+def test_runtime_upload_exposes_calibration_bypass():
+    config = validate_hub({gensam.CONF_SAM_UPLOAD: {}})
+    check(gensam.CONF_CALIBRATION_BYPASS in config,
+          "the runtime uploader exposes the system calibration bypass")
+
+
+def test_discovery_slots_create_fixed_per_monitor_entities():
+    for count in (0, 1, 2, 16, 32):
+        config = validate_hub({
+            gensam.CONF_DISCOVERY_SLOTS: count,
+            gensam.CONF_SAM_UPLOAD: {},
+        })
+        slots = config.get(gensam.CONF_MONITORS, [])
+        check(len(slots) == count,
+              f"{count} discovery slots create exactly {count} monitor entity sets")
+        check([slot[gensam.CONF_NAME] for slot in slots]
+              == [f"Monitor {index}" for index in range(1, count + 1)],
+              "discovery slots have stable, numbered entity names")
+        check(all(slot[gensam.CONF_DISCOVERY_SLOT] for slot in slots),
+              "generated monitor bindings are marked for runtime discovery assignment")
+        check(all(slot[gensam.CONF_UNIQUE_ID] == 0 for slot in slots),
+              "discovery slots do not match every monitor through a zero hardware ID")
+        check(all(gensam.CONF_CALIBRATION_BYPASS in slot for slot in slots),
+              "discovery slots retain the per-monitor group calibration controls")
+        check(all(slot[gensam.CONF_SAM_NAME_SENSOR]["name"].endswith("SAM Name")
+                  for slot in slots),
+              "discovery slots expose a diagnostic SAM Name entity")
+        check(all(str(slot[gensam.CONF_MUTE]["entity_category"]) == "config" for slot in slots),
+              "per-monitor mute is a configuration entity like the other monitor controls")
+
+    try:
+        validate_hub({
+            gensam.CONF_DISCOVERY_SLOTS: 1,
+            gensam.CONF_MONITORS: [{gensam.CONF_NAME: "Static"}],
+        })
+        check(False, "static monitor bindings cannot conflict with discovery slots")
+    except cv.Invalid as err:
+        check("cannot be combined" in str(err),
+              "static monitor bindings cannot conflict with discovery slots")
+
+    config = validate_hub({gensam.CONF_DISCOVERY_SLOTS: 1})
+    check(gensam.CONF_SAM_NAME_SENSOR not in config[gensam.CONF_MONITORS][0],
+          "configs without runtime uploads do not add an unused SAM Name entity")
+
+
+def test_discovery_slots_generate_home_assistant_devices():
+    config = validate_hub({gensam.CONF_DISCOVERY_SLOTS: 2})
+    full_config = {"esphome": {"devices": []}}
+    token = fv.full_config.set(full_config)
+    try:
+        gensam._final_validate_discovery_devices(config)
+    finally:
+        fv.full_config.reset(token)
+
+    devices = full_config["esphome"]["devices"]
+    check([str(device[gensam.CONF_ID]) for device in devices]
+          == ["gensam_monitor_1_device", "gensam_monitor_2_device"],
+          "each discovery slot gets a declared ESPHome device")
+    check([device[gensam.CONF_NAME] for device in devices] == ["Monitor 1", "Monitor 2"],
+          "generated ESPHome devices use the matching slot name")
+    check(all(slot[gensam.CONF_DEVICE_ID] == device[gensam.CONF_ID]
+              for slot, device in zip(config[gensam.CONF_MONITORS], devices)),
+          "each monitor slot's entities reference its generated device")
+
+
+def test_discovery_slot_organization():
+    settings = [
+        {
+            "slot": 1,
+            "device_id": cv.sub_device_id("speaker_one"),
+            "web_server": {
+                "sorting_group_id": cv.use_id(gensam.cg.int_)("speaker_one_diagnostics"),
+                "web_server_id": cv.use_id(gensam.web_server.WebServer)(None),
+                "sorting_weight": 20,
+            },
+        }
+    ]
+    config = validate_hub({
+        gensam.CONF_DISCOVERY_SLOTS: 2,
+        gensam.CONF_SAM_UPLOAD: {},
+        "discovery_slot_settings": settings,
+    })
+    first, second = config[gensam.CONF_MONITORS]
+    full_config = {"esphome": {"devices": []}}
+    token = fv.full_config.set(full_config)
+    try:
+        gensam._final_validate_discovery_devices(config)
+    finally:
+        fv.full_config.reset(token)
+    check([device[gensam.CONF_NAME] for device in full_config["esphome"]["devices"]]
+          == ["Monitor 2"],
+          "an explicit slot device overrides generation only for that slot")
+
+    names = {
+        "temperature": "Temperature",
+        "input_level": "Input Level",
+        "output_level": "Output Level",
+        "online": "Online",
+        "identify": "Identify",
+        "model": "Model",
+        "serial_number_sensor": "Serial Number",
+        "firmware_version": "Firmware Version",
+        "hardware_id": "Hardware ID",
+        "mute": "Mute",
+        "input": "Input",
+        "level_db": "Level",
+        "delay_ms": "Delay",
+        "calibration_bypass": "Bypass Calibration",
+        "bass_management_crossover_frequency": "Bass Management Crossover",
+    }
+    for key, name in names.items():
+        check(first[key]["name"] == name, f"sub-device {key} has a non-redundant name")
+        check(second[key]["name"] == name, f"automatically grouped {key} has a concise name")
+        check(str(second[key]["device_id"]) == "gensam_monitor_2_device",
+              f"{key} belongs to its automatically generated Home Assistant device")
+    for key in ("temperature", "input_level", "output_level", "online", "identify",
+                "model", "serial_number_sensor", "firmware_version", "hardware_id"):
+        check(str(first[key]["device_id"]) == "speaker_one",
+              f"{key} belongs to the slot's Home Assistant device")
+        check(str(first[key]["web_server"]["sorting_group_id"]) == "speaker_one_diagnostics",
+              f"{key} belongs to the slot's web diagnostics group")
+        check("web_server" not in second[key], f"{key} keeps the default grouping on other slots")
+    ordered_diagnostics = ("online", "input_level", "output_level", "temperature", "model",
+                           "serial_number_sensor", "firmware_version", "hardware_id", "identify",
+                           gensam.CONF_SAM_NAME_SENSOR)
+    weights = [first[key]["web_server"]["sorting_weight"] for key in ordered_diagnostics]
+    check(weights == list(range(20, 120, 10)),
+          "diagnostics are ordered by importance from the configured starting weight")
+    default_config = validate_hub({
+        gensam.CONF_DISCOVERY_SLOTS: 1,
+        "discovery_slot_settings": [{
+            "slot": 1,
+            "web_server": {"sorting_group_id": cv.use_id(gensam.cg.int_)("diagnostics")},
+        }],
+    })
+    default_slot = default_config[gensam.CONF_MONITORS][0]
+    default_diagnostics = ordered_diagnostics[:-1]
+    check([default_slot[key]["web_server"]["sorting_weight"] for key in default_diagnostics]
+          == list(range(50, 140, 10)), "diagnostics use the default starting weight of 50")
+    check("calibration_bypass" not in default_slot,
+          "the monitor card does not create bypass without groups or upload")
+    server_ids = [first[key]["web_server"]["web_server_id"] for key in gensam.MONITOR_DIAGNOSTICS]
+    check(len({id(server_id) for server_id in server_ids}) == len(server_ids),
+          "each diagnostic has its own auto-resolved web server reference")
+    for key in ("mute", "input", "level_db", "delay_ms", "calibration_bypass",
+                "bass_management_crossover_frequency"):
+        check(str(first[key]["device_id"]) == "speaker_one",
+              f"{key} belongs to the slot's Home Assistant device")
+        check(str(first[key].get("web_server", {}).get("sorting_group_id")) == "speaker_one_diagnostics",
+              f"{key} belongs to the slot's web card")
+        check("web_server" not in second[key], f"{key} keeps default grouping on other slots")
+    check(all(first[key]["disabled_by_default"] for key in
+              ("calibration_bypass", "bass_management_crossover_frequency", "level_db", "delay_ms")),
+          "grouping preserves the disabled-by-default monitor settings")
+    controls = ("mute", "input", "calibration_bypass", "bass_management_crossover_frequency",
+                "level_db", "delay_ms")
+    check([first[key].get("web_server", {}).get("sorting_weight") for key in controls]
+          == list(range(-40, 20, 10)), "monitor controls appear in order before diagnostics")
+    check(len({id(first[key]["web_server"]["web_server_id"])
+               for key in controls + ordered_diagnostics if "web_server" in first[key]})
+          == sum("web_server" in first[key] for key in controls + ordered_diagnostics),
+          "all monitor entities have independent web server references")
+
+    for invalid in (
+        [{"slot": 1}, {"slot": 1}],
+        [{"slot": 3}],
+    ):
+        try:
+            validate_hub({gensam.CONF_DISCOVERY_SLOTS: 2, "discovery_slot_settings": invalid})
+            check(False, "duplicate and out-of-range slot settings are rejected")
+        except cv.Invalid:
+            check(True, "duplicate and out-of-range slot settings are rejected")
+
+
+def test_each_monitor_gets_its_own_web_card():
+    config = validate_hub({
+        gensam.CONF_DISCOVERY_SLOTS: 3,
+        gensam.CONF_SAM_UPLOAD: {},
+        "discovery_slot_settings": [{
+            "slot": 2,
+            "web_server": {"sorting_group_id": cv.use_id(gensam.cg.int_)("custom")},
+        }],
+    })
+    cards = gensam._monitor_web_cards(config)
+    check([(name, weight) for _, name, weight, _ in cards] == [("Monitor 1", 1), ("Monitor 3", 3)],
+          "every monitor without explicit web settings gets a card named after it, in slot order")
+    first = config[gensam.CONF_MONITORS][0]
+    expected = [first[key][gensam.CONF_ID] for key in
+                gensam.MONITOR_CONTROLS + gensam.MONITOR_DIAGNOSTICS if key in first]
+    _, _, _, entities = cards[0]
+    check([entity_id for entity_id, _ in entities] == expected,
+          "the card holds all configuration and diagnostics, controls first")
+    check(gensam.CONF_SAM_NAME_SENSOR in first and gensam.CONF_IDENTIFY in first
+          and len(entities) == len(expected),
+          "diagnostics such as SAM name and identify are in the card")
+    weights = [weight for _, weight in entities]
+    check(weights == sorted(weights) and len(set(weights)) == len(weights),
+          "card entries have distinct ascending weights")
+
+
+def test_shared_package_exposes_discovery_slot_substitution():
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    package = yaml.safe_load((root / "packages/gensam.yaml").read_text())
+    check(package["gensam"]["discovery_slots"] == "${discovery_slots}",
+          "the shared package uses the configurable discovery slot count")
+    check(package["substitutions"]["discovery_slots"] == "16",
+          "existing configurations retain the default of 16 discovery slots")
+
 
 def test_an_explicit_calibration_bypass_switch_is_kept():
     explicit = gensam.MONITOR_CALIBRATION_BYPASS_SCHEMA({gensam.CONF_NAME: "Left EQ Off"})
@@ -292,6 +519,14 @@ def test_an_explicit_calibration_bypass_switch_is_kept():
                                     gensam.CONF_CALIBRATION_BYPASS: explicit})
     check(config[gensam.CONF_MONITORS][0][gensam.CONF_CALIBRATION_BYPASS][gensam.CONF_NAME]
           == "Left EQ Off", "a declared per-monitor switch is not replaced")
+
+def test_system_led_switch_is_configurable():
+    """The monitor LED control is shared; it does not depend on monitor bindings."""
+    config = validate_hub({
+        gensam.CONF_SYSTEM_LEDS: {gensam.CONF_NAME: "Monitor LEDs"},
+    })
+    check(config[gensam.CONF_SYSTEM_LEDS][gensam.CONF_NAME] == "Monitor LEDs",
+          "the shared system LED switch is accepted")
 
 
 # --- paths outside the configuration directory --------------------------------------------

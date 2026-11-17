@@ -55,8 +55,7 @@
 /// 4. Manual Overrides Are Temporary By Construction:
 ///    Changing a monitor's input or crossover by hand transmits immediately and updates its binding, but
 ///    nothing about the active group changes, so the next group push - a group switch, a
-///    standby cycle, or a rediscovery - restores that group's setting.  The deviation is
-///    visible meanwhile through the hub's "Group Modified" binary sensor.
+///    standby cycle, or a rediscovery - restores that group's setting.
 ///
 /// 5. Non-Destructive Boot:
 ///    Monitors hold their input routing and crossover in their own flash.  A binding starts
@@ -75,6 +74,7 @@
 /// ===================================================================================
 
 #include "esphome/core/component.h"
+#include "esphome/core/log.h"
 #include "esphome/components/select/select.h"
 #include "hub.h"
 #include "const.h"
@@ -95,17 +95,26 @@ class GenSAMGroupSelect : public select::Select {
   /// @brief Set the parent GenSAMHub instance.
   /// @param hub Pointer to the GenSAMHub.
   void set_hub(GenSAMHub *hub) { hub_ = hub; }
+  /// @brief Enable selection after uploaded groups have been restored at startup.
+  void set_runtime_ready() { runtime_ready_ = true; }
 
  protected:
   /// @brief Action executed when the user picks a group in Home Assistant.
-  /// @param value Selected group name, as declared in the `groups:` configuration.
+  /// @param value Selected group name from the uploaded setup.
   void control(const std::string &value) override {
-    if (hub_ != nullptr) {
-      hub_->set_active_group_by_name(value);
+    if (hub_ == nullptr || !runtime_ready_) {
+      ESP_LOGW("gensam", "Cannot select a group before an uploaded setup is restored");
+      return;
     }
+    if (hub_->is_listen_only()) {
+      ESP_LOGW("gensam", "Cannot select a group in listen-only mode");
+      return;
+    }
+    hub_->set_active_group_by_name(value);
   }
 
   GenSAMHub *hub_{nullptr};
+  bool runtime_ready_{false};
 };
 
 /// @brief Select entity that routes one monitor's input: analog, or an AES3 sub-channel.
@@ -158,4 +167,3 @@ class GenSAMCrossoverSelect : public select::Select {
 
 }  // namespace gensam
 }  // namespace esphome
-

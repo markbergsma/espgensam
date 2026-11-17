@@ -53,10 +53,21 @@ Frame make_set_rid(const std::vector<uint8_t> &racing_bytes, uint8_t assign_addr
 Frame make_stay_online();
 
 /// @brief Build one step of a CMD_WAKEUP (0x3A) power sequence.
-/// @param op Sub-command byte (e.g. WAKEUP_OP_POWER).
-/// @param val Sub-command value (e.g. WAKEUP_VAL_ON_1, WAKEUP_VAL_STANDBY_2).
+/// @param op Power sub-command, normally WAKEUP_OP_POWER.
+/// @param val Power sub-command value, such as WAKEUP_VAL_ON_1 or WAKEUP_VAL_STANDBY_2.
 /// @return Broadcast CMD_WAKEUP frame carrying [op, val].
 Frame make_wakeup_step(uint8_t op, uint8_t val);
+
+/// @brief Build an ISS monitor LED enable/disable frame (CMD_WAKEUP 0x3A, sub-command 0x06).
+/// @param addr Target monitor address.
+/// @param enabled True to enable the monitor LEDs, false to disable them.
+/// @return CMD_WAKEUP frame carrying [0x06, 0x00] when enabled or [0x06, 0x01] when disabled.
+Frame make_iss_led_state(uint8_t addr, bool enabled);
+
+/// @brief Build a monitor flash-commit frame (CMD_FLASH_COMMIT 0x15).
+/// @param addr Target monitor address.
+/// @return CMD_FLASH_COMMIT frame carrying [0x33, 0x00].
+Frame make_flash_commit(uint8_t addr);
 
 /// @brief Build the master volume broadcast (0xFF 0x1F) for a decibel level.
 /// @param db Target volume in dBFS; converted to the 24-bit fixed-point wire value.
@@ -83,6 +94,13 @@ Frame make_query(uint8_t addr, uint8_t cmd);
 /// @param pulsing True to pulse the front LED for physical identification.
 /// @return CMD_BYPASS frame carrying the packed control byte.
 Frame make_bypass(uint8_t addr, bool mute, bool pulsing = false);
+
+/// @brief Build a live monitor LED enable/disable frame (CMD_BYPASS 0x2B).
+/// @param addr Target monitor address.
+/// @param mute Current mute state, preserved in bit 0.
+/// @param enabled True to enable the LED, false to disable it.
+/// @return CMD_BYPASS frame carrying 0x04 (enabled) or 0x08 (disabled), with the mute bit preserved.
+Frame make_bypass_led_state(uint8_t addr, bool mute, bool enabled);
 
 /// @brief Build a bass management crossover frame (CMD_BASS_MANAGE_XO 0x3B).
 /// @param addr Target address (monitor, multicast, or broadcast).

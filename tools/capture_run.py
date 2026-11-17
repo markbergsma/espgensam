@@ -10,7 +10,7 @@ document.
 USAGE
 
     python3 tools/capture_run.py --label "jumper-out, adapter absent" \\
-        --yaml espgensam-waveshare-local.yaml --device espgensam-waveshare.local
+        --yaml espgensam.yaml --device espgensam.local
 
 Change exactly one thing about the setup between runs, and give each run a label saying what it
 was. Options: --frames (default 4000, the sample size at which a 30% change is resolvable against

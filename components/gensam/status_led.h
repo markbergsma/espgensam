@@ -1,7 +1,7 @@
 #pragma once
 
 /// @file status_led.h
-/// @brief ESPHome component driving an onboard RGB status LED from bus status text sensor updates.
+/// @brief ESPHome component driving an onboard RGB status LED from hub status updates.
 ///
 /// ===================================================================================
 /// ARCHITECTURAL DESIGN RATIONALE
@@ -9,15 +9,14 @@
 /// 1. Single Responsibility & Decoupling:
 ///    The core RS-485 protocol components (GenSAMHub, BusArbiter, MonitorRegistry, race)
 ///    maintain zero awareness of RGB LEDs, color math, or ESPHome light components.
-///    Instead, the hub publishes its operational state to a standard ESPHome
-///    text_sensor::TextSensor entity (e.g. "bus_status").
+///    Instead, the hub exposes operational state through an observer callback.
 ///
 /// 2. Configurable Operating Modes (StatusLEDMode):
 ///    GenSAMStatusLED provides a modular architecture with a configurable `mode` option
 ///    (default: `bus_status`). This encapsulates the translation logic from domain events
 ///    into physical LED color/brightness states, allowing future modes (such as volume level
 ///    or mute state visualization) to be added without modifying core bus protocol code:
-///      - BUS_STATUS: Subscribes to the bus status text sensor and displays operational states:
+///      - BUS_STATUS: Subscribes to the hub's bus status callback and displays operational states:
 ///        * "Active"      -> Solid Green (#00FF00): Normal healthy listening loop
 ///        * "GLM Active"  -> Amber / Orange (#FF8000): External GLM master has bus control
 ///        * "Discovering" -> Blue (#0066FF): Active RACE discovery / device interrogation
@@ -50,7 +49,6 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/light/light_state.h"
-#include "esphome/components/text_sensor/text_sensor.h"
 #include "hub.h"
 
 #include <string>
@@ -83,10 +81,6 @@ class GenSAMStatusLED : public Component {
   /// @return Human-readable mode string name.
   static const char *mode_to_string(StatusLEDMode mode);
 
-  /// @brief Set the source text sensor to subscribe to (e.g. Bus Status diagnostic entity).
-  /// @param sensor Pointer to the TextSensor entity.
-  void set_source_sensor(text_sensor::TextSensor *sensor);
-
   /// @brief Set the parent hub, subscribing to its amplifier power state.
   ///
   /// Bus status alone cannot say whether the speakers are on; the hub reports that separately.
@@ -108,7 +102,7 @@ class GenSAMStatusLED : public Component {
   void dump_config() override;
 
  protected:
-  /// @brief Callback invoked when the observed text sensor publishes a state update.
+  /// @brief Callback invoked when the hub reports a bus status update.
   /// @param status The newly published status string.
   void on_status_changed_(const std::string &status);
 
@@ -129,14 +123,13 @@ class GenSAMStatusLED : public Component {
   void set_color_(float r, float g, float b, bool state = true, float color_brightness = 1.0f);
 
   light::LightState *light_{nullptr};
-  text_sensor::TextSensor *source_sensor_{nullptr};
   GenSAMHub *hub_{nullptr};
   StatusLEDMode mode_{StatusLEDMode::BUS_STATUS};
   float brightness_{0.50f};
   bool brightness_initialized_{false};
   bool last_commanded_state_{false};
   bool standby_{true};            ///< Latest amplifier power state reported by the hub.
-  std::string bus_status_{};      ///< Latest value published by the bus status text sensor.
+  std::string bus_status_{};      ///< Latest bus status reported by the hub.
   std::string last_status_{};     ///< Effective status last rendered, to avoid redundant repaints.
 };
 

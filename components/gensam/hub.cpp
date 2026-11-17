@@ -5,13 +5,11 @@
 #include "hub.h"
 #include "commands.h"
 
-#include "esphome/components/binary_sensor/binary_sensor.h"
 #include "crc.h"
 #include "esphome/core/log.h"
 #include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/switch/switch.h"
-#include "esphome/components/text_sensor/text_sensor.h"
 #include "driver/gpio.h"
 
 static const char *const TAG = "gensam";
@@ -56,6 +54,13 @@ constexpr uint32_t PASSIVE_STALE_TIMEOUT_MS = 15000;
 /// user just commanded.  A command that never took effect still self-corrects once the window
 /// expires and telemetry keeps disagreeing.
 constexpr uint32_t STANDBY_SETTLE_MS = 5000;
+
+/// Persist requested control state independently of volatile monitor addresses.
+struct StoredControlState {
+  float volume;
+  uint32_t generation;
+  int32_t group;
+};
 
 }  // namespace
 
@@ -118,7 +123,9 @@ void GenSAMHub::setup() {
   }
 
   current_volume_db_ = startup_volume_db_;
-  last_tx_volume_db_ = startup_volume_db_;
+  this->restore_control_state_();
+  last_tx_volume_db_ = current_volume_db_;
+  last_user_command_ms_ = millis();
   if (volume_number_ != nullptr) {
     volume_number_->publish_state(current_volume_db_);
   }
@@ -140,7 +147,7 @@ void GenSAMHub::setup() {
   // will be transmitted and naming a group would assert something untrue about the bus.
   if (!listen_only_ && default_group_ >= 0 && group_select_ != nullptr) {
     const GroupPreset *group = this->get_group(static_cast<uint8_t>(default_group_));
-    if (group != nullptr) {
+    if (group != nullptr && group_select_->has_option(group->name)) {
       group_select_->publish_state(group->name);
     }
   }
@@ -160,6 +167,11 @@ void GenSAMHub::set_active_group(uint8_t index) {
              (unsigned) group_count_);
     return;
   }
+  if (!executing_user_command_ && !this->open_control_window_()) {
+    return;
+  }
+  selected_group_ = index;
+  this->save_control_state_();
 
   // Record the request rather than transmitting here. The push is hundreds of frames and has
   // to be paced, and this is called from a Home Assistant callback which must return promptly.
@@ -170,7 +182,7 @@ void GenSAMHub::set_active_group(uint8_t index) {
 
   // Reflect the choice immediately so the entity does not sit on the old value for the
   // second or so the push takes; finish_group_apply_() publishes it again on completion.
-  if (group_select_ != nullptr) {
+  if (group_select_ != nullptr && group_select_->has_option(group->name)) {
     group_select_->publish_state(group->name);
   }
 }
@@ -193,6 +205,152 @@ int GenSAMHub::find_group_index(const std::string &name) const {
   return -1;
 }
 
+bool GenSAMHub::replace_runtime_group_table(const GroupPreset *groups, uint8_t count) {
+  if (apply_.active || pending_group_ >= 0) {
+    return false;
+  }
+  groups_ = groups;
+  group_count_ = count;
+  default_group_ = -1;
+  active_group_ = -1;
+  pending_group_ = -1;
+  apply_ = GroupApplyState{};
+  return true;
+}
+
+void GenSAMHub::restore_control_state_() {
+  control_preference_ = global_preferences->make_preference<StoredControlState>(0x47534331);
+  StoredControlState state{};
+  if (control_preference_.load(&state)) {
+    if (std::isfinite(state.volume)) {
+      current_volume_db_ = std::clamp(state.volume, min_volume_db_, max_volume_db_);
+    } else {
+      ESP_LOGW(TAG, "Stored volume is invalid; using configured startup volume");
+    }
+    if (state.generation == group_generation_ && state.group >= 0 && state.group < group_count_) {
+      default_group_ = state.group;
+    }
+  }
+  selected_group_ = default_group_;
+}
+
+void GenSAMHub::save_control_state_() {
+  const StoredControlState state{current_volume_db_, group_generation_, selected_group_};
+  if (!control_preference_.save(&state)) {
+    ESP_LOGW(TAG, "Could not persist volume/group selection");
+  }
+}
+
+bool GenSAMHub::open_control_window_(bool controls_only) {
+  if (listen_only_ || (yield_to_glm_ && arbiter_.is_active())) {
+    ESP_LOGW(TAG, "User command rejected: listen-only or external GLM controls the bus");
+    return false;
+  }
+  last_user_command_ms_ = millis();
+  if (power_off_pending_) {
+    ESP_LOGI(TAG, "New user command supersedes pending power off");
+    power_off_pending_ = false;
+  }
+  if (bus_silent_ || current_standby_ || (controls_only_session_ && !controls_only)) {
+    if (controls_only_session_ && !controls_only) {
+      recovery_required_ = true;
+    }
+    bus_silent_ = false;
+    current_standby_ = false;
+    controls_only_session_ = controls_only;
+    resuming_ = !controls_only;
+    poll_addrs_ = registry_.addresses();
+    current_poll_index_ = 0;
+    current_query_addr_ = 0;
+    race_step_time_ = millis();
+    if (controls_only) {
+      race_state_ = RaceState::IDLE;
+      ESP_LOGI(TAG, "Resuming volume/mute only; no wakeup, discovery or group reload");
+    }
+    this->update_bus_status_();
+  }
+  return true;
+}
+
+bool GenSAMHub::defer_user_command_(std::function<void()> command) {
+  if (executing_user_command_) {
+    return false;
+  }
+  if (user_commands_.size() >= 32) {
+    ESP_LOGW(TAG, "User command queue full; command rejected");
+    return true;
+  }
+  if (this->open_control_window_()) {
+    user_commands_.push_back(std::move(command));
+  }
+  return true;
+}
+
+void GenSAMHub::service_control_window_(uint32_t now) {
+  if (!can_transmit()) {
+    return;
+  }
+  if (power_off_pending_ && !apply_.active) {
+    if (current_query_addr_ != 0 && now - race_step_time_ < 350) {
+      return;
+    }
+    current_query_addr_ = 0;
+    resuming_ = false;
+    power_off_pending_ = false;
+    executing_user_command_ = true;
+    this->set_standby(true);
+    executing_user_command_ = false;
+    return;
+  }
+  if (resuming_) {
+    if (recovery_required_ || poll_addrs_.empty()) {
+      this->discover_monitors_();
+      return;
+    }
+    if (current_query_addr_ != 0) {
+      if (now - race_step_time_ < 300) {
+        return;
+      }
+      resuming_ = false;
+      this->discover_monitors_();
+      return;
+    }
+    if (current_poll_index_ < poll_addrs_.size()) {
+      current_query_addr_ = poll_addrs_[current_poll_index_++];
+      race_step_time_ = now;
+      this->send_frame(make_query(current_query_addr_, CMD_QUERY_STATUS));
+      return;
+    }
+    resuming_ = false;
+    race_state_ = RaceState::POLLING_MONITORS;
+    last_poll_cycle_time_ = now;
+    this->update_bus_status_();
+  }
+  if (current_query_addr_ != 0 || apply_.active ||
+      (race_state_ != RaceState::POLLING_MONITORS && race_state_ != RaceState::IDLE)) {
+    return;
+  }
+  if (!user_commands_.empty() && initial_discovery_done_) {
+    auto command = std::move(user_commands_.front());
+    user_commands_.erase(user_commands_.begin());
+    executing_user_command_ = true;
+    command();
+    executing_user_command_ = false;
+    return;
+  }
+  const bool identifying = std::any_of(registry_.monitors().begin(), registry_.monitors().end(),
+      [](const auto &entry) { return entry.second.identify_end_ms != 0; });
+  if (!identifying && user_commands_.empty() &&
+      control_window_ms_ != 0 && now - last_user_command_ms_ >= control_window_ms_ &&
+      initial_discovery_done_ && (pending_group_ < 0 || controls_only_session_) && !volume_tx_pending_ &&
+      !mute_tx_pending_ && !system_led_tx_pending_) {
+    bus_silent_ = true;
+    registry_.publish_stale_telemetry();
+    ESP_LOGI(TAG, "Control window expired; all TX suspended for native ISS");
+    this->update_bus_status_();
+  }
+}
+
 const GroupDevice *GenSAMHub::find_group_device(const GroupPreset &group, uint32_t unique_id) {
   for (uint8_t i = 0; i < group.device_count; i++) {
     if (group.devices[i].unique_id == unique_id) {
@@ -206,16 +364,11 @@ void GenSAMHub::dump_config() {
   ESP_LOGCONFIG(TAG, "GenSAM Hub:");
   ESP_LOGCONFIG(TAG, "  TX Pin: GPIO%d", rs485_.tx_pin);
   ESP_LOGCONFIG(TAG, "  RX Pin: GPIO%d", rs485_.rx_pin);
+  ESP_LOGCONFIG(TAG, "  Control window: %u ms (0 = infinite)", (unsigned)control_window_ms_);
   ESP_LOGCONFIG(TAG, "  Volume Bounds: [%.1f dB, %.1f dB] (Startup: %.1f dB)",
                 min_volume_db_, max_volume_db_, startup_volume_db_);
   if (volume_number_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Volume dB Number Entity: configured");
-  }
-  if (group_modified_sensor_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  Group Modified Binary Sensor: configured");
-  }
-  if (bus_status_sensor_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  Bus Status Text Sensor: configured");
   }
   ESP_LOGCONFIG(TAG, "  Configured Monitor Bindings: %u", (unsigned)registry_.bindings().size());
   for (const auto &b : registry_.bindings()) {
@@ -270,7 +423,7 @@ void GenSAMHub::dump_config() {
 }
 
 bool GenSAMHub::can_transmit() const {
-  if (listen_only_) {
+  if (listen_only_ || bus_silent_) {
     return false;
   }
   if (yield_to_glm_ && arbiter_.is_active()) {
@@ -293,8 +446,8 @@ bool GenSAMHub::send_frame(const Frame &frame) {
     return false;
   }
 
-  if (listen_only_) {
-    ESP_LOGW(TAG, "Cannot send frame: listen_only mode is enabled");
+  if (listen_only_ || bus_silent_) {
+    ESP_LOGW(TAG, "Cannot send frame: listen-only or control window is silent");
     return false;
   }
 
@@ -412,6 +565,16 @@ void GenSAMHub::process_rx_() {
                  frame.to_string().c_str());
         if (yield_to_glm_) {
           this->drop_pending_writes_();
+          ESP_LOGW(TAG, "Cancelling queued user commands on GLM takeover");
+          user_commands_.clear();
+          power_off_pending_ = false;
+          resuming_ = false;
+          recovery_required_ = true;
+          apply_ = GroupApplyState{};
+          pending_group_ = selected_group_;
+          bus_silent_ = true;
+          registry_.publish_stale_telemetry();
+          current_query_addr_ = 0;
         }
         this->update_bus_status_();
       }
@@ -437,10 +600,11 @@ void GenSAMHub::check_glm_cooldown_() {
   ESP_LOGI(TAG, "No GLM master/adapter traffic observed for %u seconds. Resuming active bus control.",
            (unsigned)(glm_inactivity_cooldown_ms_ / 1000));
   // Trigger fresh wakeup and discovery when resuming active master control
-  this->rediscover_monitors();
+  if (!listen_only_ && !bus_silent_) {
+    this->discover_monitors_();
+  }
 
-  // Refresh the status here too: rediscover_monitors() returns before publishing when the hub
-  // cannot transmit (listen-only), which would otherwise latch the status at "GLM Active".
+  // A silent window never reclaims the bus automatically after GLM disconnects.
   this->update_bus_status_();
 }
 
@@ -451,6 +615,9 @@ void GenSAMHub::mark_monitor_seen_(GenSAMMonitor &mon) {
 }
 
 void GenSAMHub::check_monitor_timeouts_() {
+  if (bus_silent_ || resuming_ || controls_only_session_) {
+    return;
+  }
   uint32_t now = millis();
   if (now - last_timeout_check_ < TIMEOUT_CHECK_INTERVAL_MS) {
     return;
@@ -523,6 +690,10 @@ void GenSAMHub::update_bus_status_() {
   std::string status;
   if (arbiter_.is_active()) {
     status = "GLM Active";
+  } else if (bus_silent_) {
+    status = "Bus Silent";
+  } else if (resuming_) {
+    status = "Discovering";
   } else {
     switch (race_state_) {
       case RaceState::WAKEUP_SENT:
@@ -547,9 +718,6 @@ void GenSAMHub::update_bus_status_() {
   if (status != last_bus_status_) {
     last_bus_status_ = status;
     ESP_LOGI(TAG, "Bus operational status changed to: %s", status.c_str());
-    if (bus_status_sensor_ != nullptr) {
-      bus_status_sensor_->publish_state(status);
-    }
     for (auto &cb : bus_status_callbacks_) {
       cb(status);
     }
@@ -557,25 +725,20 @@ void GenSAMHub::update_bus_status_() {
 }
 
 void GenSAMHub::set_volume_db(float db) {
-  float target_db = std::clamp(db, min_volume_db_, max_volume_db_);
-  if (current_standby_) {
-    current_volume_db_ = target_db;
-    this->notify_state_callbacks_();
+  if (!std::isfinite(db)) {
+    ESP_LOGW(TAG, "Invalid volume request rejected");
     return;
   }
-  if (!can_transmit()) {
-    ESP_LOGW(TAG, "Cannot send volume command: Bus is not available for TX");
-    return;
-  }
-
-  // Accept only; service_pending_writes_() transmits it in the next safe slot.
-  current_volume_db_ = target_db;
+  if (!this->open_control_window_(true)) return;
+  current_volume_db_ = std::clamp(db, min_volume_db_, max_volume_db_);
   volume_tx_pending_ = true;
-  ESP_LOGD(TAG, "Volume request accepted: %.1f dB", target_db);
+  this->save_control_state_();
+  ESP_LOGD(TAG, "Volume request accepted: %.1f dB", current_volume_db_);
   this->notify_state_callbacks_();
 }
 
 void GenSAMHub::set_group_mute(bool mute) {
+  if (!this->open_control_window_(true)) return;
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot send mute command: Bus is not available for TX");
     return;
@@ -588,14 +751,25 @@ void GenSAMHub::set_group_mute(bool mute) {
   this->notify_state_callbacks_();
 }
 
-void GenSAMHub::service_pending_writes_(uint32_t now) {
-  if (!volume_tx_pending_ && !mute_tx_pending_) {
+void GenSAMHub::set_system_leds_enabled(bool enabled) {
+  if (!this->open_control_window_()) return;
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot set monitor LEDs: Bus is not available for TX");
     return;
   }
 
-  // 1. Is the bus in a slot where a frame cannot land on top of anything? Every race phase
-  //    other than these two ends by broadcasting the target volume itself, which clears the
-  //    request.
+  current_system_leds_enabled_ = enabled;
+  system_led_tx_pending_ = true;
+  ESP_LOGD(TAG, "Monitor LED request accepted: %s", YESNO(enabled));
+}
+
+void GenSAMHub::service_pending_writes_(uint32_t now) {
+  if (resuming_ || !initial_discovery_done_ || power_off_pending_) return;
+  if (!volume_tx_pending_ && !mute_tx_pending_ && !system_led_tx_pending_) {
+    return;
+  }
+
+  // 1. Is the bus in a slot where a frame cannot land on top of a reply or configuration push?
   if (!can_transmit()) {
     return;
   }
@@ -610,6 +784,8 @@ void GenSAMHub::service_pending_writes_(uint32_t now) {
   //    broadcast would re-establish amplifier gain; set_standby(true) cancels it anyway.
   if (mute_tx_pending_) {
     this->transmit_group_mute_();
+  } else if (system_led_tx_pending_) {
+    this->transmit_system_leds_();
   } else if (volume_tx_pending_ && !current_standby_ &&
              now - last_volume_tx_ms_ >= volume_tx_interval_ms_) {
     this->transmit_volume_();
@@ -654,6 +830,35 @@ void GenSAMHub::transmit_group_mute_() {
   ESP_LOGI(TAG, "Set system mute: %s across %zu monitors", YESNO(mute), registry_.size());
 }
 
+void GenSAMHub::transmit_system_leds_() {
+  if (registry_.empty()) {
+    return;
+  }
+
+  const bool enabled = current_system_leds_enabled_;
+  bool transmitted = true;
+  for (auto &kv : registry_.monitors()) {
+    if (!this->send_frame_twice(make_bypass_led_state(kv.first, kv.second.mute, enabled))) {
+      transmitted = false;
+      continue;
+    }
+    kv.second.system_leds_enabled = enabled;
+    kv.second.system_leds_known = true;
+  }
+
+  if (transmitted) {
+    system_led_tx_pending_ = false;
+    last_tx_system_leds_enabled_ = enabled;
+    system_led_state_known_ = true;
+    for (auto &callback : system_led_state_callbacks_) {
+      callback(current_system_leds_enabled_);
+    }
+    ESP_LOGI(TAG, "Set live monitor LEDs %s across %zu monitors", YESNO(enabled), registry_.size());
+  } else {
+    ESP_LOGW(TAG, "Monitor LED setting was only partially transmitted; it will be retried");
+  }
+}
+
 void GenSAMHub::transmit_volume_() {
   volume_tx_pending_ = false;
   last_volume_tx_ms_ = millis();
@@ -663,10 +868,10 @@ void GenSAMHub::transmit_volume_() {
 }
 
 void GenSAMHub::drop_pending_writes_() {
-  if (!volume_tx_pending_ && !mute_tx_pending_) {
+  if (!volume_tx_pending_ && !mute_tx_pending_ && !system_led_tx_pending_) {
     return;
   }
-  ESP_LOGW(TAG, "Dropping volume/mute request the bus never received; GLM now owns the bus");
+  ESP_LOGW(TAG, "Dropping pending volume/mute/monitor-LED request; GLM now owns the bus");
   if (volume_tx_pending_) {
     volume_tx_pending_ = false;
     current_volume_db_ = last_tx_volume_db_;
@@ -675,10 +880,25 @@ void GenSAMHub::drop_pending_writes_() {
     mute_tx_pending_ = false;
     this->evaluate_system_mute_();
   }
+  if (system_led_tx_pending_) {
+    system_led_tx_pending_ = false;
+    if (system_led_state_known_) {
+      current_system_leds_enabled_ = last_tx_system_leds_enabled_;
+      for (auto &callback : system_led_state_callbacks_) {
+        callback(current_system_leds_enabled_);
+      }
+    }
+  }
   this->notify_state_callbacks_();
 }
 
 void GenSAMHub::set_monitor_mute(uint8_t address, bool mute) {
+  if (!executing_user_command_) {
+    const auto *mon = registry_.find(address);
+    if (mon == nullptr) { ESP_LOGW(TAG, "Unknown mute target"); return; }
+    const auto id = std::to_string(mon->unique_id);
+    if (this->defer_user_command_([this, id, mute]() { this->set_monitor_mute_by_serial(id, mute); })) return;
+  }
   GenSAMMonitor *mon = registry_.find(address);
   if (mon == nullptr) {
     ESP_LOGW(TAG, "Cannot mute monitor 0x%02X: not found in registry", address);
@@ -702,6 +922,9 @@ void GenSAMHub::set_monitor_mute(uint8_t address, bool mute) {
 }
 
 void GenSAMHub::set_monitor_mute_by_serial(const std::string &serial_or_id, bool mute) {
+  if (this->defer_user_command_([this, serial_or_id, mute]() {
+        this->set_monitor_mute_by_serial(serial_or_id, mute);
+      })) return;
   GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
   if (mon == nullptr) {
     ESP_LOGW(TAG, "Cannot mute speaker '%s': monitor not currently discovered on bus", serial_or_id.c_str());
@@ -711,9 +934,12 @@ void GenSAMHub::set_monitor_mute_by_serial(const std::string &serial_or_id, bool
 }
 
 void GenSAMHub::set_monitor_crossover(uint8_t address, uint16_t freq_hz) {
-  // A hand-picked crossover deviates from the active group, the same as an input override.
-  this->set_group_modified(true);
-
+  if (!executing_user_command_) {
+    const auto *mon = registry_.find(address);
+    if (mon == nullptr) { ESP_LOGW(TAG, "Unknown crossover target"); return; }
+    const auto id = std::to_string(mon->unique_id);
+    if (this->defer_user_command_([this, id, freq_hz]() { this->set_monitor_crossover_by_serial(id, freq_hz); })) return;
+  }
   GenSAMMonitor *mon = registry_.find(address);
   if (mon == nullptr) {
     ESP_LOGW(TAG, "Cannot set crossover for unknown monitor 0x%02X", address);
@@ -737,6 +963,9 @@ void GenSAMHub::set_monitor_crossover(uint8_t address, uint16_t freq_hz) {
 }
 
 void GenSAMHub::set_monitor_crossover_by_serial(const std::string &serial_or_id, uint16_t freq_hz) {
+  if (this->defer_user_command_([this, serial_or_id, freq_hz]() {
+        this->set_monitor_crossover_by_serial(serial_or_id, freq_hz);
+      })) return;
   // Store on the binding first, so the setting survives a monitor that is not (yet) on the bus.
   GenSAMMonitorBinding *binding = registry_.find_binding_by_serial_or_id(serial_or_id);
   if (binding != nullptr) {
@@ -770,9 +999,12 @@ void GenSAMHub::set_monitor_crossover_by_name(const std::string &serial_or_id, c
 // unresolved (see commands.h) buys nothing.
 
 void GenSAMHub::set_monitor_level(uint8_t address, float db) {
-  // A hand-picked trim deviates from the active group, the same as an input override.
-  this->set_group_modified(true);
-
+  if (!executing_user_command_) {
+    const auto *mon = registry_.find(address);
+    if (mon == nullptr) { ESP_LOGW(TAG, "Unknown level target"); return; }
+    const auto id = std::to_string(mon->unique_id);
+    if (this->defer_user_command_([this, id, db]() { this->set_monitor_level_by_serial(id, db); })) return;
+  }
   const float level = clamp_level_db(db);
 
   GenSAMMonitor *mon = registry_.find(address);
@@ -797,6 +1029,9 @@ void GenSAMHub::set_monitor_level(uint8_t address, float db) {
 }
 
 void GenSAMHub::set_monitor_level_by_serial(const std::string &serial_or_id, float db) {
+  if (this->defer_user_command_([this, serial_or_id, db]() {
+        this->set_monitor_level_by_serial(serial_or_id, db);
+      })) return;
   const float level = clamp_level_db(db);
 
   // Store on the binding first, so the setting survives a monitor that is not (yet) on the bus.
@@ -807,7 +1042,6 @@ void GenSAMHub::set_monitor_level_by_serial(const std::string &serial_or_id, flo
 
   GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
   if (mon == nullptr) {
-    this->set_group_modified(true);
     ESP_LOGW(TAG, "Level for '%s' set to %.1f dB (stored; monitor not currently discovered on bus)",
              serial_or_id.c_str(), level);
     return;
@@ -816,8 +1050,12 @@ void GenSAMHub::set_monitor_level_by_serial(const std::string &serial_or_id, flo
 }
 
 void GenSAMHub::set_monitor_delay(uint8_t address, uint32_t samples) {
-  this->set_group_modified(true);
-
+  if (!executing_user_command_) {
+    const auto *mon = registry_.find(address);
+    if (mon == nullptr) { ESP_LOGW(TAG, "Unknown delay target"); return; }
+    const auto id = std::to_string(mon->unique_id);
+    if (this->defer_user_command_([this, id, samples]() { this->set_monitor_delay_by_serial(id, samples); })) return;
+  }
   const uint32_t delay = std::min(samples, MAX_DELAY_SAMPLES);
 
   GenSAMMonitor *mon = registry_.find(address);
@@ -843,6 +1081,9 @@ void GenSAMHub::set_monitor_delay(uint8_t address, uint32_t samples) {
 }
 
 void GenSAMHub::set_monitor_delay_by_serial(const std::string &serial_or_id, uint32_t samples) {
+  if (this->defer_user_command_([this, serial_or_id, samples]() {
+        this->set_monitor_delay_by_serial(serial_or_id, samples);
+      })) return;
   const uint32_t delay = std::min(samples, MAX_DELAY_SAMPLES);
 
   GenSAMMonitorBinding *binding = registry_.find_binding_by_serial_or_id(serial_or_id);
@@ -852,7 +1093,6 @@ void GenSAMHub::set_monitor_delay_by_serial(const std::string &serial_or_id, uin
 
   GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
   if (mon == nullptr) {
-    this->set_group_modified(true);
     ESP_LOGW(TAG, "Delay for '%s' set to %u samples (stored; monitor not currently discovered on bus)",
              serial_or_id.c_str(), (unsigned) delay);
     return;
@@ -903,17 +1143,8 @@ void GenSAMHub::with_transient_silence_(const std::function<void()> &switch_inpu
   }
 }
 
-void GenSAMHub::set_group_modified(bool modified) {
-  if (group_modified_ == modified) {
-    return;
-  }
-  group_modified_ = modified;
-  if (group_modified_sensor_ != nullptr) {
-    group_modified_sensor_->publish_state(modified);
-  }
-}
-
 void GenSAMHub::set_calibration_bypass(bool bypass) {
+  if (this->defer_user_command_([this, bypass]() { this->set_calibration_bypass(bypass); })) return;
   calibration_bypass_ = bypass;
   // Published on acceptance, like the group select: the push that makes it true follows.
   if (calibration_bypass_switch_ != nullptr) {
@@ -924,6 +1155,9 @@ void GenSAMHub::set_calibration_bypass(bool bypass) {
 }
 
 void GenSAMHub::set_monitor_calibration_bypass_by_serial(const std::string &serial_or_id, bool bypass) {
+  if (this->defer_user_command_([this, serial_or_id, bypass]() {
+        this->set_monitor_calibration_bypass_by_serial(serial_or_id, bypass);
+      })) return;
   GenSAMMonitorBinding *b = registry_.find_binding_by_serial_or_id(serial_or_id);
   if (b == nullptr) {
     ESP_LOGW(TAG, "Cannot bypass calibration for '%s': no such configured monitor", serial_or_id.c_str());
@@ -957,16 +1191,21 @@ void GenSAMHub::request_group_repush_() {
 //       restore). Acceptable for a one-off manual change; a group push, which touches every
 //       speaker, uses the non-blocking state machine in race.cpp instead.
 void GenSAMHub::set_monitor_input(uint8_t address, uint8_t source, uint8_t channel) {
+  if (!executing_user_command_) {
+    const auto *mon = registry_.find(address);
+    if (mon == nullptr) { ESP_LOGW(TAG, "Unknown input target"); return; }
+    const auto id = std::to_string(mon->unique_id);
+    if (this->defer_user_command_([this, id, source, channel]() {
+          this->set_monitor_input_by_serial(id, source, channel);
+        })) return;
+  }
   GenSAMMonitor *mon = registry_.find(address);
   if (mon != nullptr) {
     registry_.set_input(*mon, source, channel);
   }
 
-  // A hand-picked input is a deviation from whatever the active group specified. The group is
-  // deliberately left alone, so the next push - a group switch, a standby cycle, a
-  // rediscovery - puts its own routing back; this flag is how that shows until then.
-  this->set_group_modified(true);
-
+  // The group is deliberately left alone, so the next push - a group switch, a standby cycle,
+  // or a rediscovery - puts its own routing back.
   const char *name = input_to_str(source, channel);
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Monitor 0x%02X input set to %s (stored; bus not ready for TX)", address, name);
@@ -982,6 +1221,9 @@ void GenSAMHub::set_monitor_input(uint8_t address, uint8_t source, uint8_t chann
 
 void GenSAMHub::set_monitor_input_by_serial(const std::string &serial_or_id, uint8_t source,
                                             uint8_t channel) {
+  if (this->defer_user_command_([this, serial_or_id, source, channel]() {
+        this->set_monitor_input_by_serial(serial_or_id, source, channel);
+      })) return;
   // Store on the binding first, so the setting survives a monitor that is not (yet) on the bus.
   GenSAMMonitorBinding *binding = registry_.find_binding_by_serial_or_id(serial_or_id);
   if (binding != nullptr) {
@@ -990,7 +1232,6 @@ void GenSAMHub::set_monitor_input_by_serial(const std::string &serial_or_id, uin
 
   GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
   if (mon == nullptr) {
-    this->set_group_modified(true);
     ESP_LOGW(TAG, "Input for '%s' set to %s (stored; monitor not currently discovered on bus)",
              serial_or_id.c_str(), input_to_str(source, channel));
     return;
@@ -1010,6 +1251,21 @@ void GenSAMHub::set_monitor_input_by_name(const std::string &serial_or_id,
 }
 
 void GenSAMHub::set_standby(bool standby) {
+  if (!executing_user_command_) {
+    if (!standby) {
+      this->defer_user_command_([this]() { this->notify_state_callbacks_(); });
+    } else if (listen_only_ || (yield_to_glm_ && arbiter_.is_active())) {
+      ESP_LOGW(TAG, "Power off rejected: bus unavailable");
+    } else {
+      ESP_LOGI(TAG, "Power off requested; cancelling queued controls");
+      user_commands_.clear();
+      pending_group_ = -1;
+      volume_tx_pending_ = mute_tx_pending_ = system_led_tx_pending_ = false;
+      power_off_pending_ = true;
+      bus_silent_ = false;
+    }
+    return;
+  }
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot send standby command: Bus is not available for TX");
     return;
@@ -1030,14 +1286,21 @@ void GenSAMHub::set_standby(bool standby) {
   if (standby) {
     this->send_standby();
     this->evaluate_system_mute_();
+    bus_silent_ = true;
+    registry_.publish_stale_telemetry();
+    race_state_ = RaceState::IDLE;
+    this->update_bus_status_();
   } else {
     // When waking from standby, monitors power on in an unaddressed state because their volatile
     // RACE addresses are reset during DSP reboot. Automatically initiate RACE rediscovery.
-    this->rediscover_monitors();
+    this->discover_monitors_();
   }
 }
 
 void GenSAMHub::identify_monitor_by_serial(const std::string &serial_or_id, uint32_t duration_ms) {
+  if (this->defer_user_command_([this, serial_or_id, duration_ms]() {
+        this->identify_monitor_by_serial(serial_or_id, duration_ms);
+      })) return;
   GenSAMMonitor *mon = registry_.find_by_serial_or_id(serial_or_id);
   if (mon == nullptr) {
     ESP_LOGW(TAG, "Cannot identify speaker '%s': monitor not currently discovered on bus", serial_or_id.c_str());
@@ -1047,6 +1310,14 @@ void GenSAMHub::identify_monitor_by_serial(const std::string &serial_or_id, uint
 }
 
 void GenSAMHub::identify_monitor_by_address(uint8_t address, uint32_t duration_ms) {
+  if (!executing_user_command_) {
+    const auto *mon = registry_.find(address);
+    if (mon == nullptr) { ESP_LOGW(TAG, "Unknown identify target"); return; }
+    const auto id = std::to_string(mon->unique_id);
+    if (this->defer_user_command_([this, id, duration_ms]() {
+          this->identify_monitor_by_serial(id, duration_ms);
+        })) return;
+  }
   GenSAMMonitor *mon = registry_.find(address);
   if (mon == nullptr) {
     ESP_LOGW(TAG, "Cannot identify monitor 0x%02X: not in registry", address);
@@ -1064,6 +1335,10 @@ void GenSAMHub::identify_monitor_by_address(uint8_t address, uint32_t duration_m
 }
 
 void GenSAMHub::check_identify_timeouts_() {
+  if (!can_transmit() || resuming_ || current_query_addr_ != 0 || apply_.active ||
+      (race_state_ != RaceState::POLLING_MONITORS && race_state_ != RaceState::IDLE)) {
+    return;
+  }
   uint32_t now = millis();
   for (auto &kv : registry_.monitors()) {
     GenSAMMonitor &mon = kv.second;
@@ -1109,6 +1384,7 @@ void GenSAMHub::log_stats_() {
 void GenSAMHub::loop() {
   this->process_rx_();
   this->check_glm_cooldown_();
+  this->service_control_window_(millis());
   // After RX, so a reply that has just landed has cleared current_query_addr_; before the state
   // machine, so the frame is on the wire before it picks its next step.
   this->service_pending_writes_(millis());

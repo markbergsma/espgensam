@@ -114,8 +114,12 @@ struct GenSAMMonitorBinding {
   switch_::Switch *calibration_bypass_switch{nullptr}; ///< Per-monitor calibration bypass switch entity.
 
   /// True while this monitor's group calibration is bypassed on its own, whatever the hub-wide
-  /// switch says; see switch.h section 3. Never restored: every boot starts calibrated.
+  /// switch says; see switch.h section 5. Never restored: every boot starts calibrated.
   bool calibration_bypass{false};
+
+  /// True for a fixed Home Assistant entity slot assigned to a monitor during discovery.
+  bool discovery_slot{false};
+  text_sensor::TextSensor *sam_name_sensor{nullptr}; ///< Runtime SAM setup name matched by hardware ID.
 };
 
 /// @brief Represents a single Genelec SAM monitor or subwoofer discovered on the RS-485 bus.
@@ -132,7 +136,9 @@ struct GenSAMMonitor {
   int8_t input_db{0};               ///< Input signal level in dBFS.
   int8_t output_db{0};              ///< Driver output level in dBFS.
   bool mute{false};                 ///< Channel mute state (CMD_BYPASS bit 0).
-  bool standby{true};               ///< Amplifier standby state; only meaningful when standby_known is true.
+  bool system_leds_enabled{true};    ///< Front LED state, when system_leds_known is true.
+  bool system_leds_known{false};     ///< True once a live or stored LED setting was observed.
+  bool standby{true};                ///< Amplifier standby state; only meaningful when standby_known is true.
   bool standby_known{false};        ///< True once the monitor has actually reported its power state.
   bool online{false};               ///< Whether the monitor is currently responsive to bus traffic.
   uint32_t last_seen_ms{0};         ///< Timestamp (millis) of last valid frame received from this monitor.
@@ -191,4 +197,3 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor);
 
 }  // namespace gensam
 }  // namespace esphome
-

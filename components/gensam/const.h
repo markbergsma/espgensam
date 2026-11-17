@@ -45,13 +45,14 @@ static constexpr uint8_t CMD_QUERY_STATUS = 0x08;     ///< GLMv5 monitor telemet
 static constexpr uint8_t CMD_REPORT_STATUS = 0x09;    ///< GLMv5 monitor telemetry report
 static constexpr uint8_t CMD_VOLUME = 0x1F;           ///< Volume control (24-bit)
 static constexpr uint8_t CMD_BAR_CODE = 0x19;         ///< Serial number / barcode query
+static constexpr uint8_t CMD_FLASH_COMMIT = 0x15;     ///< Commit monitor settings to flash
 static constexpr uint8_t CMD_HARDWARE_QUERY = 0x22;   ///< Hardware ID query
 static constexpr uint8_t CMD_BYPASS = 0x2B;           ///< Bypass / Mute / LED control
 static constexpr uint8_t CMD_SESSION_PREAMBLE = 0x2D; ///< GLM app connect only; see the block below
 static constexpr uint8_t CMD_DSP = 0x10;              ///< DSP parameter update (PEQ, delay, level)
 static constexpr uint8_t CMD_PREPARE_CONFIG = 0x17;   ///< Prepare for a block of DSP settings
 static constexpr uint8_t CMD_SOFTWARE_QUERY = 0x39;   ///< Firmware version query
-static constexpr uint8_t CMD_WAKEUP = 0x3A;           ///< Wakeup / standby control (0x3A)
+static constexpr uint8_t CMD_WAKEUP = 0x3A;           ///< ISS settings and wakeup / standby control
 static constexpr uint8_t CMD_BASS_MANAGE_XO = 0x3B;   ///< Bass management: crossover in Hz, or CROSSOVER_FULL_BAND
 static constexpr uint8_t CMD_UNKNOWN_3C = 0x3C;       ///< Subwoofer only, always 00 00; see below
 static constexpr uint8_t CMD_INPUT_SYNC = 0x3D;       ///< Input-select sync; see the block below
@@ -296,10 +297,15 @@ static constexpr uint8_t BYPASS_MUTE_MASK = 0x01;          ///< Bit 0: Mute (1 =
 static constexpr uint8_t BYPASS_LED_COLOR_MASK = 0x06;     ///< Bits 1-2: LED Color ((color << 1) & 0x06)
 static constexpr uint8_t BYPASS_LED_PULSING_MASK = 0x08;   ///< Bit 3: LED Pulsing / Blink (1 = pulsing)
 static constexpr uint8_t BYPASS_INVERT_LED_MASK = 0x10;    ///< Bit 4: Invert LED enable
+static constexpr uint8_t BYPASS_LED_ENABLED_VALUE = 0x04;  ///< Observed 0x2B live setting: LED enabled
+static constexpr uint8_t BYPASS_LED_DISABLED_VALUE = 0x08; ///< Observed 0x2B live setting: LED disabled
 
 // --- CMD_WAKEUP (0x3A) control parameters ---------------------------------
 static constexpr uint8_t WAKEUP_OP_POWER = 0x03;           ///< Power sub-command byte
-static constexpr uint8_t WAKEUP_VAL_ON_1 = 0x7F;           ///< Power ON / Wakeup phase 1
+static constexpr uint8_t WAKEUP_OP_ISS_LED = 0x06;    ///< ISS monitor LED enable sub-command
+static constexpr uint8_t ISS_LED_ENABLED = 0x00;      ///< 0x3A 06 value: LEDs on
+static constexpr uint8_t ISS_LED_DISABLED = 0x01;     ///< 0x3A 06 value: LEDs off
+static constexpr uint8_t WAKEUP_VAL_ON_1 = 0x7F;      ///< Power ON / Wakeup phase 1
 static constexpr uint8_t WAKEUP_VAL_ON_2 = 0x01;           ///< Power ON / Wakeup phase 2
 static constexpr uint8_t WAKEUP_VAL_STANDBY_1 = 0x02;      ///< Standby / Sleep phase 1 (prepare)
 static constexpr uint8_t WAKEUP_VAL_STANDBY_2 = 0x00;      ///< Standby / Sleep phase 2 (power off / sleep)

@@ -143,12 +143,22 @@ void GenSAMHub::start_race_discovery() {
 }
 
 void GenSAMHub::rediscover_monitors() {
+  if (!executing_user_command_ &&
+      this->defer_user_command_([this]() { this->discover_monitors_(); })) return;
+  this->discover_monitors_();
+}
+
+void GenSAMHub::discover_monitors_() {
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot start RACE discovery: Hub is not in transmitting state");
     return;
   }
 
   initial_discovery_done_ = true;
+  resuming_ = false;
+  controls_only_session_ = false;
+  recovery_required_ = false;
+  bus_silent_ = false;
 
   ESP_LOGI(TAG, "Resetting monitor table and initiating RACE discovery...");
 
@@ -243,6 +253,23 @@ void GenSAMHub::broadcast_volume_and_keepalive_() {
 // --- Incoming replies to what the state machine sent --------------------------------
 
 bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
+  if (resuming_) {
+    if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS ||
+        (frame.command != CMD_REPORT_STATUS && frame.command != CMD_QUERY_STATUS)) return false;
+    auto *mon = registry_.find(current_query_addr_);
+    if (mon == nullptr) return false;
+    mon->standby_known = false;
+    parse_telemetry(frame.payload.data(), frame.payload.size(), *mon);
+    if (!mon->standby_known) return true;  // Keep waiting for actual power telemetry.
+    this->mark_monitor_seen_(*mon);
+    registry_.publish_telemetry(*mon);
+    current_query_addr_ = 0;
+    if (mon->standby) {
+      resuming_ = false;
+      this->discover_monitors_();
+    }
+    return true;
+  }
   switch (race_state_) {
     case RaceState::RACE_PING_SENT: {
       // Expecting winning unassigned monitor response with 3-byte serial
@@ -346,6 +373,8 @@ bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
 // --- State machine ------------------------------------------------------------------
 
 void GenSAMHub::update_race_state_machine_() {
+  if (resuming_ || controls_only_session_) return;
+  if (power_off_pending_ && !apply_.active && current_query_addr_ == 0) return;
   if (!can_transmit()) {
     return;
   }
@@ -359,7 +388,7 @@ void GenSAMHub::update_race_state_machine_() {
 
   // Trigger initial wakeup + discovery cycle
   if (!initial_discovery_done_) {
-    this->rediscover_monitors();
+    this->discover_monitors_();
     return;
   }
 
@@ -418,6 +447,7 @@ void GenSAMHub::race_step_ping_(uint32_t now) {
   }
 
   ESP_LOGI(TAG, "RACE discovery complete. Total monitors found: %u", (unsigned)registry_.size());
+  registry_.assign_discovery_slots();
 
   // Transition all monitors from discovery to online mode
   this->send_frame(make_stay_online());
@@ -533,7 +563,7 @@ bool GenSAMHub::configure_monitor_(const GenSAMMonitor &mon) {
   //
   // Redundant whenever groups are configured, since the group re-apply that follows discovery
   // pushes the same two values a moment later. It is kept because it is the *only* source of
-  // level and delay for a system that has no groups: block at all, or has default_group: none.
+  // level and delay for a system with no group selected.
   // Both frames go bare, without a preceding 0x17; see the note in hub.cpp.
   if (mon.binding != nullptr && mon.binding->level_configured) {
     if (configured_anything) {
@@ -592,7 +622,8 @@ void GenSAMHub::race_step_configuring_(uint32_t now) {
   // back to the default covers the first discovery after boot, so the speakers are never
   // left in a state nothing here chose; see set_default_group().
   if (pending_group_ < 0) {
-    pending_group_ = (active_group_ >= 0) ? active_group_ : default_group_;
+    pending_group_ = (selected_group_ >= 0) ? selected_group_ :
+                     ((active_group_ >= 0) ? active_group_ : default_group_);
   }
   if (pending_group_ >= 0 && this->start_group_apply_(now)) {
     return;
@@ -685,9 +716,6 @@ void GenSAMHub::finish_group_apply_() {
 
   if (reached_anyone) {
     active_group_ = attempted;
-    // Every reachable speaker has just been re-sent this group's routing, crossover and DSP
-    // block, so whatever deviation a hand override or a GLM frame introduced is gone.
-    this->set_group_modified(false);
   } else {
     const GroupPreset *wanted = this->get_group(attempted);
     ESP_LOGW(TAG, "Group preset '%s' reached no monitors; leaving it unapplied",
@@ -696,7 +724,7 @@ void GenSAMHub::finish_group_apply_() {
 
   const GroupPreset *group =
       (active_group_ >= 0) ? this->get_group(static_cast<uint8_t>(active_group_)) : nullptr;
-  if (group != nullptr && group_select_ != nullptr) {
+  if (group != nullptr && group_select_ != nullptr && group_select_->has_option(group->name)) {
     group_select_->publish_state(group->name);
   }
 
@@ -789,7 +817,8 @@ bool GenSAMHub::send_group_step_(const GenSAMMonitor &mon, const GroupDevice &de
   // than an unnecessary frame.
   const PeqBand &spec = (band < dev.band_count && !bypassed) ? dev.bands[band] : PeqBand{};
   const BiquadCoeffs coeffs =
-      design_biquad(spec.type, spec.frequency_hz, spec.gain_db, spec.q, peq_design_rate_for(mon));
+      design_biquad(spec.type, spec.frequency_hz, spec.gain_db, spec.q,
+                    dev.peq_design_rate_hz != 0 ? dev.peq_design_rate_hz : peq_design_rate_for(mon));
   this->send_frame(make_peq_band(addr, band, coeffs));
   return true;
 }
@@ -852,9 +881,7 @@ void GenSAMHub::race_step_applying_group_(uint32_t now) {
 
     // Device finished. Mirror what was pushed onto the binding so the per-monitor entities
     // show the active group's values, and so a later rediscovery re-sends the same thing.
-    // Through the registry rather than the hub setters: those transmit and raise
-    // group_modified, which finish_group_apply_() is about to clear. A bypassed monitor
-    // mirrors the defaults it was actually sent, not the calibration it was spared.
+    // A bypassed monitor mirrors the defaults it was actually sent, not the calibration it was spared.
     if (mon->binding != nullptr && dev.enabled) {
       const bool bypassed = this->is_calibration_bypassed_(*mon);
       registry_.set_binding_crossover(*mon->binding, dev.crossover_hz);
@@ -935,7 +962,7 @@ void GenSAMHub::race_step_idle_(uint32_t now) {
   if (!registry_.any_online() &&
       now - last_discovery_retry_time_ >= DISCOVERY_RETRY_INTERVAL_MS) {
     last_discovery_retry_time_ = now;
-    this->rediscover_monitors();
+    this->discover_monitors_();
   }
 }
 

@@ -25,14 +25,7 @@
 ///      Byte 2: sint24 & 0xFF
 ///    For example, -30.0 dB produces sint24 = 265,271 -> bytes [0x04, 0x0C, 0x37].
 ///
-/// 3. Home Assistant 0.0 - 1.0 Slider Mapping:
-///    Home Assistant's MediaPlayer component represents volume as a linear float from 0.0
-///    to 1.0. To provide an intuitive, natural perceptual response without abrupt jumps at
-///    low levels, volume is mapped across configurable logarithmic bounds
-///    [min_volume_db, max_volume_db] (e.g. -80.0 dB to 0.0 dB):
-///      dB = min_volume_db + slider * (max_volume_db - min_volume_db)
-///
-/// 4. Per-Device Level Trim and Time-of-Flight Delay:
+/// 3. Per-Device Level Trim and Time-of-Flight Delay:
 ///    Both are DSP parameters a group preset carries per speaker and that Home Assistant can
 ///    also set by hand, so the conversions live here rather than in the entity layer: the
 ///    registry needs them to publish, the hub needs them to clamp, and the number entities
@@ -83,34 +76,6 @@ inline uint32_t volume_db_to_int24(float db) {
   float ratio = std::pow(10.0f, db / 20.0f);
   double val = std::round(static_cast<double>(ratio) * static_cast<double>(GENELEC_VOLUME_MAX_INT24));
   return static_cast<uint32_t>(std::clamp(val, 0.0, static_cast<double>(GENELEC_VOLUME_MAX_INT24)));
-}
-
-/// @brief Convert a Home Assistant volume slider (0.0 to 1.0) to decibels.
-/// @param slider Home Assistant float value (0.0 to 1.0).
-/// @param min_db Minimum decibel boundary corresponding to slider = 0.0 (e.g. -80.0 dB).
-/// @param max_db Maximum decibel boundary corresponding to slider = 1.0 (e.g. 0.0 dB).
-/// @return Mapped decibel value.
-inline float volume_slider_to_db(float slider, float min_db = -80.0f, float max_db = 0.0f) {
-  float clamped = std::clamp(slider, 0.0f, 1.0f);
-  if (clamped <= 0.001f) {
-    return GENELEC_VOLUME_MIN_DB;
-  }
-  return min_db + clamped * (max_db - min_db);
-}
-
-/// @brief Convert decibels to a Home Assistant volume slider position (0.0 to 1.0).
-/// @param db Decibel value.
-/// @param min_db Minimum decibel boundary corresponding to slider = 0.0 (e.g. -80.0 dB).
-/// @param max_db Maximum decibel boundary corresponding to slider = 1.0 (e.g. 0.0 dB).
-/// @return Slider position float clamped to [0.0, 1.0].
-inline float volume_db_to_slider(float db, float min_db = -80.0f, float max_db = 0.0f) {
-  if (db <= min_db) {
-    return 0.0f;
-  }
-  if (db >= max_db) {
-    return 1.0f;
-  }
-  return (db - min_db) / (max_db - min_db);
 }
 
 /// @brief Clamp a per-device level trim to the range the hardware may safely be given.

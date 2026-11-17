@@ -26,6 +26,14 @@ Frame make_wakeup_step(uint8_t op, uint8_t val) {
   return Frame(BROADCAST_ADDRESS, CMD_WAKEUP, {op, val});
 }
 
+Frame make_iss_led_state(uint8_t addr, bool enabled) {
+  return Frame(addr, CMD_WAKEUP, {WAKEUP_OP_ISS_LED, enabled ? ISS_LED_ENABLED : ISS_LED_DISABLED});
+}
+
+Frame make_flash_commit(uint8_t addr) {
+  return Frame(addr, CMD_FLASH_COMMIT, {0x33, 0x00});
+}
+
 Frame make_broadcast_volume_db(float db) {
   uint8_t pld[3];
   encode_int24(volume_db_to_int24(db), pld);
@@ -53,6 +61,11 @@ Frame make_bypass(uint8_t addr, bool mute, bool pulsing) {
     val = mute ? (BYPASS_MUTE_MASK | (LED_RED << 1)) : (LED_OFF << 1);
   }
   return Frame(addr, CMD_BYPASS, {val});
+}
+
+Frame make_bypass_led_state(uint8_t addr, bool mute, bool enabled) {
+  const uint8_t led_value = enabled ? BYPASS_LED_ENABLED_VALUE : BYPASS_LED_DISABLED_VALUE;
+  return Frame(addr, CMD_BYPASS, {static_cast<uint8_t>(led_value | (mute ? BYPASS_MUTE_MASK : 0x00))});
 }
 
 Frame make_crossover(uint8_t addr, uint16_t freq_hz) {

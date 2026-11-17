@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Make a Raspberry Pi the HDMI CEC Audio System and forward volume and mute to Home Assistant.
+"""Make a Raspberry Pi the HDMI CEC Audio System and forward controls to Home Assistant.
 
 The Pi claims CEC logical address 5 (Audio System) through the Linux kernel CEC API, so the TV
 or projector hands volume control over to it and playback devices such as an Apple TV send it
-their volume keys. Volume Up/Down, Mute and absolute volume (CEC 2.0) are forwarded to a
-Home Assistant media_player over the WebSocket API. See audio_system.py for the protocol
-details.
+their volume keys. Volume Up/Down, Mute and absolute volume (CEC 2.0) are forwarded to Home
+Assistant number and switch entities over the WebSocket API. See audio_system.py for the
+protocol details.
 
 USAGE
 
     HA_TOKEN=... python3 cec_audio_bridge.py \\
         --ha-url ws://homeassistant.local:8123/api/websocket \\
-        --entity media_player.genelec_sam_system -v
+        --volume-entity number.volume_db --mute-entity switch.mute \\
+        --power-entity switch.system_power -v
 
 The token is a Home Assistant long-lived access token. Pass it in the HA_TOKEN environment
 variable or with --token-file, never on the command line, where other users can see it.
@@ -49,7 +50,8 @@ class Bridge:
     def __init__(self, args, token):
         self.args = args
         self.adapter = CecAdapter(args.device)
-        self.player = HomeAssistant(args.ha_url, token, args.entity)
+        self.player = HomeAssistant(args.ha_url, token, args.volume_entity,
+                                    args.mute_entity, args.power_entity)
         self.tx_queue: asyncio.Queue = asyncio.Queue()
         self.audio = AudioSystem(self.send, self.player, args.step, args.follow_power,
                                  initiate_sam=not args.no_initiate_sam)
@@ -186,17 +188,21 @@ def main():
                     help="Home Assistant WebSocket API URL (default %(default)s)")
     ap.add_argument("--token-file", help="file holding a long-lived access token "
                                          "(default: the HA_TOKEN environment variable)")
-    ap.add_argument("--entity", default="media_player.genelec_sam_system",
-                    help="media_player entity to control (default %(default)s)")
+    ap.add_argument("--volume-entity", default="number.volume_db",
+                    help="Home Assistant system volume number entity (default %(default)s)")
+    ap.add_argument("--mute-entity", default="switch.mute",
+                    help="Home Assistant system mute switch entity (default %(default)s)")
+    ap.add_argument("--power-entity", default="switch.system_power",
+                    help="Home Assistant system power switch entity (default %(default)s)")
     ap.add_argument("--step", type=step_fraction, default=0.02,
-                    help="volume change per key press, as a fraction of the media player's "
-                         "range (default 0.02, i.e. 1 dB on espgensam's default 50 dB range)")
+                    help="volume change per key press, as a fraction of the configured dB "
+                         "range (default 0.02)")
     ap.add_argument("--osd-name", default="Genelec",
                     help="name shown by the TV, at most 14 characters (default %(default)s)")
     ap.add_argument("--cec-version", choices=sorted(CEC_VERSIONS), default="2.0",
                     help="CEC version to announce (default 2.0, which enables absolute volume)")
     ap.add_argument("--follow-power", action="store_true",
-                    help="turn the media player off on CEC Standby, and on when the TV asks "
+                    help="put the speakers in standby on CEC Standby, and wake them when the TV asks "
                          "for System Audio Mode")
     ap.add_argument("--no-initiate-sam", action="store_true",
                     help="do not announce System Audio Mode on startup; wait for the TV to "

@@ -24,8 +24,7 @@
 #     GLM chain is already terminated at its far end.
 #
 # No addressable RGB LED and no user button: the onboard LEDs are power and bus activity only, so
-# this package declares no `light:` and no `status_led:`. Bus state stays visible through the
-# Bus Status sensor declared in packages/gensam.yaml. GPIO1/GPIO2 are free on the 2.0 mm header.
+# this package declares no `light:` and no `status_led:`. GPIO1/GPIO2 are free on the 2.0 mm header.
 #
 # CAN (GPIO15 TX / GPIO16 RX) is unused by this project and deliberately left undeclared.
 

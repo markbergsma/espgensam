@@ -27,7 +27,7 @@ The codebase enforces a strict three-tier architecture to prevent coupling proto
    - **Zero UI / Entity Awareness**: The core protocol layer must NEVER import, instantiate, or reference Home Assistant entities, light states, color math, or physical UI components.
    - **State Exposure**: Exposes internal transitions exclusively via public getters and observer callbacks (`add_state_callback()`, `add_bus_status_callback()`).
 2. **Home Assistant Integration Layer (`<platform>.h`)**:
-   - Partitioned strictly by ESPHome entity type: [`text_sensor.h`](file:///Users/mark/git/espgensam/components/gensam/text_sensor.h), [`sensor.h`](file:///Users/mark/git/espgensam/components/gensam/sensor.h), [`switch.h`](file:///Users/mark/git/espgensam/components/gensam/switch.h), [`number.h`](file:///Users/mark/git/espgensam/components/gensam/number.h), [`select.h`](file:///Users/mark/git/espgensam/components/gensam/select.h), [`button.h`](file:///Users/mark/git/espgensam/components/gensam/button.h).
+   - Partitioned strictly by ESPHome entity type: [`sensor.h`](file:///Users/mark/git/espgensam/components/gensam/sensor.h), [`switch.h`](file:///Users/mark/git/espgensam/components/gensam/switch.h), [`number.h`](file:///Users/mark/git/espgensam/components/gensam/number.h), [`select.h`](file:///Users/mark/git/espgensam/components/gensam/select.h), [`button.h`](file:///Users/mark/git/espgensam/components/gensam/button.h).
    - **Single Responsibility**: Each entity class bridges between Home Assistant and the hub (subscribing to hub callbacks or dispatching HA actions).
    - **No Peripheral Control**: Entities do not drive physical LEDs, buzzers, or output pins directly.
 
@@ -58,14 +58,17 @@ Hardware variation is confined to two places. Do not add a third.
 packages/board_*.yaml                  seam 1: the board — pins and peripherals
 components/gensam/rs485.h              seam 2: Rs485Profile — transceiver behaviour
 packages/gensam.yaml                   ── board-independent: monitors, entities, tunables
-espgensam.yaml                         ── device identity, network, substitutions;
-                                          one `board:` line selects the hardware
+espgensam.yaml                         ── tracked ESPHome device configuration: identity,
+                                          network, logger, and the board package include
+espgensam-local.yaml.example           ── template for the board selection and tunables
+espgensam-local.yaml                   ── ignored local copy, included as the substitutions
+secrets.yaml.example                   ── sanitized credential template
+secrets.yaml                           ── ignored local credentials and keys
 ```
 
 - **A board package declares peripherals and pins only.** No monitors, no volume bounds, no group presets, no Home Assistant entity that does not name a pin on that board. Adding a board must not require editing `packages/gensam.yaml`.
 - **`packages/gensam.yaml` must never name a GPIO.**
-- **Entity vs. binding**: the `rediscover_button:` *entity* is board-independent and lives in the shared package; the physical GPIO `binary_sensor` that triggers it belongs to the board. Same split for `bus_status:` (shared) and `status_led:` (board — it names a board-specific light id).
-- **`bus_status:` is declared explicitly** in the shared package rather than left to the `status_led` validator to create, because a board with no RGB LED has no `status_led`, and `espgensam_dial` depends on that sensor existing.
+- **Entity vs. binding**: the `rediscover_button:` *entity* is board-independent and lives in the shared package; the physical GPIO `binary_sensor` that triggers it belongs to the board. `status_led:` is board-specific because it names a board-specific light id.
 - **Everything the protocol core needs to know about a board's front end is a value in `Rs485Profile`.** If a new board needs behaviour that is not expressible there, add a field — not a conditional, a subclass, or a board enum.
 
 ---
@@ -80,7 +83,14 @@ espgensam.yaml                         ── device identity, network, substitu
   ```bash
   esphome compile espgensam.yaml
   ```
-  There is one device config; the board is selected by the `board:` line in its `packages:` block. **Every supported board must build**, so swap that line to each `packages/board_*.yaml` in turn and repeat. Ensure builds complete with zero compiler errors or unhandled warnings. Schema changes also need `esphome config espgensam.yaml` per board, since the hub schema's pin validators need `CORE.target_platform` and cannot be exercised standalone.
+  `espgensam.yaml` is the tracked device config; `secrets.yaml` and `espgensam-local.yaml` hold
+  the ignored local credentials and the board selection and tunables. Copy `secrets.yaml.example` to
+  `secrets.yaml` and `espgensam-local.yaml.example` to `espgensam-local.yaml` before validating.
+  The board is selected by the `board` substitution. **Every supported
+  board must build**, so pass `-s board <name>` (before the `compile` command) for each `packages/board_*.yaml` name in turn and repeat. Ensure
+  builds complete with zero compiler errors or unhandled warnings. Schema changes also need
+  `esphome config espgensam.yaml` per board, since the hub schema's pin validators need
+  `CORE.target_platform` and cannot be exercised standalone.
 - **Host Unit Tests**:
   Protocol parsers that are pure functions over a byte buffer are tested on the host, against
   verbatim payloads from `captures/`. No framework and no build system — compile the test
@@ -92,4 +102,3 @@ espgensam.yaml                         ── device identity, network, substitu
   A new test must be shown to fail against the unfixed code before it is trusted.
 - **Credential Safety**:
   Never commit private network credentials or keys. Always keep sensitive parameters in `secrets.yaml` (which is excluded by `.gitignore`) and provide sanitized templates in `secrets.yaml.example`.
-

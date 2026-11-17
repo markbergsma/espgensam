@@ -1,35 +1,16 @@
-# espgensam — device identity, network and tunables.
-#
-# Hardware lives in packages/board_*.yaml, everything board-independent in packages/gensam.yaml.
-# To target a different controller, change the one `board:` line below; nothing else moves.
-# See README.md for the supported boards and their wiring.
+# espgensam — device identity and network.
+# The board, device name and tunables come from the ignored espgensam-local.yaml: copy
+# espgensam-local.yaml.example to it and edit the values.
+# Copy secrets.yaml.example to secrets.yaml for Wi-Fi credentials and the ESPHome API key.
 
-substitutions:
-  name: "espgensam"
-  friendly_name: "Genelec SAM Controller"
-
-  listen_only: "false"
-  min_volume_db: "-80.0"
-  max_volume_db: "-30.0"
-  startup_volume_db: "-50.0"
+substitutions: !include espgensam-local.yaml
 
 esphome:
   name: "${name}"
   friendly_name: "${friendly_name}"
-  devices:
-    - id: dev_subwoofer
-      name: "Subwoofer"
-    - id: dev_left_monitor
-      name: "Left Monitor"
-    - id: dev_right_monitor
-      name: "Right Monitor"
 
 packages:
-  # --- Board selection: exactly one of these ---
-  board: !include packages/board_m5stack_atoms3_rs485_base.yaml
-  # board: !include packages/board_waveshare_esp32s3_rs485_can.yaml
-  # board: !include packages/board_m5stack_atoms3_rs485_iso.yaml
-
+  board: !include packages/board_${board}.yaml
   gensam: !include packages/gensam.yaml
 
 wifi:
@@ -41,11 +22,16 @@ wifi:
 
 captive_portal:
 
-# DEBUG is required for the 15 s `Stats:` line that transceiver comparisons are read from.
+web_server:
+  port: 80
+  version: 3
+  local: true
+
 logger:
-  level: DEBUG
+  level: "${log_level}"
 
 api:
+  reboot_timeout: 0s # Standalone operation without automatic reboot
   encryption:
     key: !secret api_key
 

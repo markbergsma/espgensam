@@ -1,0 +1,14 @@
+# Copy to espgensam-local.yaml (ignored by Git) and edit. espgensam.yaml includes that file as
+# its substitutions, so keep every line.
+board: "waveshare_esp32s3_rs485_can"  # or m5stack_atoms3_rs485_base, m5stack_atoms3_rs485_iso
+name: "espgensam"
+friendly_name: "Genelec SAM Controller"
+listen_only: "false"
+min_volume_db: "-80.0"
+max_volume_db: "-30.0"
+startup_volume_db: "-50.0"
+# Silence all bus traffic after user activity; 0s keeps control online indefinitely.
+control_window: "60s"
+# Individual speaker entity slots (0-32). Set to 0 for system/group controls only.
+discovery_slots: "2"
+log_level: "INFO"

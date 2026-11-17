@@ -2,8 +2,8 @@
 
 This tool turns a Raspberry Pi connected to your TV or projector over HDMI into the **HDMI CEC
 Audio System**. The TV, or a playback device such as an Apple TV, then sends its volume and
-mute keys to the Pi. The Pi forwards them to a Home Assistant `media_player`. With espgensam
-that means the TV remote controls the Genelec monitors.
+mute keys to the Pi. The Pi forwards them to Home Assistant number and switch entities. With
+espgensam that means the TV remote controls the Genelec monitors.
 
 It uses the Linux kernel's CEC interface directly; libcec is not needed.
 
@@ -11,8 +11,7 @@ It uses the Linux kernel's CEC interface directly; libcec is not needed.
 
 - It claims CEC logical address 5 (Audio System) and turns on *System Audio Mode*, so the TV
   mutes its own speakers and hands volume control to the Pi.
-- **Volume Up/Down** changes the media player's volume by a fixed step (1 dB by default on
-  espgensam). Holding the key keeps stepping.
+- **Volume Up/Down** changes the system volume by a fixed step. Holding the key keeps stepping.
 - **Mute** toggles mute.
 - **Absolute volume** (CEC 2.0 *Set Audio Volume Level*) sets the volume directly.
 - The TV's volume display is kept in sync, including changes made from Home Assistant, the dial
@@ -29,8 +28,8 @@ The Pi never switches the TV's input.
   USB-C power connector (HDMI0, `/dev/cec0`).
 - HDMI CEC enabled on the TV and on the playback devices.
 - No other Audio System, such as a soundbar or AV receiver, on the same HDMI bus.
-- Home Assistant with the media player you want to control, for example espgensam's
-  `media_player.genelec_sam_system`.
+- Home Assistant with system volume, mute, and power entities, for example espgensam's
+  `number.volume_db`, `switch.mute`, and `switch.system_power`.
 
 ## Installation
 
@@ -62,7 +61,8 @@ The Pi never switches the TV's input.
    HA_TOKEN="$(sudo cat /etc/cec-audio-bridge/token)" \
        python3 /opt/cec_audio_bridge/cec_audio_bridge.py \
        --ha-url ws://homeassistant.local:8123/api/websocket \
-       --entity media_player.genelec_sam_system -v
+       --volume-entity number.volume_db --mute-entity switch.mute \
+       --power-entity switch.system_power -v
    ```
 
    Press volume up on the TV remote. You should see `User Control Pressed` in the log and
@@ -95,8 +95,10 @@ The Pi never switches the TV's input.
 | `--device` | `/dev/cec0` | CEC device |
 | `--ha-url` | `ws://homeassistant.local:8123/api/websocket` | Home Assistant WebSocket URL; use `wss://` for HTTPS |
 | `--token-file` | `HA_TOKEN` environment variable | File holding the access token |
-| `--entity` | `media_player.genelec_sam_system` | Media player to control |
-| `--step` | `0.02` | Volume change per key press, as a fraction of the slider. On espgensam's default -80…-30 dB range, 0.02 is 1 dB |
+| `--volume-entity` | `number.volume_db` | System volume number entity |
+| `--mute-entity` | `switch.mute` | System mute switch entity |
+| `--power-entity` | `switch.system_power` | System power switch entity |
+| `--step` | `0.02` | Volume change per key press, as a fraction of the number's configured dB range (1 dB on espgensam's example -80…-30 dB range) |
 | `--osd-name` | `Genelec` | Name the TV shows for the device |
 | `--cec-version` | `2.0` | `1.4` for older TVs that misbehave with 2.0; this disables absolute volume |
 | `--follow-power` | off | Speakers follow TV standby |

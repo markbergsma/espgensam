@@ -65,9 +65,9 @@ against cable capacitance (~500 pF on a short run):
 
 Unterminated, τ exceeds a bit time (3.47 µs) and is comparable to the reply delay, so the
 monitor's start bit arrives before a valid mark has been established and its falling edge is not a
-real edge. The decoder locks one bit late and the address decodes as `0xC0` — exactly the "too
-shallow, not too narrow" mechanism described in `docs/crc-error-investigation.md` (branch
-`crc-investigation`), and the reason the fault is a *turnaround* property.
+real edge. The decoder locks one bit late and the address decodes as `0xC0`. This is a lost-start-
+edge fault caused by the bus not settling before the monitor replies, so the fault is a
+*turnaround* property.
 
 ### The two boards fail differently when unterminated
 
@@ -124,8 +124,8 @@ Whether the far end of the speaker chain terminates internally has not been esta
 
 Does releasing the direction line from the RMT TX-done ISR measurably beat releasing it from task
 context after `rmt_tx_wait_all_done()` plus 5 µs, as the pre-refactor code did? On this board
-`/RE` is tied to `DE`, so a late release is a receive blackout landing on the reply's start bit,
-and `docs/crc-error-investigation.md` predicted the task-context path would lose replies.
+`/RE` is tied to `DE`, so a late release creates a receive blackout at the reply's start bit; the
+task-context path was expected to lose replies.
 
 Software-only A/B, termination and everything else pinned:
 
@@ -345,7 +345,7 @@ attached), so they are comparable with each other and with nothing else in this 
 
 ```bash
 python3 tools/capture_run.py --label "<what is different about this run>" \
-    --yaml espgensam-waveshare-local.yaml --device espgensam-waveshare.local
+    --yaml espgensam.yaml --device espgensam.local
 ```
 
 Raw logs are written to `captures/` (gitignored) with the run label in the filename.

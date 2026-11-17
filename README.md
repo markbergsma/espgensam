@@ -23,19 +23,92 @@ You may also want to take a look at [HLM, the Homebrew Loudspeaker Manager](http
 
 ## Supported Hardware
 
-Selecting a board is a one-line change to its `packages:` block in `espgensam.yaml`:
+`espgensam.yaml` is the device configuration. Copy `secrets.yaml.example` to the ignored
+`secrets.yaml` for private credentials, and `espgensam-local.yaml.example` to the ignored
+`espgensam-local.yaml` for your own settings. `espgensam.yaml` includes the local file as its
+`substitutions:`, so keep every key from the example and edit the values:
 
 ```yaml
-packages:
-  # --- Board selection: exactly one of these ---
-  board: !include packages/board_waveshare_esp32s3_rs485_can.yaml
-  # board: !include packages/board_m5stack_atoms3_rs485_base.yaml
-  # board: !include packages/board_m5stack_atoms3_rs485_iso.yaml
-
-  gensam: !include packages/gensam.yaml
+board: "waveshare_esp32s3_rs485_can"
+name: "espgensam"
+friendly_name: "Genelec SAM Controller"
+listen_only: "false"
+min_volume_db: "-80.0"
+max_volume_db: "-30.0"
+startup_volume_db: "-50.0"
+control_window: "60s"
+discovery_slots: "2"
+log_level: "INFO"
 ```
 
-Everything else — monitors, entities, tunables — lives in `packages/gensam.yaml` and is shared.
+`espgensam-local.yaml` controls the board, controller name, volume limits, speaker entity count, and log
+level. `secrets.yaml` and `espgensam-local.yaml` are ignored by Git; do not commit them. `secrets.yaml` holds the Wi-Fi/AP
+credentials and ESPHome API encryption key. The example API key is public; replace it before
+connecting to Home Assistant. The included board and shared GenSAM packages stay reusable project
+files. Choose a board with `board` (see [Selecting a board](#selecting-a-board)). Set
+`discovery_slots` in `espgensam-local.yaml` to your speaker count (0–32). The example starts
+at 2 slots; the shared package defaults to 16 only when this substitution is omitted. Rebuild
+and flash after changing it. These fixed
+speaker entity slots are assigned in stable hardware-ID order as monitors are discovered.
+Use `0` for system/group controls without individual speaker entities. This setting limits only
+individual entities, not bus discovery.
+Additional monitors still receive uploaded group settings but do not get individual Home Assistant
+controls.
+
+Each discovery slot automatically gets its own Home Assistant device named `Monitor 1`,
+`Monitor 2`, and so on. No `esphome: devices:` declarations or `device_id` settings are
+needed. On the device web page (web server version 3) each monitor gets its own card, named
+after the monitor, holding all of its entities: mute, input, bypass, crossover, level and delay
+first, then online status, input level, output level, temperature, model, serial number,
+firmware version, hardware ID, identify and SAM name. Cards follow the System Controls and
+Group Preset sections in slot order. Entities on a sub-device use short names such as
+`Temperature`; ESPHome displays the device name alongside them. Switching an existing slot to
+these names may create new Home Assistant entities, so check dashboards and automations.
+
+`discovery_slot_settings` overrides this per slot. A `device_id` maps a slot to an existing
+ESPHome device instead of its generated one. A `web_server:` block replaces the automatic card,
+for example to place a slot in a sorting group of your own:
+
+```yaml
+web_server:
+  sorting_groups:
+    - id: front_speakers
+      name: "Front Speakers"
+
+gensam:
+  discovery_slot_settings:
+    - slot: 1
+      web_server:
+        sorting_group_id: front_speakers
+```
+
+Add these entries to the existing `web_server:` and `gensam:` sections, rather than creating
+duplicate sections. The slot number must not exceed `discovery_slots`. The optional
+`sorting_weight` in a slot's `web_server:` block sets the online status weight (default 50);
+items are spaced by 10, with the controls before it.
+The numbered slots are not permanent
+speaker identities: assignments are retained during rediscovery but may differ after restart
+or changes in the discovered monitors. Existing Home Assistant entity organization may change.
+
+### Selecting a board
+
+`espgensam.yaml` includes `packages/board_${board}.yaml`, where `board` is a substitution.
+Set it in `espgensam-local.yaml`, or override it for a
+single run with `-s`:
+
+| `board` | Hardware |
+| --- | --- |
+| `waveshare_esp32s3_rs485_can` | Waveshare ESP32-S3-RS485-CAN |
+| `m5stack_atoms3_rs485_base` | M5Stack AtomS3 Lite + Atomic RS485 Base |
+| `m5stack_atoms3_rs485_iso` | M5Stack AtomS3 Lite + Isolated RS485 Unit |
+
+```bash
+esphome -s board m5stack_atoms3_rs485_iso run espgensam.yaml
+```
+
+A board package declares pins and peripherals only. To add a board, create
+`packages/board_<name>.yaml`; it is then selectable as `board: "<name>"`. An unknown name
+fails with `Error including file 'packages/board_<name>.yaml'`.
 
 ### Recommended boards:
 
@@ -45,7 +118,7 @@ Everything else — monitors, entities, tunables — lives in `packages/gensam.y
 - **RS485 RX**: `GPIO18`
 - **Direction Control**: Explicit, `GPIO21` (SP3485EN; `/RE` is tied to `DE`, so the receiver is disabled while transmitting)
 - **Isolation**: Galvanically isolated RS-485, with an onboard 120 Ω termination and 4.7 kΩ fail-safe bias
-- **Status RGB LED**: none — the onboard LEDs are power and bus-activity indicators. Bus state is reported through the **Bus Status** sensor in Home Assistant.
+- **Status RGB LED**: none — the onboard LEDs are power and bus-activity indicators.
 - **Rediscover button**: none — use the **Rediscover Monitors** button entity.
 
 **Make sure the bus has exactly one terminator at the controller end.**  In practice: the board ships with its 120 Ω enabled through a jumper, and a GLM adapter carries one too — a passive resistor, so it terminates whether or not the adapter is powered. **Adapter attached → pull the Waveshare jumper. Waveshare alone → leave it in.**
@@ -98,23 +171,7 @@ The `GND` row is board-dependent. **The Waveshare's RS-485 terminal block has on
 
 ## Configuration Reference
 
-### 1. Declare Sub-Devices (`esphome: devices:`)
-In `espgensam.yaml`, list the discrete monitor devices you want Home Assistant to create:
-
-```yaml
-esphome:
-  name: "espgensam"
-  friendly_name: "Genelec SAM Controller"
-  devices:
-    - id: dev_subwoofer
-      name: "Subwoofer"
-    - id: dev_left_monitor
-      name: "Left Monitor"
-    - id: dev_right_monitor
-      name: "Right Monitor"
-```
-
-### 2. Hub & Monitor Configuration (`gensam:`)
+### 1. Hub & Monitor Configuration (`gensam:`)
 
 The pin keys belong in a board package; everything else is board-independent and lives in `packages/gensam.yaml`. They are shown together here for reference.
 
@@ -150,44 +207,54 @@ gensam:
   volume_tx_interval: 50ms            # Fastest rate volume changes are sent to the monitors
   telemetry_averaging_period: 60s     # In-memory averaging window for signal levels
 
-  # Master volume mapping boundaries
-  min_volume_db: -80.0                # Volume at slider = 0.0
-  max_volume_db: 0.0                  # Volume at slider = 1.0
+  # System volume bounds
+  min_volume_db: -80.0
+  max_volume_db: 0.0
   startup_volume_db: -30.0            # Initial volume on boot
-
-  # Diagnostic hub entities
-  bus_status:
-    name: "Bus Status"
 
   rediscover_button:
     name: "Rediscover Monitors"
 
-  # Monitor bindings: associate physical speakers with Home Assistant devices
-  monitors:
-    - serial_number: "7350APM88123456"
-      unique_id: 1842915
-      name: "Subwoofer"
-      device_id: dev_subwoofer
-      # Optional. Fixes this speaker's routing at boot; omit it and the speaker keeps
-      # whatever its own flash holds until a group is applied or you pick an option in
-      # Home Assistant. One of: analog | aes3_a | aes3_b | aes3_sum
-      input: aes3_sum
-
-    - serial_number: "8330AP99234567"
-      unique_id: 1654321
-      name: "Left Monitor"
-      device_id: dev_left_monitor
-
-    - serial_number: "8330AP77345678"
-      unique_id: 1987654
-      name: "Right Monitor"
-      device_id: dev_right_monitor
-
-# Master group media player
-media_player:
-  - platform: gensam
-    name: "Genelec SAM System"
+  # Individual entity slots (0-32, default 16 in packages/gensam.yaml).
+  # Each slot shows a discovered monitor's model, serial number, and hardware ID.
+  # With the shared package, set discovery_slots in espgensam-local.yaml instead.
+  discovery_slots: 16
 ```
+
+The system is exposed to Home Assistant as controls rather than a media player: **Volume (dB)**,
+**Mute**, **System Power** (on means awake), and **Monitor LEDs**. The LED switch controls the
+live front-LED state independently of the stored GLM ISS LED preference and the mute switch's
+red/off status indication. The switch remains unknown until each discovered monitor's LED state
+is observed or commanded; if the monitors disagree, it reports off (not all LEDs are enabled).
+Group presets and calibration controls are available separately.
+
+In controller mode, boot wakes the monitors, restores the remembered volume and selected
+group, and then suspends **all** transmissions after the control window (`60s` by default).
+Set the `control_window` substitution to `0s` to keep polling indefinitely. On first boot,
+`startup_volume_db` is used; restored volume is clamped to the configured bounds.
+Choose safe bounds before deploying. Preferences are saved through ESPHome's wear-managed
+flash mechanism; an abrupt loss of power before its flush can lose recent changes.
+
+Accepted user controls reopen/reset the window. After silence, system volume and mute send
+only their control frames: no status probes, polling, wake/discovery or group reload, even
+when a cached address no longer answers. Delivery is not confirmed, and sleeping monitors
+may not respond. This avoids interrupting playing audio to recover an expired address.
+Other controls probe cached monitors first; standby or a missing response triggers wake,
+rediscovery and restoration of the selected group, which can interrupt audio. After a
+volume/mute-only window, explicitly use System Power on or select a group to force discovery
+and restore settings lost during sleep. Group/input changes may intentionally interrupt audio.
+
+`Bus Silent` means telemetry is stale and actual speaker power is unknown, not necessarily off.
+Measured telemetry and monitor online indicators become unknown while monitoring is paused;
+online status returns when a monitor is next observed. Native ISS/audio wake has no known bus notification.
+Silence permits native ISS but does not force it: input signals and AES/EBU clock may keep
+speakers awake. Explicit System Power off sends shutdown and then stays silent; subsequent
+controls other than system volume/mute can wake again. Listen-only mode never transmits, and
+external GLM control takes priority.
+
+ISS sleep and standby reset monitor settings to the defaults stored on each monitor, or to no
+stored settings if no defaults have been saved. Session-only settings are lost. An ISS audio
+wake may not be detected by the hub, so the selected group may not be reapplied automatically.
 
 Each monitor gets an **Input** select listing `Analog`, `AES3 Channel A (Left)`,
 `AES3 Channel B (Right)` and `AES3 Channel A+B (Sum)`. Routing is per speaker because that is
@@ -200,6 +267,11 @@ for no bass management, or 50-120 Hz), **Level** (-60 to 0 dB, attenuation only)
 disabled by default, because a group preset normally owns them and overwrites them at its next
 push — enable them in Home Assistant for a speaker you want to trim by hand.
 
+The standard device web page provides the controls and group selector. The last successfully
+applied group and its speaker settings and PEQ bands are available as JSON at `/group-view`. They
+describe the preset, not live readback: bypass, manual changes, offline speakers and a
+pending group push can make actual settings differ.
+
 ### 3. Group Presets (`gensam: groups:`)
 
 A group preset is a named monitoring configuration, just like the Group buttons in GLM: which
@@ -207,20 +279,19 @@ speakers take part, how each is fed, and the room calibration for each of them a
 position. Switching between groups from Home Assistant re-sends the whole DSP
 block to every speaker.
 
-Most setups should get their groups from their existing GLM calibration, with
-[`sam_file:`](#4-importing-an-existing-glm-setup) below. Written out by hand instead, a group
-carries twenty EQ bands per speaker, so they live in their own file:
+The **Group Preset** selector lists groups from the uploaded setup. To change the available
+groups, upload a new `.sam` file on the [upload page](http://espgensam.local/upload), validate,
+and save and restart. A new upload always selects its first group; subsequent selections are
+remembered across ESP restarts for that stored setup. This does not write speaker flash.
+
+Groups can also be compiled from `sam_file:` or written by hand for programmatic use, but the
+runtime selector does not list them and YAML no longer sets a startup default. Remove
+`default_group:` from existing configurations; select the desired group after upload instead.
 
 ```yaml
 gensam:
   groups: !include gensam_groups.yaml
 
-  # Applied once the speakers have been found, so they are never left in a state
-  # you did not choose. Defaults to the first group; use `none` to apply nothing.
-  default_group: "Main Listening Position"
-
-  group_select:
-    name: "Group Preset"
 ```
 
 ```yaml
@@ -240,8 +311,9 @@ gensam:
         - {type: high_shelf, frequency: 14999, gain: -0.0199986}
 ```
 
-`type` is `notch` (a peaking filter, as GLM labels it), `low_shelf`, `high_shelf` or `bypass`.
-Only `notch` takes a `q`. Set `enabled: false` on a device to mute it in that group rather
+`type` is `notch` (GLM's name for a peaking filter), `peaking` (an alias for `notch`),
+`low_shelf`, `high_shelf` or `bypass`. Both `notch` and `peaking` require `q`; the other
+types must not specify it. Set `enabled: false` on a device to mute it in that group rather
 than configure it.
 
 `lfe_channel` is for a subwoofer in a surround setup, where the discrete ".1" channel reaches
@@ -270,26 +342,24 @@ the calibration back. It stays in effect across group switches and standby.
 - Each speaker also has its own **Bypass Calibration** switch, disabled by default, for
   comparing one speaker at a time. A speaker is bypassed while either switch is on.
 - Both switches are off after every restart.
-- They only exist when groups are configured.
+- They exist when groups are configured or runtime upload is enabled. With no active group,
+  bypass takes effect when a group is next applied; it cannot restore unknown monitor settings.
 - Because the level trim is removed as well, bypassed speakers can play louder than
   calibrated ones.
 
+The system **Mute** switch controls all monitors. Each monitor's own **Mute** switch is a
+configuration entity. On the device web page it sits in that speaker's card with its input
+and calibration settings; the page places volume, mute, power,
+calibration bypass and rediscovery in **System Controls**, with group selection in its own section.
+
 ### 4. Importing an existing GLM setup (`gensam: sam_file:`)
 
-Point the hub at a GLM 5 `.sam` setup file and every group in it becomes a group preset, so an
-existing AutoCal calibration does not have to be retyped:
+Point the hub at a GLM 5 `.sam` setup file and its groups become presets, so an existing AutoCal
+calibration does not have to be retyped:
 
 ```yaml
 gensam:
-  monitors:
-    - unique_id: 1842915
-      # ...
-
   sam_file: "My Setup.sam"
-
-  default_group: "Main Listening Position"
-  group_select:
-    name: "Group Preset"
 ```
 
 The file is read while ESPHome validates the configuration, which happens on every
@@ -298,16 +368,27 @@ to regenerate and no converted file to keep in step. `esphome config` prints the
 full, which is how you see what was imported.
 
 Presets appear in the order the setup file lists them, before any you also wrote in `groups:`.
-That order is what the **Group Preset** select offers and what `default_group` falls back to,
-so a hand-written extra — a mute-all, a late-night trim — lands after the calibrated positions.
+The **Group Preset** selector lists only groups from the uploaded setup; YAML groups have no
+startup default.
 
-Only devices named in your `monitors:` block are configured. The rest are skipped with a
-warning: a GLM setup file can retain a speaker that is no longer connected, or one that was
-never really there. With no `monitors:` at all, every device in the file is taken as yours.
+With no static `monitors:` filter, every device in the file is imported, including speakers that
+are currently offline. If a filter is configured, `sam_file:` imports only the listed monitors.
+The local-development config instead uses the runtime uploader, which keeps group device IDs
+independent of the fixed Home Assistant slots and applies settings to matching speakers
+discovered on the bus.
 
 Anything the import cannot carry across is reported rather than dropped quietly. Pay attention
 to those warnings: they are the difference between the group sounding as GLM calibrated it,
 and sounding off.
+
+Alternatively, upload a `.sam` at runtime from `http://<device-ip>/upload` without rebuilding.
+Runtime upload does not use a static `monitors:` filter: it retains all valid devices, including
+those not configured or currently online, and applies settings to matching speakers as they are
+discovered. The first install after enabling uploads must be over USB to install the runtime
+storage partitions. Both import methods read UTF-8 setup files and fall back to Latin-1 for older
+files. Runtime uploads also publish each speaker's SAM `Name` as a
+per-monitor **SAM Name** diagnostic entity, matched by hardware ID; the numbered monitor entity
+slots remain stable even when speakers are renamed or discovered in a different order.
 
 #### Where the file lives
 
@@ -341,22 +422,69 @@ system Python lacks it, `pip install pyyaml`, or run it with ESPHome's own inter
 
 ## Getting Started
 
-### 1. Configure Secrets
-```bash
-cd espgensam
-cp secrets.yaml.example secrets.yaml
-```
-Edit `secrets.yaml` with your Wi-Fi credentials and ESPHome API key.
+### 1. Configure the Device
+
+Copy `secrets.yaml.example` to `secrets.yaml` and `espgensam-local.yaml.example` to
+`espgensam-local.yaml`, then
+set `board`, choose the discovery slot count, and set the controller name and log level.
+Monitor devices are generated from the discovery slots. Keep `secrets.yaml` private. The web
+interface and OTA are not authenticated or encrypted, so keep the device on a trusted local
+network.
 
 ### 2. Build & Flash
 
-Select your board in the `packages:` block of `espgensam.yaml` (see [Supported Hardware](#supported-hardware)), then:
+Build and flash the selected board (see [Supported Hardware](#supported-hardware)):
 
 ```bash
 esphome run espgensam.yaml
 ```
 
-Monitor serial numbers and entities live in `packages/gensam.yaml`, so they carry over unchanged if you swap boards.
+The configured speaker slots are populated from discovery; no serial-number list or `devices:`
+block is needed. Group membership and settings come from the uploaded `.sam` file.
+
+### 3. Use the device-hosted web interface & SAM uploader
+
+The web server and `/upload` uploader are enabled by default. Flash by USB the first time to install
+the required storage partitions. Open [the upload page](http://espgensam.local/upload) (or use the
+device IP) to validate a GLM 5 `.sam` file and save and restart. The validation result and any
+import warnings appear under the **Validate** button once a file has been uploaded. The
+first group is selected initially. After validation, expand the groups and speakers under
+**New setup details** to inspect the uploaded file's input routing, level, delay, crossover and LFE feed. Each speaker's PEQ section lists every
+imported slot, including its type, active or bypassed status, frequency, gain and Q. Slots are
+numbered from 1; shelving filters use fixed Q values. The new-setup preview is shown only for a
+validated file and is cleared after a restart. These are imported settings,
+not a live readback from the speakers. The main page and Home Assistant show the uploaded group
+options.
+
+The remembered selection is applied after discovery. A new upload starts with its first group;
+legacy stored defaults remain readable until replaced by a new upload or a remembered selection.
+Missing or offline monitors are skipped with a log warning. The web server and uploader use
+unauthenticated, unencrypted HTTP, and OTA is unauthenticated. Keep the device on a trusted local
+network; never expose these services to the internet.
+
+System volume, mute, and power are exposed as number and switch entities, so they are available in
+both Home Assistant and the ESPHome web interface.
+
+## Development and Tests
+
+From the repository root, run the Python regression scripts with a Python environment that has
+ESPHome's dependencies installed:
+
+```bash
+for test in tests/test_*.py; do python3 "$test" || exit 1; done
+```
+
+Some scripts compile host-side C++ fixtures and run the embedded UI's JavaScript checks, so the
+suite also requires a C++17 compiler and Node.js. The standalone C++ tests in `tests/test_*.cpp`
+each document their compile command at the top of the file. Validate and compile the ESPHome
+configuration for every supported board before publishing:
+
+```bash
+for board in waveshare_esp32s3_rs485_can m5stack_atoms3_rs485_base m5stack_atoms3_rs485_iso; do
+  esphome -s board "$board" config espgensam.yaml &&
+    esphome -s board "$board" compile espgensam.yaml || exit 1
+done
+```
 
 ---
 
