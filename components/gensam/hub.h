@@ -37,19 +37,19 @@
 ///    - WAKEUP (Power ON): Alternates {0x03, 0x7F} and {0x03, 0x01} repeated 3 times.
 ///    - STANDBY (Power OFF): Transmits {0x03, 0x02} twice (20 ms spacing), waits 80 ms, then
 ///      transmits {0x03, 0x00} twice (20 ms spacing).
-///    - Silent Boot: The system boots into standby and stays there until explicitly commanded by
-///      Home Assistant or snooped from GLM. Discovery must still wake monitors: one whose DSP is
-///      down is not listening on the bus at all and cannot answer a RACE ping, which is why GLM
-///      also wakes before discovering. When the system is meant to remain off, the wakeup is
-///      followed immediately by a minimum-volume broadcast so nothing is audible, and monitors are
-///      returned to standby once enumeration completes - a window of roughly 1.5 s during which
-///      front LEDs are lit.
-///    - Independent RS-485 Communication: Monitors remain responsive on the RS-485 bus during standby,
-///      allowing GenSAM to poll status and monitor connectivity while amplifiers are powered down.
-///      This depends on the CMD_STAY_ONLINE (0x04) heartbeat continuing throughout standby: it
-///      refreshes the volatile RACE address leases, and without it monitors stop answering on their
-///      assigned addresses after a minute or two. Only the CMD_VOLUME broadcast is suppressed while
-///      in standby, since that is what re-establishes amplifier gain.
+///    - Active Boot: Normal controller mode wakes monitors during initial discovery, restoring
+///      remembered volume/group (startup_volume_db on first boot), then suspends all TX after
+///      control_window (60 s; 0 infinite). Volume/mute reopen a controls-only window: no probes,
+///      polling, wakeup or group reload, even if cached addresses have expired. Other controls
+///      use cached-address power-status probes; missing/asleep targets require full wake/discovery
+///      and may interrupt audio. Power On or group selection after a controls-only window forces
+///      discovery to restore potentially lost DSP settings. Native audio wake is not announced
+///      on the bus; silent-mode telemetry is stale. Listen-only never transmits, including boot.
+///      Discovery must wake monitors because a sleeping DSP cannot answer a RACE ping.
+///      Explicit Power Off cancels queued controls, waits for a safe slot, sends shutdown,
+///      and stays silent without discovery until another user command.
+///    - Address leases: Continuous keep-alives prevent native ISS. They are intentionally
+///      suspended with polling/volume on window expiry, so cached addresses may no longer work.
 ///    - Volatile Address Reset across Standby Wakeup: When waking from standby, monitors reboot
 ///      their DSP and reset their volatile RACE address leases. When waking monitors from standby,
 ///      the Hub automatically initiates a fresh RACE rediscovery cycle: waking monitors, waiting 400 ms
@@ -75,24 +75,27 @@
 ///      volume state callbacks are not triggered during this transient silence so the Home Assistant
 ///      volume slider remains steady.
 ///
-/// 6. Deferred External Writes (Volume & Mute):
-///    set_volume_db() and set_group_mute() are called from whatever context requested them - the
-///    Home Assistant API handler, a media_player command - and that context knows nothing about
-///    the bus.  Transmitting there used to be the norm, and it lands frames at arbitrary points:
-///    - Over a monitor's reply.  A CMD_QUERY_STATUS reply begins ~5-10 us after the query and
+/// 6. Deferred External Writes (Volume, Mute & Monitor LEDs):
+///    set_volume_db(), set_group_mute() and set_system_leds_enabled() are called from whatever
+///    context requested them - the Home Assistant API handler or another external setter - and
+///    that context knows nothing about the bus. Transmitting there used to be the norm, and it
+///    lands frames at arbitrary points:
+///    - Over a monitor's reply. A CMD_QUERY_STATUS reply begins ~5-10 us after the query and
 ///      the API component runs in the same App.loop() pass as the hub, so a write issued in that
-///      window drives the bus on top of the reply.  Both frames are lost - including, possibly,
+///      window drives the bus on top of the reply. Both frames are lost - including, possibly,
 ///      the volume frame itself, leaving Home Assistant showing a level the monitors never got.
 ///    - Inside a group push, lifting the duck for the remainder of the push.
 ///    - Inside discovery and configuration, between a query and its answer.
 ///    Nothing throttled them either, so a fast knob or an automation could issue a frame per event.
 ///
-///    Instead both setters only *accept*: they record the new target as a latest-value-wins
-///    setpoint, publish it at once, and return.  loop() transmits it when the bus is in a safe
-///    slot - polling or idle, no reply outstanding, TX available - at most one item per loop()
-///    call.  Volume additionally waits out standby and goes no more often than
-///    `volume_tx_interval` (50 ms by default).  Once frames are slotted, that cap no longer protects telemetry; it only bounds
-///    bus, log and API churn.  A volume frame is ~0.35 ms of bus time.
+///    Instead the setters only *accept*: they record the latest target and return. Volume and
+///    mute publish on acceptance; the monitor LED switch publishes only after its live command
+///    has gone out, or the state is snooped from GLM. loop() transmits requests
+///    when the bus is in a safe slot - polling or idle, no reply outstanding, TX available - at
+///    most one item per loop() call. Volume additionally waits out standby and goes no more
+///    often than `volume_tx_interval` (50 ms by default). Once frames are slotted, that cap no
+///    longer protects telemetry; it only bounds bus, log and API churn. A volume frame is
+///    ~0.35 ms of bus time.
 ///
 ///    Publishing on accept means current_volume_db_ is the system's *target*, which is what it
 ///    already meant in standby (stored, published, applied on wake).  Any path that broadcasts
@@ -101,13 +104,14 @@
 ///    group push lands exactly when the duck lifts.
 ///
 ///    A pending request is dropped rather than delivered late when it can no longer be honoured:
-///    GLM taking the bus reverts the published state to what was last transmitted (it must not
-///    reach the bus 15 s later over GLM's own setting), a sniffed GLM volume supersedes it, and
-///    standby cancels it (a volume broadcast re-establishes amplifier gain).
+///    GLM taking the bus reverts published state to what was last transmitted (a queued write
+///    must not reach the bus 15 s later over GLM's own setting), a sniffed GLM setting supersedes
+///    it, and standby cancels pending volume (a volume broadcast re-establishes amplifier gain).
 /// ===================================================================================
 
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/preferences.h"
 #include "arbiter.h"
 #include "const.h"
 #include "frame.h"
@@ -229,6 +233,9 @@ class GenSAMHub : public Component {
   /// @brief Enable listen-only mode (prevents all transmissions on the bus).
   void set_listen_only(bool listen_only) { listen_only_ = listen_only; }
 
+  /// @brief Whether all bus transmissions are disabled by configuration.
+  bool is_listen_only() const { return listen_only_; }
+
   /// @brief Whether to yield the bus to external Genelec GLM adapters when traffic is detected.
   void set_yield_to_glm(bool yield) { yield_to_glm_ = yield; }
 
@@ -253,6 +260,12 @@ class GenSAMHub : public Component {
   /// @brief Register a configured monitor binding to match discovered hardware.
   void add_monitor_binding(const GenSAMMonitorBinding &binding) { registry_.add_binding(binding); }
 
+  /// @brief Publish runtime SAM setup names to matching monitor entities.
+  /// @param names SAM speaker names keyed by stable GLM hardware ID.
+  void set_sam_monitor_names(const std::map<uint32_t, std::string> &names) {
+    registry_.set_sam_monitor_names(names);
+  }
+
   /// @brief Point the hub at the generated, flash-resident group preset table.
   ///
   /// The table outlives the hub and is never copied or freed; see groups.h.
@@ -262,6 +275,20 @@ class GenSAMHub : public Component {
     groups_ = groups;
     group_count_ = count;
   }
+
+  /// @brief Replace the active preset table with an owned runtime table.
+  ///
+  /// Runtime presets are owned by the upload component and remain valid until this method is
+  /// called again. Replacement is refused during a group push, while its frames may still read
+  /// the current preset. It deliberately clears the active/default selection so the new table
+  /// is never applied as a side effect of upload or a later rediscovery.
+  /// @param groups Runtime presets, or nullptr when the table is empty.
+  /// @param count Number of entries in the runtime table.
+  /// @return True when the table was replaced.
+  bool replace_runtime_group_table(const GroupPreset *groups, uint8_t count);
+
+  /// @brief Whether a group push currently depends on the active table's storage.
+  bool is_group_apply_in_progress() const { return apply_.active || pending_group_ >= 0; }
 
   /// @brief Number of configured group presets; 0 when the feature is unused.
   uint8_t get_group_count() const { return group_count_; }
@@ -308,6 +335,17 @@ class GenSAMHub : public Component {
   /// @param index Preset index to apply on startup.
   void set_default_group(uint8_t index) { default_group_ = index; }
 
+  /// @brief Set the uploaded setup generation used to scope restored group selections.
+  /// @param generation Flash-slot sequence; a new upload starts with its first group.
+  void set_group_generation(uint32_t generation) { group_generation_ = generation; }
+
+  /// @brief Configure how long user actions keep bus control active; zero never expires.
+  /// @param milliseconds Duration since the most recent accepted user command.
+  void set_control_window(uint32_t milliseconds) { control_window_ms_ = milliseconds; }
+
+  /// @brief Whether telemetry is intentionally suspended and speaker power is unknown.
+  bool is_bus_silent() const { return bus_silent_; }
+
   /// @brief Make a group preset the active one and push it to every monitor.
   ///
   /// The push is asynchronous: this records the request and returns, and the state machine
@@ -335,14 +373,6 @@ class GenSAMHub : public Component {
   /// @return Pointer to registered number entity or nullptr.
   number::Number *get_volume_number() const { return volume_number_; }
 
-  /// @brief Set optional bus operational status diagnostic text sensor entity.
-  /// @param sensor Pointer to the TextSensor entity.
-  void set_bus_status_sensor(text_sensor::TextSensor *sensor) { bus_status_sensor_ = sensor; }
-
-  /// @brief Get optional bus operational status diagnostic text sensor entity.
-  /// @return Pointer to registered text sensor or nullptr.
-  text_sensor::TextSensor *get_bus_status_sensor() const { return bus_status_sensor_; }
-
   /// @brief Current bus operational status string ("Active", "GLM Active", "Discovering", "Configuring", "Offline").
   const std::string &get_bus_status() const { return last_bus_status_; }
 
@@ -351,10 +381,6 @@ class GenSAMHub : public Component {
     bus_status_callbacks_.push_back(std::move(cb));
   }
 
-  /// @brief Set the optional diagnostic sensor reporting deviation from the active group.
-  /// @param sensor Pointer to the binary sensor entity.
-  void set_group_modified_sensor(binary_sensor::BinarySensor *sensor) { group_modified_sensor_ = sensor; }
-
   /// @brief Register the hub-wide calibration bypass switch entity.
   void set_calibration_bypass_switch(switch_::Switch *sw) { calibration_bypass_switch_ = sw; }
 
@@ -362,7 +388,7 @@ class GenSAMHub : public Component {
   ///
   /// GLM's "Cal bypassed": while on, a group push sends every PEQ slot as the bypass vector, a
   /// 0 dB level trim and no delay, and leaves crossover, input routing and LFE as the group
-  /// has them. Takes effect by re-pushing the active group; see switch.h section 3.
+  /// has them. Takes effect by re-pushing the active group; see switch.h section 5.
   /// @param bypass True to bypass, false to restore the group's own calibration.
   void set_calibration_bypass(bool bypass);
 
@@ -378,6 +404,11 @@ class GenSAMHub : public Component {
   /// @brief Register a callback for when volume, mute, or power changes (from commands or passive snooping).
   void add_state_callback(std::function<void(float, bool, bool)> cb) {
     state_callbacks_.push_back(std::move(cb));
+  }
+
+  /// @brief Register a callback for monitor LED enable state changes.
+  void add_system_led_state_callback(std::function<void(bool)> cb) {
+    system_led_state_callbacks_.push_back(std::move(cb));
   }
 
   /// @brief Legacy setter for volume state callback.
@@ -397,6 +428,12 @@ class GenSAMHub : public Component {
   /// @brief Current system mute state.
   bool is_muted() const { return current_mute_; }
 
+  /// @brief Current system monitor LED state.
+  bool are_system_leds_enabled() const { return current_system_leds_enabled_; }
+
+  /// @brief Whether the system monitor LED state is based on observed or transmitted state.
+  bool is_system_led_state_known() const { return system_led_state_known_; }
+
   /// @brief Current system standby state.
   bool is_standby() const { return current_standby_; }
 
@@ -405,7 +442,8 @@ class GenSAMHub : public Component {
   /// Accepts and publishes the target immediately but does not transmit: loop() sends it in the
   /// next safe bus slot, coalescing requests that arrive faster than that.  Rejected, with state
   /// left unchanged, when the bus is unavailable for TX (GLM active, listen-only).  See section 6
-  /// of the header comment.
+  /// of the header comment. After bus silence, sends controls only; does not wake monitors or
+  /// restore calibration lost during sleep. Use Power On or group selection for restoration.
   /// @param db Target volume level in dB (clamped between min_volume_db_ and max_volume_db_).
   void set_volume_db(float db);
 
@@ -415,6 +453,12 @@ class GenSAMHub : public Component {
   /// loop().
   /// @param mute True to mute all speakers via CMD_BYPASS, false to unmute.
   void set_group_mute(bool mute);
+
+  /// @brief Request the monitor LED state for every discovered monitor.
+  ///
+  /// The write and flash commit are deferred to a safe bus slot, like system mute/volume.
+  /// @param enabled True to enable LEDs, false to disable them.
+  void set_system_leds_enabled(bool enabled);
 
   /// @brief Set mute state for an individual monitor by logical RS-485 bus address.
   /// @param address Logical bus address (0x02..0x7F).
@@ -485,15 +529,6 @@ class GenSAMHub : public Component {
   /// @param serial_or_id Serial number string or decimal unique ID string.
   /// @param input_name One of the INPUT_STR_* option strings.
   void set_monitor_input_by_name(const std::string &serial_or_id, const std::string &input_name);
-
-  /// @brief Record that a device setting no longer matches the active group, and publish it.
-  ///
-  /// Set by a hand override or a snooped GLM change to anything a group push owns - input
-  /// routing, crossover, level trim and delay. Cleared when a group is applied, which is what
-  /// makes an override temporary. Purely informational: nothing in the hub behaves
-  /// differently because of it.
-  /// @param modified True when deviating, false when a group push has just re-established it.
-  void set_group_modified(bool modified);
 
   /// @brief Send audio source frame(s) to a specific monitor.
   /// Standard monitors receive 1 frame (input 0); subwoofers (7xxx) receive 2 frames (inputs 0 and 1).
@@ -608,14 +643,17 @@ class GenSAMHub : public Component {
   /// @brief Check whether the external GLM master inactivity timer has expired to reclaim bus control.
   void check_glm_cooldown_();
 
-  /// @brief Transmit a pending mute or volume request if the bus is in a safe slot.
+  /// @brief Transmit a pending mute, LED or volume request if the bus is in a safe slot.
   ///
-  /// At most one item per call, mute first.  See section 6 of the header comment for the slot rules.
+  /// At most one item per call, mute first. See section 6 of the header comment for the slot rules.
   /// @param now Current time in milliseconds.
   void service_pending_writes_(uint32_t now);
 
   /// @brief Send the CMD_BYPASS fan-out for current_mute_ and record it in the registry.
   void transmit_group_mute_();
+
+  /// @brief Send the requested live monitor LED state to each discovered monitor.
+  void transmit_system_leds_();
 
   /// @brief Broadcast current_volume_db_, satisfying any pending volume request.
   ///
@@ -743,6 +781,9 @@ class GenSAMHub : public Component {
   /// @brief Track wakeup and standby power commands.
   void snoop_power_(const Frame &frame);
 
+  /// @brief Track live 0x2B LED toggles and stored 0x3A 06 settings from GLM.
+  void snoop_system_leds_(const Frame &frame);
+
   /// @brief Track bypass / mute commands, per monitor or across the whole group.
   void snoop_mute_(const Frame &frame);
 
@@ -802,13 +843,41 @@ class GenSAMHub : public Component {
   /// @param switch_inputs Operation transmitting the source selection frames.
   void with_transient_silence_(const std::function<void()> &switch_inputs);
 
-  /// @brief Evaluate and publish operational bus status ("Active", "GLM Active", "Discovering", "Configuring", "Offline").
+  /// @brief Publish operational bus status, including "Bus Silent" when power/telemetry is unknown.
   void update_bus_status_();
+
+  /// @brief Queue an external command and acquire a safe, awake bus session before executing it.
+  /// @param command Deferred action; may call the same public setter once the session is ready.
+  /// @return True if deferred or rejected; false only while executing a queued action.
+  bool defer_user_command_(std::function<void()> command);
+  /// @brief Open a control window without reloading calibration on already-active monitors.
+  /// @param controls_only Resume after silence without probes, polling, wakeup or discovery.
+  /// @return True if accepted; false when listen-only or yielding to GLM.
+  bool open_control_window_(bool controls_only = false);
+  /// @brief Service cached-address probes, queued commands and the silence deadline.
+  void service_control_window_(uint32_t now);
+  /// @brief Wake/discover after cached-address recovery fails or reports standby.
+  void discover_monitors_();
+  /// @brief Save and restore user volume/group intent in ESP preferences, never speaker flash.
+  void save_control_state_();
+  void restore_control_state_();
 
   Rs485Profile rs485_{};
   uint32_t baud_rate_{BAUDRATE};
   size_t rx_buffer_size_{512};
   bool listen_only_{false};
+  uint32_t control_window_ms_{60000};
+  uint32_t last_user_command_ms_{0};
+  bool bus_silent_{false};
+  bool resuming_{false};
+  bool controls_only_session_{false};  ///< Suppress automatic recovery after volume/mute-only resume.
+  bool recovery_required_{false};  ///< An external master may have changed DSP state and addresses.
+  bool power_off_pending_{false};
+  bool executing_user_command_{false};
+  std::vector<std::function<void()>> user_commands_;
+  uint32_t group_generation_{0};
+  int selected_group_{-1};
+  ESPPreferenceObject control_preference_;
   bool yield_to_glm_{true};
   uint32_t glm_inactivity_cooldown_ms_{30000};
   uint32_t poll_interval_ms_{1000};
@@ -874,11 +943,15 @@ class GenSAMHub : public Component {
   float startup_volume_db_{-30.0f};
   float current_volume_db_{-30.0f};
   bool current_mute_{false};
-  bool current_standby_{true};
+  bool current_standby_{false};
+  bool current_system_leds_enabled_{true};
+  bool last_tx_system_leds_enabled_{true};
+  bool system_led_state_known_{false};
 
   // Deferred external writes; see section 6 of the header comment.
   bool volume_tx_pending_{false};   ///< current_volume_db_ has been accepted but not yet transmitted.
   bool mute_tx_pending_{false};     ///< current_mute_ has been accepted but not yet transmitted.
+  bool system_led_tx_pending_{false};  ///< current_system_leds_enabled_ has been accepted but not sent.
   float last_tx_volume_db_{-30.0f}; ///< Volume last sent to the bus, restored if a request is dropped.
   uint32_t last_volume_tx_ms_{0};   ///< When transmit_volume_() last put a volume frame on the bus.
 
@@ -893,14 +966,12 @@ class GenSAMHub : public Component {
   bool restore_standby_after_discovery_{false};
   void notify_state_callbacks_();
 
-  text_sensor::TextSensor *bus_status_sensor_{nullptr};
   std::string last_bus_status_{};
   number::Number *volume_number_{nullptr};
-  binary_sensor::BinarySensor *group_modified_sensor_{nullptr};
-  bool group_modified_{false};
   switch_::Switch *calibration_bypass_switch_{nullptr};
   bool calibration_bypass_{false};  ///< Hub-wide; never restored, so every boot starts calibrated.
   std::vector<std::function<void(float, bool, bool)>> state_callbacks_;
+  std::vector<std::function<void(bool)>> system_led_state_callbacks_;
   std::vector<std::function<void(const std::string &)>> bus_status_callbacks_;
 };
 

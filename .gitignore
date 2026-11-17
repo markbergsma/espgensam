@@ -4,7 +4,12 @@ build/
 
 # Local credentials & custom local configs
 secrets.yaml
+.env
 *-local.yaml
+
+# GLM setup exports: they carry device serials, barcodes and AutoCal session data.
+# Tests build a synthetic setup in tests/sam_fixture.py instead.
+*.sam
 
 # Compiled firmware binaries & maps
 *.bin
@@ -21,3 +26,4 @@ __pycache__/
 
 # Local packet captures for debugging
 captures/
+tmp/

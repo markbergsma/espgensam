@@ -39,17 +39,15 @@
 ///    rediscovery, and followed back when GLM changes them on the bus.
 ///
 /// 4. System Volume in Decibels (GenSAMVolumeNumber):
-///    While the GenSAM MediaPlayer entity provides standard 0.0..1.0 (0-100%) linear slider
-///    control in Home Assistant, professional monitoring environments and studio workflows
-///    often require explicit decibel (dB) attenuation readouts and control.
+///    Professional monitoring environments and studio workflows often require explicit
+///    decibel (dB) attenuation readouts and control.
 ///    - The GenSAMVolumeNumber entity exposes the active system volume directly in decibels (dB),
 ///      bounded by the configured [min_volume_db, max_volume_db] limits.
 ///    - A step resolution of 0.5 dB is enforced to match standard audio mixing console fader
 ///      increments and provide precise acoustic adjustment without flooding the half-duplex
 ///      RS-485 bus during slider manipulation.
-///    - The entity maintains strict bidirectional synchronization with the GenSAM MediaPlayer,
-///      outgoing CMD_VOLUME (0x1F) broadcast frames, and passive bus sniffing of external GLM
-///      controllers.
+///    - The entity maintains strict bidirectional synchronization with outgoing CMD_VOLUME
+///      (0x1F) broadcast frames and passive bus sniffing of external GLM controllers.
 /// ===================================================================================
 
 #include "esphome/core/component.h"

@@ -15,15 +15,15 @@ It is not a comparison with any other project; for that see
 ## 1. Scope and method
 
 Everything here is decoded from OEM GLM v5 adapter traffic captured with espgensam itself, in
-the listen-only build (`espgensam-capture-local.yaml`, which sets `listen_only: true` so the
-component decodes but never transmits):
+listen-only mode (`listen_only: "true"` in `espgensam-local.yaml`, so the component decodes but
+never transmits):
 
 ```bash
-esphome logs espgensam-capture-local.yaml | tee captures/glm_group_switch_capture.log
+esphome logs espgensam.yaml | tee captures/glm_group_switch_capture.log
 ```
 
-Eight logs, all under `captures/`, which is gitignored and therefore local to the machine that
-recorded it:
+Eight historical logs informed this analysis. The raw captures were gitignored and are not
+included in the repository; the filenames below refer to the original capture environment:
 
 | Log | Lines | Setup file | What it caught |
 |---|---|---|---|
@@ -40,11 +40,11 @@ The hardware throughout is a Genelec 7350A subwoofer and two 8330A two-way monit
 reassigned per session, so the subwoofer is `0x02` in the first three logs and `0x05` in
 `glm_lfe2_capture.log`; frames are quoted with whichever address they carried.
 
-Two setup files. `captures/glm-config/Home Cinema.sam` is a calibrated 2.1 system, and is the
-one meant wherever this document cites a `.sam` field without saying otherwise. The second was
-built specifically to move fields the first held constant — a group trim, an LFE feed, a
-different crossover — and lives outside the repository, in GLM's own directory; the two
-configs that read it are `espgensam-lfe-local.yaml` and `espgensam-lfe-capture-local.yaml`.
+Two setup files informed the analysis. `captures/glm-config/Home Cinema.sam` was a calibrated
+2.1 system and is the one meant wherever this document cites a `.sam` field without saying
+otherwise. The second was built specifically to vary fields the first held constant — a group
+trim, an LFE feed, a different crossover — and remained in GLM's own directory. Neither setup
+file nor the local ESPHome configurations used for those runs are included here.
 Counts quoted as "across the captures" are over all eight logs.
 
 espgensam's own pushes have been **measured acoustically on one 8330A**: PEQ, level and
@@ -307,6 +307,26 @@ such a group played the whole system 0.3 dB loud. It now adds the two. The `-999
 0 dB of its own and still takes the group's offset. Covered by
 `test_group_sensitivity_is_summed_into_the_level()` in `tests/test_sam_import.py`, and by the
 verbatim frame in `tests/test_dsp_frame.cpp`.
+
+## 6b. `0x43` and `0x4B` recur in group configuration, purpose unknown
+
+Three listen-only captures (initialization, a group switch, and the switch back) show both
+opcodes with fixed payloads, `0x43 [00 02]` and `0x4B [00 00 00 01]`:
+
+- **Initialization:** `0x43` goes to `0x0E` after the level frames and before PEQ. `0x4B` goes
+  to `0x0F` after PEQ and `0x3B`, before `0x40` routing.
+- **Group switch:** `0x43` goes to both monitors, again between level and PEQ. `0x4B` goes to
+  one monitor, after PEQ and `0x3B`.
+- **Switch back:** the same `0x43` sequence, and `0x4B` to one monitor after its PEQ.
+
+`0x4B` went to `0x10` on the outbound switch and `0x11` on the return. RACE assignments changed
+between captures, so this does not show that GLM favours a particular physical monitor.
+
+Both are monitor-addressed configuration commands. `0x43` sits before PEQ; `0x4B` sits after
+PEQ and crossover, before routing. What either one sets, why `0x4B` reaches only one target, and
+whether either affects the audible calibration are all unknown. The `0x43` here is unrelated to the `0x43` telemetry tag (HF output meter).
+
+Assigning meaning needs a controlled GLM change of one candidate setting at a time.
 
 ## 7. Where espgensam differs on purpose
 

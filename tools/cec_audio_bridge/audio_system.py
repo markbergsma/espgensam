@@ -1,4 +1,4 @@
-"""CEC Audio System behaviour: System Audio Control, forwarded to a Home Assistant media_player.
+"""CEC Audio System behaviour: System Audio Control, forwarded to Home Assistant entities.
 
 WHY LOGICAL ADDRESS 5
 
@@ -131,7 +131,7 @@ def describe(msg: CecMessage):
         (f" [{ops}]" if ops else "")
 
 
-class MediaPlayer(Protocol):
+class AudioControls(Protocol):
     """The parts of ha_ws.HomeAssistant the audio system uses."""
     available: bool
     is_off: bool
@@ -151,7 +151,7 @@ class AudioSystem:
     All methods run on the asyncio event loop thread.
     """
 
-    def __init__(self, send: Callable[..., None], player: MediaPlayer, step: float,
+    def __init__(self, send: Callable[..., None], player: AudioControls, step: float,
                  follow_power: bool, initiate_sam: bool):
         self.send = send
         self.player = player
@@ -311,7 +311,7 @@ class AudioSystem:
     # --- Changes made outside CEC ---
 
     def on_player_changed(self):
-        """The media_player changed in HA; tell the TV, coalescing bursts."""
+        """The audio controls changed in HA; tell the TV, coalescing bursts."""
         if not self.claimed or not self.system_audio_mode or self._tv_report is not None:
             return
         self._tv_report = asyncio.get_running_loop().call_later(

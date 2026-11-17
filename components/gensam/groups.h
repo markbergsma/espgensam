@@ -12,11 +12,11 @@
 /// makes the same thing possible here.
 ///
 /// 1. Immutable, Flash-Resident, Generated:
-///    These structures are never built at runtime.  The ESPHome code generator emits one
-///    constant table from the `groups:` YAML and the hub only ever reads it, so the several
+///    The ESPHome code generator emits one constant table from the `groups:` YAML, so the several
 ///    kilobytes of filter parameters live in flash rather than RAM.  A three-group setup for
 ///    four speakers is about 3 kB.  Nothing here owns memory or has a non-trivial
-///    constructor, which is what keeps that true.
+///    constructor, which is what keeps that true. Runtime imports use the same read-only
+///    views backed by owned storage; that storage must outlive every application of the table.
 ///
 /// 2. Parameters, Not Coefficients:
 ///    Bands are stored the way the GLM user interface and the .sam setup file express them -
@@ -27,11 +27,10 @@
 ///    transcendentals per band on a core with an FPU, once per group change.
 ///
 /// 3. Why The Design Rate Is Absent Here:
-///    A band's coefficients depend on the rate it is designed at - 48 kHz for two-way
-///    monitors, 12 kHz for subwoofers - but that is a property of the hardware, identical in
-///    every group, and already derivable from the discovered model.  Storing it per band
-///    would repeat one number several hundred times and create a second, conflicting source
-///    of truth.  It is resolved at apply time instead.
+///    A band's coefficients depend on the rate it is designed at. Compiled presets use the
+///    monitor binding or model-derived default (48 kHz monitors, 12 kHz subwoofers). Runtime
+///    imports carry the validated class rate per device, not per band, so three-way setups
+///    designed at 96 kHz are not silently redesigned at the 48 kHz monitor default.
 ///
 /// 4. Joining To Hardware:
 ///    A device is identified by its GLM hardware id, the same decimal number a .sam file
@@ -107,6 +106,7 @@ struct GroupDevice {
 
   const PeqBand *bands{nullptr};  ///< PEQ_BAND_COUNT entries, in wire-index order.
   uint8_t band_count{0};          ///< Entries actually present; slots beyond it are bypassed.
+  uint32_t peq_design_rate_hz{0};  ///< Validated import rate; zero uses the monitor's configured/default rate.
 };
 
 /// @brief A named group preset.

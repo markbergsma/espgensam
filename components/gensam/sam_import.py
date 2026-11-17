@@ -15,6 +15,9 @@ group, so this reads it instead.
    mapping -- a band placed in the wrong slot, a rounded gain -- produces a perfectly valid
    configuration that mistunes a speaker with nothing to show for it, so the two paths must
    not be able to drift apart.
+   The device-side importer in sam_runtime.cpp mirrors this mapping; test_sam_runtime.py
+   compares every imported device field and filter slot against this implementation.
+   Runtime imports additionally carry the 96 kHz design rate for ThreewayGen2 setups.
 
 2. Standard Library Only, And Inside The Component:
    It lives under `components/gensam/` because an external component fetched with
@@ -128,10 +131,15 @@ def parse_sam(path):
     The format is line-oriented ``Key:Value`` with ``Data_End:`` / ``Group_End:`` terminators
     and dashed rules between sections, so a small state machine is enough. Keys repeat within
     a block (every band re-uses Frequency/Gain), which is why bands are accumulated against
-    the most recent band marker rather than collected into a dict.
+    the most recent band marker rather than collected into a dict. Valid UTF-8 takes
+    precedence; other files are interpreted as Latin-1, as in the runtime importer.
     """
-    with open(path, encoding="latin-1") as fh:
-        raw = [line.rstrip("\r\n") for line in fh]
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = [line.rstrip("\r\n") for line in fh]
+    except UnicodeDecodeError:
+        with open(path, encoding="latin-1") as fh:
+            raw = [line.rstrip("\r\n") for line in fh]
 
     if not any(line.startswith("Magic:") and "GLM5" in line for line in raw[:20]):
         warn(f"{path}: no 'Magic: GLM5_v2' header; this may not be a GLM 5 setup file")

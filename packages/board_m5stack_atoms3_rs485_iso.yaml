@@ -57,7 +57,7 @@ light:
     pin: GPIO35
     num_leds: 1
     chipset: WS2812
-    channel_colors: GRB
+    rgb_order: GRB
     rmt_symbols: 96
 
 gensam:

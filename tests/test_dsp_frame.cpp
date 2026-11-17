@@ -1,5 +1,5 @@
 /// @file test_dsp_frame.cpp
-/// @brief Host-side test for the level and delay frame builders against real GLM captures.
+/// @brief Host-side tests for DSP, LFE, and ISS LED frame builders.
 ///
 /// ===================================================================================
 /// RUNNING
@@ -44,6 +44,9 @@
 ///    0x3E as whole decibels in a signed byte, with LFE_Level and LFE_+10 summed into it, and
 ///    show that a subwoofer's two 0x40 frames are two different feeds rather than one setting
 ///    sent twice: input 1 is the LFE channel, and the program input is narrowed off it.
+///
+/// 6. A live-toggle capture confirms `2B 04` enables monitor LEDs and `2B 08` disables them;
+///    the mute bit is preserved. Storing the setting separately uses `3A 06` and `15 33 00`.
 /// ===================================================================================
 
 #include "../components/gensam/commands.h"
@@ -103,6 +106,41 @@ void check_wire(const char *what, const Frame &frame, const char *expected) {
     std::printf("         want %s\n", expected);
     std::printf("         got  %s\n", got.c_str());
   }
+}
+
+void test_monitor_led_frames() {
+  const Frame live_on = esphome::gensam::make_bypass_led_state(0x02, false, true);
+  check(live_on.address == 0x02 && live_on.command == esphome::gensam::CMD_BYPASS &&
+            live_on.payload == std::vector<uint8_t>({0x04}),
+        "live LED enable uses 0x2B 04");
+
+  const Frame live_off = esphome::gensam::make_bypass_led_state(0x03, false, false);
+  check(live_off.address == 0x03 && live_off.command == esphome::gensam::CMD_BYPASS &&
+            live_off.payload == std::vector<uint8_t>({0x08}),
+        "live LED disable uses 0x2B 08");
+
+  const Frame muted_live_on = esphome::gensam::make_bypass_led_state(0x02, true, true);
+  check(muted_live_on.payload == std::vector<uint8_t>({0x05}),
+        "live LED enable preserves the mute bit");
+
+  const Frame muted_live_off = esphome::gensam::make_bypass_led_state(0x03, true, false);
+  check(muted_live_off.payload == std::vector<uint8_t>({0x09}),
+        "live LED disable preserves the mute bit");
+
+  const Frame on = esphome::gensam::make_iss_led_state(0x02, true);
+  check(on.address == 0x02 && on.command == esphome::gensam::CMD_WAKEUP &&
+            on.payload == std::vector<uint8_t>({0x06, 0x00}),
+        "stored LED enable uses 0x3A 06 00");
+
+  const Frame off = esphome::gensam::make_iss_led_state(0x03, false);
+  check(off.address == 0x03 && off.command == esphome::gensam::CMD_WAKEUP &&
+            off.payload == std::vector<uint8_t>({0x06, 0x01}),
+        "stored LED disable uses 0x3A 06 01");
+
+  const Frame commit = esphome::gensam::make_flash_commit(0x03);
+  check(commit.address == 0x03 && commit.command == esphome::gensam::CMD_FLASH_COMMIT &&
+            commit.payload == std::vector<uint8_t>({0x33, 0x00}),
+        "stored LED setting is committed with 0x15 33 00");
 }
 
 // --- Level compensation -----------------------------------------------------------------
@@ -453,7 +491,8 @@ void test_lfe_level_encoding_details() {
 }  // namespace
 
 int main() {
-  std::printf("level and delay frame builders\n");
+  std::printf("DSP, LFE and ISS LED frame builders\n");
+  test_monitor_led_frames();
   test_captured_lfe_level_frames();
   test_captured_lfe_routing_frames();
   test_lfe_level_encoding_details();

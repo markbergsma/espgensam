@@ -13,6 +13,7 @@
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 
+#include <algorithm>
 #include <strings.h>
 
 static const char *const TAG = "gensam";
@@ -99,31 +100,86 @@ void MonitorRegistry::bind_if_matched(GenSAMMonitor &mon) {
   if (mon.binding != nullptr) {
     return;
   }
+  GenSAMMonitorBinding *matched = nullptr;
   for (auto &b : bindings_) {
     if (!mon.matches(b)) {
       continue;
     }
-    mon.binding = &b;
-    if ((mon.serial_number.empty() || mon.serial_number == "(none)") && !b.serial_number.empty()) {
-      mon.serial_number = b.serial_number;
-    }
-    ESP_LOGI(TAG, "Bound monitor 0x%02X (%s, SN:%s) to HA entity '%s'",
-             mon.address, model_or(mon, "(querying)"), mon.serial_number.c_str(), b.name.c_str());
-    this->publish_metadata(mon);
-    this->publish_online(mon);
-    if (b.crossover_configured) {
-      publish_crossover(b);
-    }
-    if (b.input_select != nullptr && b.input_configured) {
-      b.input_select->publish_state(input_to_str(b.source, b.aes3_channel));
-    }
-    if (b.level_number != nullptr && b.level_configured) {
-      b.level_number->publish_state(b.level_db);
-    }
-    if (b.delay_number != nullptr && b.delay_configured) {
-      b.delay_number->publish_state(delay_samples_to_ms(b.delay_samples));
-    }
+    matched = &b;
     break;
+  }
+
+  if (matched == nullptr) {
+    return;
+  }
+
+  mon.binding = matched;
+  if ((mon.serial_number.empty() || mon.serial_number == "(none)") && !matched->serial_number.empty()) {
+    mon.serial_number = matched->serial_number;
+  }
+  ESP_LOGI(TAG, "Bound monitor 0x%02X (%s, SN:%s) to HA entity '%s'",
+           mon.address, model_or(mon, "(querying)"), mon.serial_number.c_str(), matched->name.c_str());
+  this->publish_metadata(mon);
+  this->publish_online(mon);
+  if (matched->crossover_configured) {
+    publish_crossover(*matched);
+  }
+  if (matched->input_select != nullptr && matched->input_configured) {
+    matched->input_select->publish_state(input_to_str(matched->source, matched->aes3_channel));
+  }
+  if (matched->level_number != nullptr && matched->level_configured) {
+    matched->level_number->publish_state(matched->level_db);
+  }
+  if (matched->delay_number != nullptr && matched->delay_configured) {
+    matched->delay_number->publish_state(delay_samples_to_ms(matched->delay_samples));
+  }
+}
+
+void MonitorRegistry::assign_discovery_slots() {
+  const bool has_discovery_slots = std::any_of(
+      bindings_.begin(), bindings_.end(), [](const GenSAMMonitorBinding &binding) {
+        return binding.discovery_slot;
+      });
+  if (!has_discovery_slots) {
+    return;
+  }
+
+  std::vector<GenSAMMonitor *> unassigned;
+  for (auto &entry : monitors_) {
+    GenSAMMonitor &mon = entry.second;
+    if (mon.binding == nullptr && mon.unique_id != 0) {
+      unassigned.push_back(&mon);
+    }
+  }
+  std::sort(unassigned.begin(), unassigned.end(), [](const GenSAMMonitor *left, const GenSAMMonitor *right) {
+    return left->unique_id < right->unique_id;
+  });
+
+  std::size_t overflow = 0;
+  for (GenSAMMonitor *mon : unassigned) {
+    for (auto &binding : bindings_) {
+      if (binding.discovery_slot && binding.unique_id == mon->unique_id) {
+        this->bind_if_matched(*mon);
+        break;
+      }
+    }
+    if (mon->binding != nullptr) {
+      continue;
+    }
+    auto slot = std::find_if(bindings_.begin(), bindings_.end(), [](const GenSAMMonitorBinding &binding) {
+      return binding.discovery_slot && binding.unique_id == 0;
+    });
+    if (slot == bindings_.end()) {
+      overflow++;
+      continue;
+    }
+    slot->unique_id = mon->unique_id;
+    this->bind_if_matched(*mon);
+  }
+
+  if (overflow != 0) {
+    ESP_LOGW(TAG, "%u discovered monitor(s) have no fixed entity slot; uploaded group settings still apply",
+             static_cast<unsigned>(overflow));
   }
 }
 
@@ -175,6 +231,11 @@ void MonitorRegistry::publish_metadata(const GenSAMMonitor &mon) {
   if (mon.binding == nullptr) {
     return;
   }
+  if (mon.binding->sam_name_sensor != nullptr) {
+    const auto name = sam_monitor_names_.find(mon.unique_id);
+    mon.binding->sam_name_sensor->publish_state(
+        name != sam_monitor_names_.end() ? name->second : "");
+  }
   if (mon.binding->model_sensor != nullptr && !mon.model.empty()) {
     mon.binding->model_sensor->publish_state(mon.model);
   }
@@ -186,6 +247,13 @@ void MonitorRegistry::publish_metadata(const GenSAMMonitor &mon) {
   }
   if (mon.binding->hardware_id_sensor != nullptr && mon.unique_id != 0) {
     mon.binding->hardware_id_sensor->publish_state(std::to_string(mon.unique_id));
+  }
+}
+
+void MonitorRegistry::set_sam_monitor_names(const std::map<uint32_t, std::string> &names) {
+  sam_monitor_names_ = names;
+  for (const auto &entry : monitors_) {
+    this->publish_metadata(entry.second);
   }
 }
 
@@ -208,6 +276,15 @@ void MonitorRegistry::publish_telemetry(const GenSAMMonitor &mon) {
 void MonitorRegistry::publish_online(const GenSAMMonitor &mon) {
   if (mon.binding != nullptr && mon.binding->online_sensor != nullptr) {
     mon.binding->online_sensor->publish_state(mon.online);
+  }
+}
+
+void MonitorRegistry::publish_stale_telemetry() {
+  for (auto &binding : bindings_) {
+    if (binding.temperature_sensor != nullptr) binding.temperature_sensor->publish_state(NAN);
+    if (binding.input_level_sensor != nullptr) binding.input_level_sensor->publish_state(NAN);
+    if (binding.output_level_sensor != nullptr) binding.output_level_sensor->publish_state(NAN);
+    if (binding.online_sensor != nullptr) binding.online_sensor->invalidate_state();
   }
 }
 

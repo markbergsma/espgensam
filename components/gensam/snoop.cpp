@@ -17,6 +17,7 @@ void GenSAMHub::snoop_frame_(const Frame &frame) {
   this->snoop_addressing_(frame);
   this->snoop_volume_(frame);
   this->snoop_power_(frame);
+  this->snoop_system_leds_(frame);
   this->snoop_mute_(frame);
   this->snoop_crossover_(frame);
   this->snoop_audio_source_(frame);
@@ -79,6 +80,73 @@ void GenSAMHub::snoop_power_(const Frame &frame) {
   }
 }
 
+void GenSAMHub::snoop_system_leds_(const Frame &frame) {
+  bool enabled;
+  if (frame.command == CMD_BYPASS && frame.payload.size() == 1) {
+    const uint8_t led_value = frame.payload[0] & static_cast<uint8_t>(~BYPASS_MUTE_MASK);
+    if (led_value != BYPASS_LED_ENABLED_VALUE && led_value != BYPASS_LED_DISABLED_VALUE) {
+      return;
+    }
+    enabled = led_value == BYPASS_LED_ENABLED_VALUE;
+  } else if (frame.command == CMD_WAKEUP && frame.payload.size() >= 2 &&
+             frame.payload[0] == WAKEUP_OP_ISS_LED &&
+             (frame.payload[1] == ISS_LED_ENABLED || frame.payload[1] == ISS_LED_DISABLED)) {
+    enabled = frame.payload[1] == ISS_LED_ENABLED;
+  } else {
+    return;
+  }
+  if (frame.address != MULTICAST_ADDRESS && frame.address != BROADCAST_ADDRESS &&
+      (frame.address < MONITOR_START_ADDR || frame.address >= 0x80)) {
+    return;
+  }
+
+  if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
+    for (auto &kv : registry_.monitors()) {
+      kv.second.system_leds_enabled = enabled;
+      kv.second.system_leds_known = true;
+    }
+  } else {
+    GenSAMMonitor &mon = registry_.get_or_create(frame.address);
+    mon.system_leds_enabled = enabled;
+    mon.system_leds_known = true;
+  }
+
+  bool all_known = !registry_.empty() ||
+                   frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS;
+  bool all_enabled = true;
+  for (const auto &kv : registry_.monitors()) {
+    if (!kv.second.system_leds_known) {
+      all_known = false;
+      break;
+    }
+    all_enabled = all_enabled && kv.second.system_leds_enabled;
+  }
+  if (!all_known) {
+    return;
+  }
+
+  const bool observed_enabled = all_enabled;
+  if (system_led_tx_pending_) {
+    if (observed_enabled == current_system_leds_enabled_) {
+      system_led_tx_pending_ = false;
+      last_tx_system_leds_enabled_ = observed_enabled;
+      system_led_state_known_ = true;
+      for (auto &callback : system_led_state_callbacks_) {
+        callback(current_system_leds_enabled_);
+      }
+    }
+    return;
+  }
+
+  current_system_leds_enabled_ = observed_enabled;
+  last_tx_system_leds_enabled_ = observed_enabled;
+  system_led_state_known_ = true;
+  for (auto &callback : system_led_state_callbacks_) {
+    callback(current_system_leds_enabled_);
+  }
+  ESP_LOGI(TAG, "[Sniffed] Live monitor LEDs %s", current_system_leds_enabled_ ? "enabled" : "disabled");
+}
+
 void GenSAMHub::snoop_mute_(const Frame &frame) {
   if (frame.command != CMD_BYPASS || frame.payload.empty()) {
     return;
@@ -116,10 +184,6 @@ void GenSAMHub::snoop_crossover_(const Frame &frame) {
   uint16_t freq = (static_cast<uint16_t>(frame.payload[0]) << 8) | frame.payload[1];
   char buf[CROSSOVER_STR_SIZE];
   crossover_to_str(freq, buf, sizeof(buf));
-
-  // An external controller has moved the crossover off what the active group specified; the
-  // same deviation a hand override creates. See set_group_modified().
-  this->set_group_modified(true);
 
   if (frame.address == MULTICAST_ADDRESS || frame.address == BROADCAST_ADDRESS) {
     for (auto &kv : registry_.monitors()) {
@@ -193,9 +257,6 @@ void GenSAMHub::snoop_audio_source_(const Frame &frame) {
                        (src == SOURCE_DIGITAL_AES3 && mon->binding->aes3_channel != ch);
   registry_.set_input(*mon, src, ch);
   if (changed) {
-    // Someone else moved a speaker off what the active group specified, the same deviation a
-    // hand override creates; see set_group_modified().
-    this->set_group_modified(true);
     ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X input set to %s", frame.address,
              input_to_str(src, ch));
   }
@@ -264,7 +325,6 @@ void GenSAMHub::snoop_dsp_(const Frame &frame) {
                          volume_db_to_int24(b->level_db) != volume_db_to_int24(db);
     registry_.set_level(*mon, db);
     if (changed) {
-      this->set_group_modified(true);
       ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X level trim set to %.1f dB", frame.address, db);
     }
     return;
@@ -283,7 +343,6 @@ void GenSAMHub::snoop_dsp_(const Frame &frame) {
   const bool changed = b == nullptr || !b->delay_configured || b->delay_samples != samples;
   registry_.set_delay(*mon, samples);
   if (changed) {
-    this->set_group_modified(true);
     ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X delay set to %u samples (%.2f ms)", frame.address,
              (unsigned) samples, delay_samples_to_ms(samples));
   }

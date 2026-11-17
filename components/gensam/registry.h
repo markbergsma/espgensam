@@ -27,10 +27,11 @@
 ///
 /// 3. Online State & Staleness:
 ///    A monitor is "online" from the moment any valid frame is attributed to it until it has
-///    failed to respond for the staleness window.  Both transitions publish the online binary
-///    sensor.  Transitions are reported back to the caller rather than acted on here, because
-///    the derived system-wide mute state belongs to the hub, and evaluating it midway through
-///    a batch of offline transitions would publish spurious intermediate states.
+///    failed to respond for the staleness window. When monitoring is deliberately paused, the
+///    online binary sensor is invalidated instead: lack of observation is not proof of offline.
+///    Transitions are reported back to the caller rather than acted on here, because the derived
+///    system-wide mute state belongs to the hub, and evaluating it midway through a batch of
+///    offline transitions would publish spurious intermediate states.
 /// ===================================================================================
 
 #include <cstdint>
@@ -87,12 +88,18 @@ class MonitorRegistry {
   /// @return Pointer to the matching binding, or nullptr if no binding matches.
   GenSAMMonitorBinding *find_binding_by_serial_or_id(const std::string &serial_or_id);
 
-  /// @brief Match a monitor against the configured bindings and attach the first match.
+  /// @brief Match a monitor against its configured binding.
   ///
   /// On a successful match the monitor adopts the binding's serial number if it has none yet,
-  /// and its metadata, online, crossover, and AES3 entities are published.  No-op if already bound.
+  /// and its metadata, online, crossover, and AES3 entities are published.
   /// @param mon The monitor to bind.
   void bind_if_matched(GenSAMMonitor &mon);
+
+  /// @brief Bind discovered monitors to fixed entity slots in stable hardware-ID order.
+  ///
+  /// Existing slot assignments are retained across rediscovery; unassigned monitors take the
+  /// next free slot. Monitors without slots remain available to uploaded groups.
+  void assign_discovery_slots();
 
   /// @brief Record that a monitor responded, refreshing its staleness timer.
   /// @param mon The monitor that was seen.
@@ -121,9 +128,15 @@ class MonitorRegistry {
   /// @param mon The monitor whose metadata to publish.
   void publish_metadata(const GenSAMMonitor &mon);
 
+  /// @brief Replace SAM speaker names and publish them to currently discovered bindings.
+  /// @param names SAM setup names keyed by stable GLM hardware ID.
+  void set_sam_monitor_names(const std::map<uint32_t, std::string> &names);
+
   /// @brief Publish temperature, input level, output level, and online state to bound sensors.
   /// @param mon The monitor whose telemetry to publish.
   void publish_telemetry(const GenSAMMonitor &mon);
+  /// @brief Mark measured telemetry and online status unknown while monitoring is paused.
+  void publish_stale_telemetry();
 
   /// @brief Publish a monitor's online state to its bound binary sensor.
   /// @param mon The monitor whose online state to publish.
@@ -228,6 +241,9 @@ class MonitorRegistry {
 
   /// Configured bindings; pointer-stable for the component's lifetime (see rationale §2).
   std::vector<GenSAMMonitorBinding> bindings_;
+
+  /// Names from the active runtime setup, keyed by stable GLM hardware ID.
+  std::map<uint32_t, std::string> sam_monitor_names_;
 };
 
 }  // namespace gensam

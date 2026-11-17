@@ -1,13 +1,13 @@
-"""Minimal Home Assistant WebSocket client for one media_player entity.
+"""Minimal Home Assistant WebSocket client for Genelec volume, mute, and power entities.
 
-It keeps a live copy of the entity's state through `subscribe_entities`, which is filtered on
+It keeps live copies of the entities' states through `subscribe_entities`, which is filtered on
 the server and delivers the initial state followed by compressed diffs. It also issues the few
 service calls the bridge needs.
 
 Volume writes are coalesced on a latest-value-wins basis. A held volume key can produce a step
 every few hundred milliseconds, faster than a round trip through HA and the RS-485 bus, so
 each step is computed from a local target rather than from the last reported state. At most one
-volume_set is in flight; when it completes, the newest target is sent if it changed meanwhile.
+number.set_value call is in flight; when it completes, the newest target is sent if it changed meanwhile.
 The target is dropped once HA reports it back, or after a short idle period, after which the
 reported state is authoritative again.
 """
@@ -35,17 +35,22 @@ class AuthError(Exception):
 
 
 class HomeAssistant:
-    def __init__(self, url: str, token: str, entity_id: str):
+    def __init__(self, url: str, token: str, volume_entity_id: str,
+                 mute_entity_id: str, power_entity_id: str):
         self.url = url
         self.token = token
-        self.entity_id = entity_id
+        self.volume_entity_id = volume_entity_id
+        self.mute_entity_id = mute_entity_id
+        self.power_entity_id = power_entity_id
+        self.entity_ids = [volume_entity_id, mute_entity_id, power_entity_id]
         self.on_change: Callable[[], None] = lambda: None
 
         self._ws: ClientConnection | None = None
         self._ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
-        self._state: str | None = None
-        self._attrs: dict = {}
+        self._entities: dict[str, dict] = {
+            entity_id: {"state": None, "attrs": {}} for entity_id in self.entity_ids
+        }
         self._tasks: set[asyncio.Task] = set()
 
         self._target_level: float | None = None
@@ -58,21 +63,47 @@ class HomeAssistant:
 
     @property
     def available(self):
-        return self._ws is not None and self._state not in (None, "unavailable", "unknown")
+        return self._ws is not None and self._state(self.volume_entity_id) is not None
 
     @property
     def is_off(self):
-        return self._state == "off"
+        return self._state(self.power_entity_id) == "off"
+
+    def _state(self, entity_id):
+        state = self._entities[entity_id]["state"]
+        return None if state in (None, "unavailable", "unknown") else state
+
+    def _volume_bounds(self):
+        attrs = self._entities[self.volume_entity_id]["attrs"]
+        try:
+            min_db = float(attrs["min"])
+            max_db = float(attrs["max"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if max_db <= min_db:
+            return None
+        return min_db, max_db
 
     @property
     def level(self) -> float | None:
-        """Volume 0..1: the pending target if there is one, else what HA last reported."""
+        """Volume 0..1 mapped across the number entity's configured dB range."""
         if self._target_level is not None and (
                 self._level_in_flight or time.monotonic() - self._target_level_at < TARGET_HOLD_S):
             return self._target_level
         self._target_level = None
-        level = self._attrs.get("volume_level")
-        return float(level) if level is not None else None
+        return self._reported_level()
+
+    def _reported_level(self):
+        state = self._state(self.volume_entity_id)
+        bounds = self._volume_bounds()
+        if state is None or bounds is None:
+            return None
+        try:
+            db = float(state)
+        except (TypeError, ValueError):
+            return None
+        min_db, max_db = bounds
+        return min(max((db - min_db) / (max_db - min_db), 0.0), 1.0)
 
     @property
     def muted(self) -> bool | None:
@@ -80,12 +111,19 @@ class HomeAssistant:
                 time.monotonic() - self._target_muted_at < TARGET_HOLD_S:
             return self._target_muted
         self._target_muted = None
-        muted = self._attrs.get("is_volume_muted")
-        return bool(muted) if muted is not None else None
+        return self._reported_muted()
+
+    def _reported_muted(self):
+        state = self._state(self.mute_entity_id)
+        return state == "on" if state is not None else None
 
     # --- Commands ---
 
     def set_level(self, level: float):
+        if self._volume_bounds() is None:
+            log.warning("%s has no valid dB range; ignoring volume command",
+                        self.volume_entity_id)
+            return
         self._target_level = round(min(max(level, 0.0), 1.0), 4)
         self._target_level_at = time.monotonic()
         if not self._level_in_flight:
@@ -94,20 +132,28 @@ class HomeAssistant:
     def set_muted(self, muted: bool):
         self._target_muted = muted
         self._target_muted_at = time.monotonic()
-        self._spawn(self._call("volume_mute", {"is_volume_muted": muted}))
+        service = "turn_on" if muted else "turn_off"
+        self._spawn(self._call("switch", service, self.mute_entity_id))
 
     def turn_on(self):
-        self._spawn(self._call("turn_on"))
+        self._spawn(self._call("switch", "turn_on", self.power_entity_id))
 
     def turn_off(self):
-        self._spawn(self._call("turn_off"))
+        self._spawn(self._call("switch", "turn_off", self.power_entity_id))
 
     async def _flush_level(self):
         self._level_in_flight = True
         try:
             while self._target_level is not None:
                 sent = self._target_level
-                await self._call("volume_set", {"volume_level": sent})
+                bounds = self._volume_bounds()
+                if bounds is None:
+                    log.warning("%s has no valid dB range; dropping volume command",
+                                self.volume_entity_id)
+                    break
+                min_db, max_db = bounds
+                db = min_db + sent * (max_db - min_db)
+                await self._call("number", "set_value", self.volume_entity_id, {"value": db})
                 if self._target_level == sent:
                     break
         finally:
@@ -123,31 +169,33 @@ class HomeAssistant:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _call(self, service, data=None):
+    async def _call(self, domain, service, entity_id, data=None):
         ws = self._ws
         if ws is None:
-            log.warning("Home Assistant not connected; dropping media_player.%s", service)
+            log.warning("Home Assistant not connected; dropping %s.%s for %s",
+                        domain, service, entity_id)
             return False
         msg_id = next(self._ids)
         fut = asyncio.get_running_loop().create_future()
         self._pending[msg_id] = fut
         try:
             await ws.send(json.dumps({
-                "id": msg_id, "type": "call_service", "domain": "media_player",
+                "id": msg_id, "type": "call_service", "domain": domain,
                 "service": service, "service_data": data or {},
-                "target": {"entity_id": self.entity_id},
+                "target": {"entity_id": entity_id},
             }))
             result = await asyncio.wait_for(fut, CALL_TIMEOUT_S)
         except (ConnectionClosed, ConnectionError, asyncio.TimeoutError) as e:
-            log.warning("media_player.%s %s: %s", service, data or "", type(e).__name__)
+            log.warning("%s.%s for %s %s: %s", domain, service, entity_id,
+                        data or "", type(e).__name__)
             return False
         finally:
             self._pending.pop(msg_id, None)
         if not result.get("success"):
-            log.warning("media_player.%s %s failed: %s", service, data or "",
+            log.warning("%s.%s for %s %s failed: %s", domain, service, entity_id, data or "",
                         result.get("error", {}).get("message"))
             return False
-        log.debug("media_player.%s %s ok", service, data or "")
+        log.debug("%s.%s for %s %s ok", domain, service, entity_id, data or "")
         return True
 
     # --- Connection ---
@@ -185,7 +233,7 @@ class HomeAssistant:
 
         sub_id = next(self._ids)
         await ws.send(json.dumps({"id": sub_id, "type": "subscribe_entities",
-                                  "entity_ids": [self.entity_id]}))
+                                  "entity_ids": self.entity_ids}))
         self._ws = ws
         initial = True
         async for raw in ws:
@@ -200,16 +248,19 @@ class HomeAssistant:
                     fut.set_result(msg)
             elif msg.get("type") == "event" and msg.get("id") == sub_id:
                 event = msg.get("event", {})
-                if initial and self.entity_id not in event.get("a", {}):
-                    log.error("%s does not exist in Home Assistant", self.entity_id)
+                if initial:
+                    for entity_id in self.entity_ids:
+                        if entity_id not in event.get("a", {}):
+                            log.error("%s does not exist in Home Assistant", entity_id)
                 initial = False
                 self._apply(event)
 
     def _disconnected(self):
         was_available = self.available
         self._ws = None
-        self._state = None
-        self._attrs = {}
+        for entity in self._entities.values():
+            entity["state"] = None
+            entity["attrs"] = {}
         for fut in self._pending.values():
             if not fut.done():
                 fut.set_exception(ConnectionError("disconnected"))
@@ -219,36 +270,38 @@ class HomeAssistant:
 
     def _apply(self, event):
         """Apply a subscribe_entities message: "a" adds, "c" changes, "r" removes."""
-        added = event.get("a", {}).get(self.entity_id)
-        if added is not None:
-            self._state = added.get("s")
-            self._attrs = dict(added.get("a", {}))
-            log.info("%s is %s, volume %s, muted %s", self.entity_id, self._state,
-                     self._attrs.get("volume_level"), self._attrs.get("is_volume_muted"))
-        changed = event.get("c", {}).get(self.entity_id)
-        if changed is not None:
-            plus = changed.get("+", {})
-            if "s" in plus:
-                self._state = plus["s"]
-            self._attrs.update(plus.get("a", {}))
-            for key in changed.get("-", {}).get("a", []):
-                self._attrs.pop(key, None)
-        removed = self.entity_id in event.get("r", [])
-        if removed:
-            log.warning("%s was removed from Home Assistant", self.entity_id)
-            self._state = None
-            self._attrs = {}
-        if added is None and changed is None and not removed:
+        changed_any = False
+        for entity_id in self.entity_ids:
+            added = event.get("a", {}).get(entity_id)
+            if added is not None:
+                self._entities[entity_id] = {
+                    "state": added.get("s"),
+                    "attrs": dict(added.get("a", {})),
+                }
+                changed_any = True
+            changed = event.get("c", {}).get(entity_id)
+            if changed is not None:
+                plus = changed.get("+", {})
+                if "s" in plus:
+                    self._entities[entity_id]["state"] = plus["s"]
+                self._entities[entity_id]["attrs"].update(plus.get("a", {}))
+                for key in changed.get("-", {}).get("a", []):
+                    self._entities[entity_id]["attrs"].pop(key, None)
+                changed_any = True
+            if entity_id in event.get("r", []):
+                log.warning("%s was removed from Home Assistant", entity_id)
+                self._entities[entity_id] = {"state": None, "attrs": {}}
+                changed_any = True
+        if not changed_any:
             return
         self._reconcile()
         self.on_change()
 
     def _reconcile(self):
         """Drop local targets that HA has caught up with."""
-        reported = self._attrs.get("volume_level")
+        reported = self._reported_level()
         if (self._target_level is not None and not self._level_in_flight and reported is not None
-                and abs(float(reported) - self._target_level) < 0.005):
+                and abs(reported - self._target_level) < 0.005):
             self._target_level = None
-        if self._target_muted is not None and \
-                self._attrs.get("is_volume_muted") == self._target_muted:
+        if self._target_muted is not None and self._reported_muted() == self._target_muted:
             self._target_muted = None

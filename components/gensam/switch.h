@@ -1,12 +1,17 @@
 #pragma once
 
 /// @file switch.h
-/// @brief ESPHome Switch entity implementations for Genelec SAM mute and calibration bypass.
+/// @brief ESPHome Switch entities for Genelec SAM system power, mute, monitor LEDs, and calibration bypass.
 ///
 /// ===================================================================================
 /// ARCHITECTURAL DESIGN RATIONALE
 /// ===================================================================================
-/// 1. Per-Speaker Mute Control (GenSAMMuteSwitch):
+/// 1. System Power (GenSAMSystemPowerSwitch):
+///    Exposes the hub's active/standby state as a conventional power switch: on means awake,
+///    off means amplifier standby. State follows both local commands and passively observed
+///    power changes.
+///
+/// 2. Per-Speaker Mute Control (GenSAMMuteSwitch):
 ///    Genelec SAM monitors support individual acoustic muting via the proprietary RS-485
 ///    CMD_BYPASS (0x2B) frame directed unicast to each monitor address.
 ///    - When muted (state = true), bit 0 (BYPASS_MUTE_MASK) is asserted and the front LED
@@ -15,12 +20,16 @@
 ///    - When unmuted (state = false), bit 0 is cleared and the front LED is restored
 ///      to normal operation (LED_OFF << 1 = 0x04).
 ///
-/// 2. Bidirectional State Synchronization:
+/// 3. Bidirectional State Synchronization:
 ///    The switch reflects both locally initiated mute toggles (via Home Assistant) and
 ///    remote changes made through the Genelec GLM software or GLM volume controller
 ///    which are snooped passively on the RS-485 bus.
 ///
-/// 3. Bypass Calibration (GenSAMCalibrationBypassSwitch, GenSAMMonitorCalibrationBypassSwitch):
+/// 4. Monitor LEDs (GenSAMSystemLEDSwitch):
+///    Controls the live front-LED state using CMD_BYPASS (0x2B), independently of the stored ISS
+///    LED preference. GLM's live 0x2B frames and stored 0x3A 06 frames both update the switch.
+///
+/// 5. Bypass Calibration (GenSAMCalibrationBypassSwitch, GenSAMMonitorCalibrationBypassSwitch):
 ///    GLM's "Calibrated" button, which reads "Cal bypassed" while pressed. Its manual (GLM 5,
 ///    section 6.8 and FAQ 11.4) says bypass temporarily sets the equalization, the level
 ///    calibration, the time-of-flight delay and the system delay to defaults that have no
@@ -50,6 +59,72 @@
 
 namespace esphome {
 namespace gensam {
+
+/// @brief Switch controlling system power; on means the monitors are awake.
+class GenSAMSystemPowerSwitch : public switch_::Switch {
+ public:
+  /// @brief Register the hub and synchronize with its reported power state.
+  /// @param hub Parent hub.
+  void set_hub(GenSAMHub *hub) {
+    hub_ = hub;
+    hub_->add_state_callback([this](float, bool, bool standby) { this->publish_state(!standby); });
+    this->publish_state(!hub_->is_standby());
+  }
+
+ protected:
+  void write_state(bool state) override {
+    if (hub_ != nullptr) {
+      hub_->set_standby(!state);
+      this->publish_state(!hub_->is_standby());
+    }
+  }
+
+  GenSAMHub *hub_{nullptr};
+};
+
+/// @brief Switch controlling system-wide mute through the hub's deferred write path.
+class GenSAMSystemMuteSwitch : public switch_::Switch {
+ public:
+  /// @brief Register the hub and synchronize with its reported mute state.
+  /// @param hub Parent hub.
+  void set_hub(GenSAMHub *hub) {
+    hub_ = hub;
+    hub_->add_state_callback([this](float, bool muted, bool) { this->publish_state(muted); });
+  }
+
+ protected:
+  void write_state(bool state) override {
+    if (hub_ != nullptr) {
+      hub_->set_group_mute(state);
+      this->publish_state(hub_->is_muted());
+    }
+  }
+
+  GenSAMHub *hub_{nullptr};
+};
+
+/// @brief Switch controlling whether the monitors' front LEDs are enabled.
+class GenSAMSystemLEDSwitch : public switch_::Switch {
+ public:
+  /// @brief Register the hub and synchronize with its known LED setting.
+  /// @param hub Parent hub.
+  void set_hub(GenSAMHub *hub) {
+    hub_ = hub;
+    hub_->add_system_led_state_callback([this](bool enabled) { this->publish_state(enabled); });
+    if (hub_->is_system_led_state_known()) {
+      this->publish_state(hub_->are_system_leds_enabled());
+    }
+  }
+
+ protected:
+  void write_state(bool state) override {
+    if (hub_ != nullptr) {
+      hub_->set_system_leds_enabled(state);
+    }
+  }
+
+  GenSAMHub *hub_{nullptr};
+};
 
 /// @brief Switch entity that controls per-speaker muting and status LED state.
 class GenSAMMuteSwitch : public switch_::Switch {
