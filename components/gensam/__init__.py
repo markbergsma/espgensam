@@ -360,7 +360,7 @@ def _validate_monitor(conf):
 
     for key, (suffix, *_rest) in EXTENDED_TELEMETRY_SENSORS.items():
         if key not in conf:
-            c = {CONF_NAME: f"{prefix}{suffix}", CONF_DISABLED_BY_DEFAULT: True}
+            c = {CONF_NAME: f"{prefix}{suffix}"}
             if dev_id:
                 c[CONF_DEVICE_ID] = dev_id
             conf[key] = _extended_telemetry_schema(key)(c)

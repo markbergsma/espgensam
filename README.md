@@ -61,8 +61,11 @@ needed. On the device web page (web server version 3) each monitor gets its own 
 after the monitor, holding all of its entities: mute, input, bypass, crossover, level and delay
 first, then online status, input level, output level, temperature, model, serial number,
 firmware version, hardware ID, identify and SAM name. Diagnostic tweeter, midrange and woofer
-coil temperatures, main and low supply voltages, and processor load are also created, disabled by default; each stays
-unknown on models that do not report it (supply rails come from three-way models only, processor load from firmware 1.12 onwards). Cards follow the System Controls and
+coil temperatures, main and low supply voltages, and processor load are also created and enabled
+by default; each stays unknown on models that do not report it (supply rails come from three-way
+models only, processor load from firmware 1.12 onwards). Previously registered disabled entities
+must be enabled in Home Assistant; firmware updates do not change their registry settings.
+Cards follow the System Controls and
 Group Preset sections in slot order. Entities on a sub-device use short names such as
 `Temperature`; ESPHome displays the device name alongside them. Switching an existing slot to
 these names may create new Home Assistant entities, so check dashboards and automations.

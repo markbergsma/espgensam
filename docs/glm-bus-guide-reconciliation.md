@@ -56,9 +56,10 @@ cover it. Both failed against the unfixed parser.
 | `0x89` | Low-voltage rail (about 22 V), as a percentage of its span | `Low Supply Voltage` |
 | `0x84` | Processor load, the whole 16-bit word in per mille (`02 B3` = 69.1 %) | `Processor Load` |
 
-These are diagnostic sensors, disabled by default. A sensor stays *unknown* if the speaker never
-reports its tag. Two-way models have no midrange tag, only three-way models report the
-supply rails, and `0x84` exists from firmware 1.12 onwards (guide §6.7, §8).
+These diagnostic sensors are enabled by default. Previously registered disabled entities must be
+enabled in Home Assistant. A sensor stays *unknown* if the speaker never reports its tag. Two-way
+models have no midrange tag, only three-way models report the supply rails, and `0x84` exists from
+firmware 1.12 onwards (guide §6.7, §8).
 
 `0x84` also explains the device-class reading in comparison doc §4.2. Each class's load falls in
 its own range, so the high byte alone sorts speakers: `01` subwoofer, `02` two- and three-way,

@@ -308,6 +308,40 @@ def test_runtime_upload_exposes_calibration_bypass():
           "the runtime uploader exposes the system calibration bypass")
 
 
+def test_monitor_diagnostics_are_enabled_by_default():
+    CORE.unique_ids = {}
+    static_monitor = gensam.MONITOR_SCHEMA({gensam.CONF_NAME: "Static"})
+    static_config = validate_hub({
+        gensam.CONF_MONITORS: [static_monitor],
+        gensam.CONF_SAM_UPLOAD: {},
+    })
+    discovery_config = validate_hub({
+        gensam.CONF_DISCOVERY_SLOTS: 2,
+        gensam.CONF_SAM_UPLOAD: {},
+    })
+    monitors = static_config[gensam.CONF_MONITORS] + discovery_config[gensam.CONF_MONITORS]
+    for monitor in monitors:
+        for key in gensam.MONITOR_DIAGNOSTICS:
+            entity = monitor.get(key)
+            check(entity is not None
+                  and str(entity.get("entity_category")) == "diagnostic"
+                  and not entity.get(gensam.CONF_DISABLED_BY_DEFAULT, True),
+                  f"{monitor[gensam.CONF_NAME]} {key} is an enabled-by-default diagnostic")
+
+
+def test_explicit_diagnostic_disable_is_preserved():
+    CORE.unique_ids = {}
+    monitor = gensam.MONITOR_SCHEMA({
+        gensam.CONF_NAME: "Explicit",
+        gensam.CONF_PROCESSOR_LOAD: {
+            gensam.CONF_NAME: "Custom Processor Load",
+            gensam.CONF_DISABLED_BY_DEFAULT: True,
+        },
+    })
+    check(monitor[gensam.CONF_PROCESSOR_LOAD][gensam.CONF_DISABLED_BY_DEFAULT],
+          "an explicitly disabled diagnostic keeps its configured setting")
+
+
 def test_discovery_slots_create_fixed_per_monitor_entities():
     for count in (0, 1, 2, 16, 32):
         config = validate_hub({
