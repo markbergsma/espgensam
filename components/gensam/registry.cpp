@@ -251,6 +251,8 @@ void MonitorRegistry::publish_metadata(const GenSAMMonitor &mon) {
   if (mon.binding->hardware_id_sensor != nullptr && mon.unique_id != 0) {
     mon.binding->hardware_id_sensor->publish_state(std::to_string(mon.unique_id));
   }
+  // The decoding depends on the model, which may arrive after a sniffed DIP reply.
+  this->publish_dip_switch_status(mon);
 }
 
 void MonitorRegistry::set_sam_monitor_names(const std::map<uint32_t, std::string> &names) {
@@ -288,6 +290,14 @@ void MonitorRegistry::publish_telemetry(const GenSAMMonitor &mon) {
     }
   }
   this->publish_online(mon);
+}
+
+void MonitorRegistry::publish_dip_switch_status(const GenSAMMonitor &mon) {
+  if (mon.binding == nullptr || mon.binding->dip_switch_status_sensor == nullptr ||
+      !mon.dip_switches_known) {
+    return;
+  }
+  mon.binding->dip_switch_status_sensor->publish_state(describe_dip_switches(mon));
 }
 
 void MonitorRegistry::publish_online(const GenSAMMonitor &mon) {

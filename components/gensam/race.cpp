@@ -231,6 +231,8 @@ void GenSAMHub::complete_rid_assignment_(uint8_t address) {
 void GenSAMHub::advance_device_query_() {
   if (current_query_cmd_ == CMD_SOFTWARE_QUERY) {
     current_query_cmd_ = CMD_BAR_CODE;
+  } else if (current_query_cmd_ == CMD_BAR_CODE) {
+    current_query_cmd_ = CMD_DIP_SWITCH;
   } else {
     current_query_cmd_ = CMD_SOFTWARE_QUERY;
     current_poll_index_++;
@@ -306,13 +308,29 @@ bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
     }
 
     case RaceState::QUERYING_DEVICES: {
+      const bool dip_reply = current_query_cmd_ == CMD_DIP_SWITCH &&
+                             (frame.command == CMD_DIP_SWITCH ||
+                              frame.command == CMD_REPORT_STATUS);
+      const bool metadata_reply = current_query_cmd_ != CMD_DIP_SWITCH &&
+                                 (frame.command == CMD_REPORT_STATUS ||
+                                  frame.command == CMD_SOFTWARE_QUERY_SHORT ||
+                                  frame.command == CMD_SOFTWARE_QUERY ||
+                                  frame.command == CMD_BAR_CODE);
       if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS || frame.payload.empty() ||
-          (frame.command != CMD_REPORT_STATUS && frame.command != CMD_SOFTWARE_QUERY_SHORT &&
-           frame.command != CMD_SOFTWARE_QUERY && frame.command != CMD_BAR_CODE)) {
+          (!dip_reply && !metadata_reply)) {
         return false;
       }
       GenSAMMonitor &mon = registry_.get_or_create(current_query_addr_);
-      if (current_query_cmd_ == CMD_BAR_CODE) {
+      if (current_query_cmd_ == CMD_DIP_SWITCH) {
+        if (!parse_dip_switch_status(frame.payload.data(), frame.payload.size(), mon)) {
+          ESP_LOGW(TAG, "Monitor 0x%02X returned no usable DIP status", current_query_addr_);
+        } else {
+          ESP_LOGI(TAG, "Monitor 0x%02X DIP words: current=0x%08lX previous=0x%08lX word3=0x%08lX",
+                   current_query_addr_, static_cast<unsigned long>(mon.dip_word),
+                   static_cast<unsigned long>(mon.previous_dip_word),
+                   static_cast<unsigned long>(mon.dip_auxiliary_word));
+        }
+      } else if (current_query_cmd_ == CMD_BAR_CODE) {
         parse_barcode(frame.payload.data(), frame.payload.size(), mon);
         ESP_LOGI(TAG, "Discovered serial for 0x%02X: %s", current_query_addr_, mon.serial_number.c_str());
       } else {
@@ -485,7 +503,7 @@ void GenSAMHub::race_step_set_rid_(uint32_t now) {
 
 void GenSAMHub::race_step_querying_(uint32_t now) {
   if (current_query_addr_ != 0 && now - race_step_time_ > DEVICE_QUERY_TIMEOUT_MS) {
-    if (query_retries_ < DEVICE_QUERY_MAX_RETRIES) {
+    if (current_query_cmd_ != CMD_DIP_SWITCH && query_retries_ < DEVICE_QUERY_MAX_RETRIES) {
       // Re-ask the same monitor the same question: clearing the address alone leaves the poll
       // cursor and current_query_cmd_ untouched, so the block below resends it.
       query_retries_++;
@@ -495,8 +513,10 @@ void GenSAMHub::race_step_querying_(uint32_t now) {
       current_query_addr_ = 0;
     } else {
       ESP_LOGW(TAG, "Monitor 0x%02X did not answer cmd 0x%02X after %u attempts; skipping",
-               current_query_addr_, current_query_cmd_, (unsigned)DEVICE_QUERY_MAX_RETRIES + 1);
-      // Give up on this question and advance (info -> barcode -> next monitor)
+               current_query_addr_, current_query_cmd_,
+               current_query_cmd_ == CMD_DIP_SWITCH ? 1U : (unsigned)DEVICE_QUERY_MAX_RETRIES + 1);
+      // DIP status is optional and gets one attempt; identity queries are retried.
+      // Advance (info -> barcode -> DIP status -> next monitor).
       this->advance_device_query_();
     }
   }

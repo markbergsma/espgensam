@@ -30,6 +30,7 @@ void GenSAMHub::snoop_addressing_(const Frame &frame) {
     // Remember the outstanding query so snoop_host_reply_ can attribute the answer.
     last_queried_addr_ = frame.address;
     last_queried_cmd_ = frame.command;
+    last_queried_dip_status_ = is_dip_switch_status_query(frame);
     return;
   }
 
@@ -349,12 +350,37 @@ void GenSAMHub::snoop_dsp_(const Frame &frame) {
 }
 
 void GenSAMHub::snoop_host_reply_(const Frame &frame) {
-  if (frame.address != HOST_ADDRESS || frame.command != CMD_REPORT_STATUS || last_queried_addr_ == 0) {
+  if (frame.address != HOST_ADDRESS || last_queried_addr_ == 0) {
     return;
   }
 
   // Attribute the reply to the query snoop_addressing_ last saw go out on the bus.
   uint8_t queried_cmd = last_queried_cmd_;
+  if (queried_cmd == CMD_DIP_SWITCH) {
+    if (!last_queried_dip_status_ ||
+        (frame.command != CMD_DIP_SWITCH && frame.command != CMD_REPORT_STATUS) ||
+        frame.payload.empty()) {
+      return;
+    }
+    GenSAMMonitor &mon = registry_.get_or_create(last_queried_addr_);
+    if (!parse_dip_switch_status(frame.payload.data(), frame.payload.size(), mon)) {
+      ESP_LOGW(TAG, "[Sniffed] Monitor 0x%02X returned malformed DIP status", last_queried_addr_);
+    } else {
+      ESP_LOGI(TAG, "[Sniffed] Monitor 0x%02X DIP words: current=0x%08lX previous=0x%08lX word3=0x%08lX",
+               last_queried_addr_, static_cast<unsigned long>(mon.dip_word),
+               static_cast<unsigned long>(mon.previous_dip_word),
+               static_cast<unsigned long>(mon.dip_auxiliary_word));
+    }
+    this->mark_monitor_seen_(mon);
+    registry_.bind_if_matched(mon);
+    registry_.publish_dip_switch_status(mon);
+    last_queried_cmd_ = 0;
+    last_queried_dip_status_ = false;
+    return;
+  }
+  if (frame.command != CMD_REPORT_STATUS) {
+    return;
+  }
   if (queried_cmd != CMD_SOFTWARE_QUERY && queried_cmd != CMD_BAR_CODE && queried_cmd != CMD_QUERY_STATUS) {
     return;
   }

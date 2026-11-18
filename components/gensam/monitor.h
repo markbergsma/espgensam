@@ -136,6 +136,7 @@ struct GenSAMMonitorBinding {
   sensor::Sensor *psu_main_voltage_sensor{nullptr};    ///< Main supply rail sensor (V).
   sensor::Sensor *psu_low_voltage_sensor{nullptr};     ///< Low-voltage supply rail sensor (V).
   sensor::Sensor *processor_load_sensor{nullptr};      ///< DSP processor load sensor (%).
+  text_sensor::TextSensor *dip_switch_status_sensor{nullptr}; ///< Decoded current DIP switch positions.
 };
 
 /// @brief Represents a single Genelec SAM monitor or subwoofer discovered on the RS-485 bus.
@@ -157,6 +158,10 @@ struct GenSAMMonitor {
   float psu_main_voltage{NAN};      ///< Main DC supply rail (V, tag 0x88, three-way only).
   float psu_low_voltage{NAN};       ///< Low-voltage supply rail (V, tag 0x89, three-way only).
   float processor_load{NAN};        ///< DSP processor load (%, tag 0x84, firmware 1.12+).
+  uint32_t dip_word{0};              ///< Current 55 84 DIP word, big-endian.
+  uint32_t previous_dip_word{0};    ///< Previous 55 84 DIP word, big-endian.
+  uint32_t dip_auxiliary_word{0};   ///< Third 55 84 word; meaning varies by model.
+  bool dip_switches_known{false};   ///< True after a valid CMD_DIP_SWITCH 0x84 reply.
   bool mute{false};                 ///< Channel mute state (CMD_BYPASS bit 0).
   bool system_leds_enabled{true};    ///< Front LED state, when system_leds_known is true.
   bool system_leds_known{false};     ///< True once a live or stored LED setting was observed.
@@ -216,6 +221,33 @@ bool parse_barcode(const uint8_t *data, size_t len, GenSAMMonitor &monitor);
 /// @param[out] monitor Target monitor struct to update with temperature, signal levels, and standby state.
 /// @return True if any field was parsed; false for a null/empty buffer or a marker-only payload.
 bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor);
+
+/// @brief Parse the three big-endian words returned by CMD_DIP_SWITCH / DIPSW_READ_STATUS.
+/// @param data Reply payload, either the 0x84 selector followed by 12 bytes or just the 12 words.
+/// @param len Payload length in bytes.
+/// @param[out] monitor Target monitor to update.
+/// @return True when all three words were present; false for malformed input.
+bool parse_dip_switch_status(const uint8_t *data, size_t len, GenSAMMonitor &monitor);
+
+/// @brief Decode the monitor's current DIP word into switch labels for its model family.
+///
+/// The bit layout depends on the model (Genelec GLM bus decoding guide v3.0, sections 6.5 and
+/// 6.7.1). Each switch is its own bit; paired switches whose effects add are shown as their sum.
+/// - SAM monitors (8320A, 8330A, 8331A, 8340A, 8341A, 8350A, 8351A/B, 8361A, 1032C, S360A) share
+///   the section 6.5 table. The guide confirms it on the 8320A/8330A software word and on the
+///   8340A/8350A/8341A panels; the other models carry the same 14-switch panel in their manuals.
+/// - SAM subwoofers (7350A, 7360A, 7370A, 7380A, 7382A) share the 7350A table of section 6.7.1.
+///   The 7360A/7370A/7380A panels carry the same functions, but the guide has not confirmed their
+///   bit positions on the bus.
+/// - On the three-way monitors with a rotary level control (8331A, 8341A, 8351A/B, 8361A) the
+///   third word is the knob position in 0.1 dB steps, 10 * (dB + 6).
+/// - Bits 31 and 30 are the status flags of guide section 6.7.2 ("switches not valid or stored",
+///   read in that order: bit 31 = not valid, bit 30 = stored), decoded on both families.
+/// Bits the table does not define are shown as unknown.
+/// @param monitor Monitor with a parsed DIP reply and, ideally, a discovered model.
+/// @return Human-readable status, a raw word for an unrecognised model, or an empty string when
+///         no DIP reply has been parsed.
+std::string describe_dip_switches(const GenSAMMonitor &monitor);
 
 }  // namespace gensam
 }  // namespace esphome

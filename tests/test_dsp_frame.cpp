@@ -66,6 +66,7 @@ using esphome::gensam::make_audio_source;
 using esphome::gensam::make_delay;
 using esphome::gensam::make_lfe_level;
 using esphome::gensam::make_level;
+using esphome::gensam::make_query;
 using esphome::gensam::parse_dsp_delay;
 using esphome::gensam::parse_dsp_level;
 using esphome::gensam::Uart9BitChar;
@@ -141,6 +142,21 @@ void test_monitor_led_frames() {
   check(commit.address == 0x03 && commit.command == esphome::gensam::CMD_SERVICE &&
             commit.payload == std::vector<uint8_t>({0x33, 0x00}),
         "stored LED setting is committed with 0x15 33 00");
+}
+
+void test_dip_switch_query() {
+  const Frame query = make_query(0x04, esphome::gensam::CMD_DIP_SWITCH);
+  check(query.address == 0x04 && query.command == esphome::gensam::CMD_DIP_SWITCH &&
+            query.payload == std::vector<uint8_t>({esphome::gensam::DIPSW_READ_STATUS}),
+        "DIP status query carries selector 0x84");
+  check(is_dip_switch_status_query(query), "55 84 is recognized as a DIP status query");
+  check(!is_dip_switch_status_query(Frame(0x04, esphome::gensam::CMD_DIP_SWITCH, {0x87})),
+        "55 87 is not recognized as a DIP status query");
+  check(!is_dip_switch_status_query(Frame(0x04, esphome::gensam::CMD_DIP_SWITCH)),
+        "55 without a selector is not recognized as a DIP status query");
+  check(!is_dip_switch_status_query(Frame(0x04, esphome::gensam::CMD_DIP_SWITCH, {0x84, 0x00})),
+        "55 with extra selector bytes is not recognized as a DIP status query");
+  check_wire("DIP status query matches captured 55 84 frame", query, "04' 55 84 03 79 7E");
 }
 
 // --- ISS settings and filter bypass -----------------------------------------------------
@@ -528,6 +544,7 @@ void test_lfe_level_encoding_details() {
 int main() {
   std::printf("DSP, LFE and ISS LED frame builders\n");
   test_monitor_led_frames();
+  test_dip_switch_query();
   test_iss_and_bypass_frames();
   test_captured_lfe_level_frames();
   test_captured_lfe_routing_frames();

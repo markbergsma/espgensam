@@ -5,6 +5,7 @@
 #include "monitor.h"
 #include <cstdio>
 #include <sstream>
+#include <initializer_list>
 #include <iomanip>
 #include <strings.h>
 
@@ -288,6 +289,141 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
   }
 
   return true;
+}
+
+bool parse_dip_switch_status(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
+  if (data == nullptr) {
+    return false;
+  }
+
+  size_t offset = 0;
+  if (len == 13 && data[0] == DIPSW_READ_STATUS) {
+    offset = 1;
+  } else if (len != 12) {
+    return false;
+  }
+
+  auto read_be32 = [data, offset](size_t word) {
+    const size_t index = offset + word * 4;
+    return (static_cast<uint32_t>(data[index]) << 24) |
+           (static_cast<uint32_t>(data[index + 1]) << 16) |
+           (static_cast<uint32_t>(data[index + 2]) << 8) |
+           static_cast<uint32_t>(data[index + 3]);
+  };
+  monitor.dip_word = read_be32(0);
+  monitor.previous_dip_word = read_be32(1);
+  monitor.dip_auxiliary_word = read_be32(2);
+  monitor.dip_switches_known = true;
+  return true;
+}
+
+namespace {
+
+/// @brief One DIP switch, or a pair of switches whose effects add, in a model's DIP word.
+struct DipField {
+  uint32_t mask;            ///< Bits that make up the field.
+  const char *labels[3];    ///< Label for field values 1..3 (index value - 1); nullptr = none.
+};
+
+/// @brief Bit table of the SAM monitors (guide section 6.5), in rear-panel order.
+constexpr DipField MONITOR_DIP_FIELDS[] = {
+    {0x0001, {"Stored", nullptr, nullptr}},
+    {0x0006, {"Level -20 dB", "Level -10 dB", "Level -30 dB"}},
+    {0x0018, {"Digital B", "Digital A", "Digital A+B"}},
+    {0x0020, {"ISS", nullptr, nullptr}},
+    {0x0040, {"LED disable", nullptr, nullptr}},
+    {0x3000, {"Bass roll-off -4 dB", "Bass roll-off -2 dB", "Bass roll-off -6 dB"}},
+    {0x0800, {"Desktop 160 Hz -4 dB", nullptr, nullptr}},
+    {0x0600, {"Bass tilt -4 dB", "Bass tilt -2 dB", "Bass tilt -6 dB"}},
+    {0x0180, {"Treble tilt -4 dB", "Treble tilt +2 dB", "Treble tilt -2 dB"}},
+    {0x40000000, {"Stored override (bit 30)", nullptr, nullptr}},
+    {0x80000000, {"Switches not valid (bit 31)", nullptr, nullptr}},
+};
+
+/// @brief Bit table of the SAM subwoofers (guide section 6.7.1, 7350A), in rear-panel order.
+constexpr DipField SUBWOOFER_DIP_FIELDS[] = {
+    {0x3000, {"Bass roll-off -8 dB", "Bass roll-off -4 dB", "Bass roll-off -12 dB"}},
+    {0x0C00, {"Phase -180°", "Phase -90°", "Phase -270°"}},
+    {0x0200, {"Digital LFE", nullptr, nullptr}},
+    {0x0100, {"LFE channel A", nullptr, nullptr}},
+    {0x0080, {"LFE +10 dB", nullptr, nullptr}},
+    {0x0060, {"Level -20 dB", "Level -10 dB", "Level -30 dB"}},
+    {0x0010, {"Test tone", nullptr, nullptr}},
+    {0x0008, {"ISS", nullptr, nullptr}},
+    {0x0004, {"Stored", nullptr, nullptr}},
+    {0x4000, {"Bypass", nullptr, nullptr}},
+    {0x40000000, {"Stored override (bit 30)", nullptr, nullptr}},
+    {0x80000000, {"Switches not valid (bit 31)", nullptr, nullptr}},
+};
+
+/// @brief True if the model designation starts with one of the given four-character families.
+bool model_in(const std::string &model, std::initializer_list<const char *> families) {
+  for (const char *family : families) {
+    if (strncasecmp(model.c_str(), family, 4) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// @brief Append the labels of every set field, and any bits the table does not define.
+template<size_t N> void append_dip_fields(std::string &out, uint32_t word, const DipField (&fields)[N]) {
+  uint32_t defined = 0;
+  for (const DipField &field : fields) {
+    defined |= field.mask;
+    const uint32_t shift = __builtin_ctz(field.mask);
+    const uint32_t value = (word & field.mask) >> shift;
+    if (value == 0 || value > 3 || field.labels[value - 1] == nullptr) {
+      continue;
+    }
+    if (!out.empty()) {
+      out += ", ";
+    }
+    out += field.labels[value - 1];
+  }
+  if ((word & ~defined) != 0) {
+    char unknown[32];
+    snprintf(unknown, sizeof(unknown), "%sUnknown bits 0x%lX", out.empty() ? "" : ", ",
+             static_cast<unsigned long>(word & ~defined));
+    out += unknown;
+  }
+}
+
+}  // namespace
+
+std::string describe_dip_switches(const GenSAMMonitor &monitor) {
+  if (!monitor.dip_switches_known) {
+    return "";
+  }
+
+  const std::string &model = monitor.model;
+  const bool sam_monitor = model_in(model, {"8320", "8330", "8331", "8340", "8341", "8350", "8351",
+                                            "8361", "1032", "S360"});
+  const bool sam_subwoofer = model_in(model, {"7350", "7360", "7370", "7380", "7382"});
+  if (!sam_monitor && !sam_subwoofer) {
+    char raw[16];
+    snprintf(raw, sizeof(raw), "0x%08lX", static_cast<unsigned long>(monitor.dip_word));
+    return raw;
+  }
+
+  std::string out;
+  if (sam_monitor) {
+    append_dip_fields(out, monitor.dip_word, MONITOR_DIP_FIELDS);
+  } else {
+    append_dip_fields(out, monitor.dip_word, SUBWOOFER_DIP_FIELDS);
+  }
+  if (out.empty()) {
+    out = "All off";
+  }
+
+  // Three-way level knob: 0..120 = -6..+6 dB in 0.1 dB steps.
+  if (model_in(model, {"8331", "8341", "8351", "8361"}) && monitor.dip_auxiliary_word <= 120) {
+    char knob[32];
+    snprintf(knob, sizeof(knob), "; Level knob %+.1f dB",
+             static_cast<double>(monitor.dip_auxiliary_word) / 10.0 - 6.0);
+    out += knob;
+  }
+  return out;
 }
 
 }  // namespace gensam

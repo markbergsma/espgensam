@@ -135,6 +135,9 @@ class MonitorRegistry {
   /// @brief Publish temperature, input level, output level, and online state to bound sensors.
   /// @param mon The monitor whose telemetry to publish.
   void publish_telemetry(const GenSAMMonitor &mon);
+  /// @brief Publish the monitor's decoded DIP switch positions to its diagnostic text sensor.
+  /// @param mon The monitor whose DIP status to publish.
+  void publish_dip_switch_status(const GenSAMMonitor &mon);
   /// @brief Mark measured telemetry and online status unknown while monitoring is paused.
   void publish_stale_telemetry();
 

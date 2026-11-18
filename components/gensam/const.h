@@ -62,7 +62,11 @@ static constexpr uint8_t CMD_DIGISUM_GAIN = 0x42;     ///< Subwoofer digital-sum
 static constexpr uint8_t CMD_GROUP_DELAY = 0x43;      ///< Group-delay setting; not on 1.10-1.12 firmware
 static constexpr uint8_t CMD_BASS_EXTENSION_XO = 0x4B; ///< Bass-extension crossover; unit unconfirmed
 static constexpr uint8_t CMD_BYPASS_FILTERS = 0x53;   ///< Filter bypass; see FILTER_BYPASS_* below
+static constexpr uint8_t CMD_DIP_SWITCH = 0x55;       ///< DIP-switch word query / report
 static constexpr uint8_t CMD_DISCOVERY = 0xFE;        ///< Monitor discovery ping
+
+/// CMD_DIP_SWITCH sub-command: read the current/previous DIP words and auxiliary level word.
+static constexpr uint8_t DIPSW_READ_STATUS = 0x84;
 
 // --- CMD_SERVICE (0x15) sub-commands -------------------------------------
 /// @name Service sub-commands

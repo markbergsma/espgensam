@@ -102,8 +102,13 @@ Frame make_broadcast_volume_silence();
 /// @brief Build a unicast device query.
 /// @param addr Target monitor bus address.
 /// @param cmd Query opcode (CMD_SOFTWARE_QUERY, CMD_BAR_CODE, CMD_QUERY_STATUS, ...).
-/// @return Unicast query frame; CMD_BAR_CODE additionally carries its {0x01} selector payload.
+/// @return Unicast query frame; CMD_BAR_CODE and CMD_DIP_SWITCH carry their selector payloads.
 Frame make_query(uint8_t addr, uint8_t cmd);
+
+/// @brief Check whether a frame is the 0x55 0x84 current DIP-status query.
+/// @param frame The observed frame.
+/// @return True only for CMD_DIP_SWITCH with the single DIPSW_READ_STATUS selector.
+bool is_dip_switch_status_query(const Frame &frame);
 
 /// @brief Build a CMD_BYPASS (0x2B) mute and front-LED control frame.
 ///

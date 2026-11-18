@@ -1011,6 +1011,7 @@ class GenSAMHub : public Component {
   // Passive snooping tracker
   uint8_t last_queried_addr_{0};
   uint8_t last_queried_cmd_{0};
+  bool last_queried_dip_status_{false};
 
   // Volume, mute, standby, and binding state
   float min_volume_db_{-80.0f};

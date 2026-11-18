@@ -71,7 +71,15 @@ Frame make_query(uint8_t addr, uint8_t cmd) {
   if (cmd == CMD_BAR_CODE) {
     return Frame(addr, cmd, {0x01});
   }
+  if (cmd == CMD_DIP_SWITCH) {
+    return Frame(addr, cmd, {DIPSW_READ_STATUS});
+  }
   return Frame(addr, cmd);
+}
+
+bool is_dip_switch_status_query(const Frame &frame) {
+  return frame.command == CMD_DIP_SWITCH && frame.payload.size() == 1 &&
+         frame.payload[0] == DIPSW_READ_STATUS;
 }
 
 Frame make_bypass(uint8_t addr, bool mute, bool pulsing) {

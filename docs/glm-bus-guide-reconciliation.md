@@ -71,7 +71,37 @@ The rail conversion is `base + span × percent / 100`. The base and span constan
 → 51.1 V, 62 % → 22.0 V) and has not been checked against a three-way speaker on this bus. The
 guide notes that the 9301B and 9401A use a different formula, and espgensam does not handle it.
 
-### 2.3 Confirmed, not exposed
+### 2.3 DIP-switch status
+
+The guide's `55 84` reply contains three big-endian 32-bit words: the current DIP word, the
+previous one, and a model-dependent level word. espgensam queries it once for each monitor during
+discovery, and decodes the same reply when it observes GLM asking. The per-monitor diagnostic
+text sensor shows the current word decoded for the monitor's model, for example
+`Level -10 dB, ISS`. Raw words remain available in the logs. A monitor that does not return all
+three words remains unknown rather than publishing an all-zero switch position.
+
+The bit layout depends on the model family:
+
+| Models | Bit table | Confidence |
+|---|---|---|
+| 8320A, 8330A | Guide §6.5 (bit 0 Stored, 1-2 Level, 3-4 Digital B/A, 5 ISS, 6 LED disable, 7-8 Treble tilt, 9-10 Bass tilt, 11 Desktop, 12-13 Bass roll-off) | Guide: software DIP word (no physical switches) |
+| 8340A, 8350A, 8341A | Same | Guide: physical switches seen in the replies |
+| 8331A, 8351A/B, 8361A, 1032C, S360A | Same | Inferred: their operating manuals show the identical 14-switch panel |
+| 7350A | Guide §6.7.1 (bit 2 Stored, 3 ISS, 4 Test tone, 5-6 Level, 7 LFE +10 dB, 8 LFE channel A, 9 Digital LFE, 10-11 Phase, 12-13 Bass roll-off, 14 Bypass) | Guide: software DIP word (no physical switches) |
+| 7360A, 7370A, 7380A, 7382A | Same as 7350A | Inferred: the panels carry the same functions; the guide has not confirmed their bit positions |
+| Others (e.g. 1237A, 1238A, W371A) | None | Raw word only; their manuals show no DIP switches |
+
+Paired switches whose effects add are shown as their sum (Level -10 and -20 dB as -30 dB, Treble
+tilt +2 and -4 dB as -2 dB). Phase labels follow the subwoofer panel (-90° / -180°). Bits 31 and
+30 are the status flags of guide §6.7.2 ("switches not valid or stored"); reading the pair in
+order, they are shown as `Switches not valid (bit 31)` and `Stored override (bit 30)` on both
+families. Any other bit the table does not define is shown as `Unknown bits`.
+
+On the three-way monitors with a rotary level control (8331A, 8341A, 8351A/B, 8361A) the third
+word is the knob position, `10 x (dB + 6)`, and is shown as `Level knob`. On two-way models it is
+an internal level variable and is not shown.
+
+### 2.4 Confirmed, not exposed
 
 - **`0x8A`.** The high bits of the `0x49` counter, sent about every 30th reply. It is already
   consumed correctly by the generic two-byte `0x8x` rule.

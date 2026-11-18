@@ -405,6 +405,7 @@ def test_discovery_slot_organization():
         "serial_number_sensor": "Serial Number",
         "firmware_version": "Firmware Version",
         "hardware_id": "Hardware ID",
+        "dip_switch_status": "DIP Switch Status",
         "mute": "Mute",
         "input": "Input",
         "level_db": "Level",
@@ -418,17 +419,18 @@ def test_discovery_slot_organization():
         check(str(second[key]["device_id"]) == "gensam_monitor_2_device",
               f"{key} belongs to its automatically generated Home Assistant device")
     for key in ("temperature", "input_level", "output_level", "online", "identify",
-                "model", "serial_number_sensor", "firmware_version", "hardware_id"):
+                "model", "serial_number_sensor", "firmware_version", "hardware_id",
+                "dip_switch_status"):
         check(str(first[key]["device_id"]) == "speaker_one",
               f"{key} belongs to the slot's Home Assistant device")
         check(str(first[key]["web_server"]["sorting_group_id"]) == "speaker_one_diagnostics",
               f"{key} belongs to the slot's web diagnostics group")
         check("web_server" not in second[key], f"{key} keeps the default grouping on other slots")
     ordered_diagnostics = ("online", "input_level", "output_level", "temperature", "model",
-                           "serial_number_sensor", "firmware_version", "hardware_id", "identify",
-                           gensam.CONF_SAM_NAME_SENSOR)
+                           "serial_number_sensor", "firmware_version", "hardware_id",
+                           "identify", "dip_switch_status", gensam.CONF_SAM_NAME_SENSOR)
     weights = [first[key]["web_server"]["sorting_weight"] for key in ordered_diagnostics]
-    check(weights == list(range(20, 120, 10)),
+    check(weights == list(range(20, 130, 10)),
           "diagnostics are ordered by importance from the configured starting weight")
     default_config = validate_hub({
         gensam.CONF_DISCOVERY_SLOTS: 1,
@@ -440,7 +442,7 @@ def test_discovery_slot_organization():
     default_slot = default_config[gensam.CONF_MONITORS][0]
     default_diagnostics = ordered_diagnostics[:-1]
     check([default_slot[key]["web_server"]["sorting_weight"] for key in default_diagnostics]
-          == list(range(50, 140, 10)), "diagnostics use the default starting weight of 50")
+          == list(range(50, 150, 10)), "diagnostics use the default starting weight of 50")
     check("calibration_bypass" not in default_slot,
           "the monitor card does not create bypass without groups or upload")
     server_ids = [first[key]["web_server"]["web_server_id"] for key in gensam.MONITOR_DIAGNOSTICS]

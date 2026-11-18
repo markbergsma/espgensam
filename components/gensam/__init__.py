@@ -100,6 +100,7 @@ CONF_WOOFER_COIL_TEMPERATURE = "woofer_coil_temperature"
 CONF_PSU_MAIN_VOLTAGE = "psu_main_voltage"
 CONF_PSU_LOW_VOLTAGE = "psu_low_voltage"
 CONF_PROCESSOR_LOAD = "processor_load"
+CONF_DIP_SWITCH_STATUS = "dip_switch_status"
 
 # key -> (default name suffix, unit, device class, accuracy decimals). Order matters: it is the
 # order of the trailing sensor pointers in GenSAMMonitorBinding (monitor.h).
@@ -447,6 +448,14 @@ def _validate_monitor(conf):
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC
         )(c)
 
+    if CONF_DIP_SWITCH_STATUS not in conf:
+        c = {CONF_NAME: f"{prefix}DIP Switch Status"}
+        if dev_id:
+            c[CONF_DEVICE_ID] = dev_id
+        conf[CONF_DIP_SWITCH_STATUS] = text_sensor.text_sensor_schema(
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC
+        )(c)
+
     if CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY not in conf:
         c = {
             CONF_NAME: f"{prefix}Bass Management Crossover",
@@ -578,6 +587,9 @@ MONITOR_SCHEMA = cv.All(
             cv.Optional(CONF_HARDWARE_ID): text_sensor.text_sensor_schema(
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
+            cv.Optional(CONF_DIP_SWITCH_STATUS): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
             cv.Optional(CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY): select.select_schema(
                 GenSAMCrossoverSelect,
                 icon="mdi:sine-wave",
@@ -619,7 +631,7 @@ DISCOVERY_SLOT_SETTINGS_SCHEMA = web_server.WEBSERVER_SORTING_SCHEMA.extend({
 MONITOR_DIAGNOSTICS = (
     CONF_ONLINE, CONF_INPUT_LEVEL, CONF_OUTPUT_LEVEL, CONF_TEMPERATURE, CONF_MODEL,
     CONF_SERIAL_NUMBER_SENSOR, CONF_FIRMWARE_VERSION, CONF_HARDWARE_ID, CONF_IDENTIFY,
-    CONF_SAM_NAME_SENSOR, *EXTENDED_TELEMETRY_SENSORS,
+    CONF_DIP_SWITCH_STATUS, CONF_SAM_NAME_SENSOR, *EXTENDED_TELEMETRY_SENSORS,
 )
 
 MONITOR_CONTROLS = (
@@ -1378,6 +1390,9 @@ async def to_code(config):
             fw_sens = await text_sensor.new_text_sensor(mon_conf[CONF_FIRMWARE_VERSION])
 
             hw_id_sens = await text_sensor.new_text_sensor(mon_conf[CONF_HARDWARE_ID])
+            dip_status_sens = await text_sensor.new_text_sensor(
+                mon_conf[CONF_DIP_SWITCH_STATUS]
+            )
             sam_name_sens = "nullptr"
             if CONF_SAM_NAME_SENSOR in mon_conf:
                 sam_name_sens = await text_sensor.new_text_sensor(
@@ -1454,7 +1469,7 @@ async def to_code(config):
                         f"{'true' if configured else 'false'}, {design_rate}U, "
                         f"{bypass_sw}, false, "
                         f"{'true' if discovery_slot else 'false'}, {sam_name_sens}, "
-                        f"{', '.join(ext_sens)}}}"
+                        f"{', '.join(ext_sens)}, {dip_status_sens}}}"
                     )
                 )
             )
