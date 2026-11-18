@@ -95,7 +95,7 @@ bool parse_device_info(const uint8_t *data, size_t len, GenSAMMonitor &monitor) 
       }
     }
   } else {
-    // 2. Space-delimited string (e.g. "7350A 1 0000 0106 3733 " from CMD_HARDWARE_QUERY)
+    // 2. Space-delimited string (e.g. "7350A 1 0000 0106 3733 " from CMD_SOFTWARE_QUERY_SHORT)
     std::istringstream stream(s);
     std::string model_word, hw_type, hw_rev, ver_word, build_word;
     if (stream >> model_word && model_word.length() >= 4) {
@@ -174,6 +174,10 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
   //   0x45: LF / woofer channel output level (signed int8 dBFS)
   //   0x46: Subwoofer-only meter, exact meaning unresolved (signed int8 dBFS)
   //   0x47: Power State (0x01 = Active, 0x02 = Standby / ISS)
+  //   0x49: Telemetry counter (1 byte, value unused)
+  //   0x81 / 0x82 / 0x83: TW / MD / BS voice-coil temperature (00 [degC], modelled)
+  //   0x84: processor load, 16 bits in per mille
+  //   0x88 / 0x89: main / low supply rail, percent of span (three-way models)
   //
   // 0x43 is HF and 0x45 is LF, not the other way round. The tags are consecutive and it is
   // tempting to read them as ascending driver order, which is how they were originally labelled
@@ -222,8 +226,39 @@ bool parse_telemetry(const uint8_t *data, size_t len, GenSAMMonitor &monitor) {
       monitor.standby_known = true;
       found_tag = true;
       i++;
+    } else if (tag == 0x49 && i + 1 < tlv_len) {
+      // 'I' = the speaker's own telemetry counter. Nothing uses the value, but it must be consumed:
+      // it walks through every byte value, and a counter equal to another tag would otherwise be
+      // read as that tag, taking the next tag byte as its operand.
+      found_tag = true;
+      i++;
     } else if ((tag & 0xF0) == 0x80 && i + 2 < tlv_len) {
-      // Multi-byte extended record (e.g. 0x81, 0x83, 0x84 followed by 2 payload bytes)
+      // 2-byte records. The coil temperatures are 00 [degC]; the supply monitors are a percentage
+      // of their rail's span; 0x84 is processor load in per mille. 0x8A is the high bits of the
+      // 0x49 counter, so it is skipped along with any tag not known yet.
+      const uint16_t value = static_cast<uint16_t>((tlv_data[i + 1] << 8) | tlv_data[i + 2]);
+      switch (tag) {
+        case 0x81:
+          monitor.tw_coil_temperature = static_cast<int16_t>(value);
+          break;
+        case 0x82:
+          monitor.md_coil_temperature = static_cast<int16_t>(value);
+          break;
+        case 0x83:
+          monitor.bs_coil_temperature = static_cast<int16_t>(value);
+          break;
+        case 0x84:
+          monitor.processor_load = value / 10.0f;
+          break;
+        case 0x88:
+          monitor.psu_main_voltage = PSU_MAIN_BASE_V + value * PSU_MAIN_SPAN_V / 100.0f;
+          break;
+        case 0x89:
+          monitor.psu_low_voltage = PSU_LOW_BASE_V + value * PSU_LOW_SPAN_V / 100.0f;
+          break;
+        default:
+          break;
+      }
       i += 2;
     }
   }

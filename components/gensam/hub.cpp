@@ -6,6 +6,7 @@
 #include "commands.h"
 
 #include "crc.h"
+#include "iss.h"
 #include "esphome/core/log.h"
 #include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
@@ -60,6 +61,12 @@ struct StoredControlState {
   float volume;
   uint32_t generation;
   int32_t group;
+};
+
+/// Persisted ISS overrides; the *_DEFAULT sentinels mean "not overriding".
+struct StoredIssState {
+  uint32_t sleep_delay_min;
+  int32_t threshold_dbu;
 };
 
 }  // namespace
@@ -124,6 +131,7 @@ void GenSAMHub::setup() {
 
   current_volume_db_ = startup_volume_db_;
   this->restore_control_state_();
+  this->restore_iss_state_();
   last_tx_volume_db_ = current_volume_db_;
   last_user_command_ms_ = millis();
   if (volume_number_ != nullptr) {
@@ -140,6 +148,17 @@ void GenSAMHub::setup() {
   }
   if (calibration_bypass_switch_ != nullptr) {
     calibration_bypass_switch_->publish_state(calibration_bypass_);
+  }
+  if (phase_correction_bypass_switch_ != nullptr) {
+    phase_correction_bypass_switch_->publish_state(phase_correction_bypass_);
+  }
+  if (iss_sleep_delay_select_ != nullptr) {
+    const char *name = iss_option_name(ISS_SLEEP_DELAY_OPTIONS, iss_sleep_delay_);
+    iss_sleep_delay_select_->publish_state(name != nullptr ? name : ISS_STR_SPEAKER_DEFAULT);
+  }
+  if (iss_threshold_select_ != nullptr) {
+    const char *name = iss_option_name(ISS_THRESHOLD_OPTIONS, iss_threshold_);
+    iss_threshold_select_->publish_state(name != nullptr ? name : ISS_STR_SPEAKER_DEFAULT);
   }
 
   // Show the group that discovery is about to apply, rather than leaving the entity unknown
@@ -238,6 +257,28 @@ void GenSAMHub::save_control_state_() {
   const StoredControlState state{current_volume_db_, group_generation_, selected_group_};
   if (!control_preference_.save(&state)) {
     ESP_LOGW(TAG, "Could not persist volume/group selection");
+  }
+}
+
+void GenSAMHub::restore_iss_state_() {
+  iss_preference_ = global_preferences->make_preference<StoredIssState>(0x47534932);
+  StoredIssState state{};
+  if (!iss_preference_.load(&state)) {
+    return;
+  }
+  // Only values the selects offer are restored, so a corrupt slot cannot send an odd word.
+  if (iss_option_name(ISS_SLEEP_DELAY_OPTIONS, state.sleep_delay_min) != nullptr) {
+    iss_sleep_delay_ = state.sleep_delay_min;
+  }
+  if (iss_option_name(ISS_THRESHOLD_OPTIONS, state.threshold_dbu) != nullptr) {
+    iss_threshold_ = state.threshold_dbu;
+  }
+}
+
+void GenSAMHub::save_iss_state_() {
+  const StoredIssState state{iss_sleep_delay_, iss_threshold_};
+  if (!iss_preference_.save(&state)) {
+    ESP_LOGW(TAG, "Could not persist ISS settings");
   }
 }
 
@@ -343,7 +384,8 @@ void GenSAMHub::service_control_window_(uint32_t now) {
   if (!identifying && user_commands_.empty() &&
       control_window_ms_ != 0 && now - last_user_command_ms_ >= control_window_ms_ &&
       initial_discovery_done_ && (pending_group_ < 0 || controls_only_session_) && !volume_tx_pending_ &&
-      !mute_tx_pending_ && !system_led_tx_pending_) {
+      !mute_tx_pending_ && !system_led_tx_pending_ && !iss_tx_pending_ &&
+      !filter_bypass_tx_pending_) {
     bus_silent_ = true;
     registry_.publish_stale_telemetry();
     ESP_LOGI(TAG, "Control window expired; all TX suspended for native ISS");
@@ -763,9 +805,63 @@ void GenSAMHub::set_system_leds_enabled(bool enabled) {
   ESP_LOGD(TAG, "Monitor LED request accepted: %s", YESNO(enabled));
 }
 
+void GenSAMHub::set_iss_sleep_delay(uint32_t minutes) {
+  if (!this->open_control_window_()) return;
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot set ISS sleep delay: Bus is not available for TX");
+    return;
+  }
+  iss_sleep_delay_ = minutes;
+  this->save_iss_state_();
+  // "Speaker default" sends nothing, but a pending threshold must still go out.
+  iss_tx_pending_ = iss_sleep_delay_ != ISS_SLEEP_DELAY_DEFAULT ||
+                    iss_threshold_ != ISS_THRESHOLD_DEFAULT;
+  ESP_LOGD(TAG, "ISS sleep delay request accepted: %u min", (unsigned) minutes);
+}
+
+void GenSAMHub::set_iss_threshold(int32_t dbu) {
+  if (!this->open_control_window_()) return;
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot set ISS sensitivity: Bus is not available for TX");
+    return;
+  }
+  iss_threshold_ = dbu;
+  this->save_iss_state_();
+  iss_tx_pending_ = iss_sleep_delay_ != ISS_SLEEP_DELAY_DEFAULT ||
+                    iss_threshold_ != ISS_THRESHOLD_DEFAULT;
+  ESP_LOGD(TAG, "ISS sensitivity request accepted: %d dBu", (int) dbu);
+}
+
+void GenSAMHub::set_phase_correction_bypass(bool bypass) {
+  if (!this->open_control_window_()) return;
+  if (!can_transmit()) {
+    ESP_LOGW(TAG, "Cannot set phase-correction bypass: Bus is not available for TX");
+    if (phase_correction_bypass_switch_ != nullptr) {
+      phase_correction_bypass_switch_->publish_state(phase_correction_bypass_);
+    }
+    return;
+  }
+  phase_correction_bypass_ = bypass;
+  filter_bypass_tx_pending_ = true;
+  if (phase_correction_bypass_switch_ != nullptr) {
+    phase_correction_bypass_switch_->publish_state(bypass);
+  }
+  ESP_LOGD(TAG, "Phase-correction bypass request accepted: %s", YESNO(bypass));
+}
+
+void GenSAMHub::queue_runtime_settings_() {
+  if (iss_sleep_delay_ != ISS_SLEEP_DELAY_DEFAULT || iss_threshold_ != ISS_THRESHOLD_DEFAULT) {
+    iss_tx_pending_ = true;
+  }
+  if (phase_correction_bypass_) {
+    filter_bypass_tx_pending_ = true;
+  }
+}
+
 void GenSAMHub::service_pending_writes_(uint32_t now) {
   if (resuming_ || !initial_discovery_done_ || power_off_pending_) return;
-  if (!volume_tx_pending_ && !mute_tx_pending_ && !system_led_tx_pending_) {
+  if (!volume_tx_pending_ && !mute_tx_pending_ && !system_led_tx_pending_ && !iss_tx_pending_ &&
+      !filter_bypass_tx_pending_) {
     return;
   }
 
@@ -786,6 +882,10 @@ void GenSAMHub::service_pending_writes_(uint32_t now) {
     this->transmit_group_mute_();
   } else if (system_led_tx_pending_) {
     this->transmit_system_leds_();
+  } else if (filter_bypass_tx_pending_) {
+    this->transmit_filter_bypass_();
+  } else if (iss_tx_pending_) {
+    this->transmit_iss_settings_();
   } else if (volume_tx_pending_ && !current_standby_ &&
              now - last_volume_tx_ms_ >= volume_tx_interval_ms_) {
     this->transmit_volume_();
@@ -859,6 +959,43 @@ void GenSAMHub::transmit_system_leds_() {
   }
 }
 
+void GenSAMHub::transmit_iss_settings_() {
+  iss_tx_pending_ = false;
+  // Broadcast, as GLM does: one frame reaches every speaker, discovered or not.
+  if (iss_sleep_delay_ != ISS_SLEEP_DELAY_DEFAULT) {
+    this->send_frame_twice(make_iss_sleep_delay(BROADCAST_ADDRESS, iss_sleep_delay_));
+  }
+  if (iss_threshold_ != ISS_THRESHOLD_DEFAULT) {
+    this->send_frame_twice(make_iss_threshold(BROADCAST_ADDRESS, iss_threshold_));
+  }
+  ESP_LOGI(TAG, "Set ISS overrides: sleep delay %u min, threshold %d dBu (0 = speaker default)",
+           (unsigned) iss_sleep_delay_, (int) iss_threshold_);
+}
+
+void GenSAMHub::transmit_filter_bypass_() {
+  if (registry_.empty()) {
+    return;
+  }
+  const uint8_t mask = phase_correction_bypass_ ? FILTER_BYPASS_PHASE_EQ : FILTER_BYPASS_NONE;
+  // Sent once per monitor, as the mute fan-out is: a unicast setting is acknowledged with an
+  // empty 09 reply (guide section 6.4), which a back-to-back repeat would collide with.
+  bool transmitted = true;
+  for (const auto &kv : registry_.monitors()) {
+    if (this->send_frame(make_filter_bypass(kv.first, mask))) {
+      delayMicroseconds(250);
+    } else {
+      transmitted = false;
+    }
+  }
+  if (transmitted) {
+    filter_bypass_tx_pending_ = false;
+    ESP_LOGI(TAG, "Set phase-correction bypass %s across %zu monitors",
+             YESNO(phase_correction_bypass_), registry_.size());
+  } else {
+    ESP_LOGW(TAG, "Phase-correction bypass was only partially transmitted; it will be retried");
+  }
+}
+
 void GenSAMHub::transmit_volume_() {
   volume_tx_pending_ = false;
   last_volume_tx_ms_ = millis();
@@ -868,6 +1005,9 @@ void GenSAMHub::transmit_volume_() {
 }
 
 void GenSAMHub::drop_pending_writes_() {
+  // ISS and bypass requests are not reverted: they are this device's settings, not a reading of
+  // the speakers, and queue_runtime_settings_() sends them after the next discovery anyway.
+  iss_tx_pending_ = filter_bypass_tx_pending_ = false;
   if (!volume_tx_pending_ && !mute_tx_pending_ && !system_led_tx_pending_) {
     return;
   }
@@ -992,11 +1132,12 @@ void GenSAMHub::set_monitor_crossover_by_name(const std::string &serial_or_id, c
 }
 
 // Level and delay follow the crossover pattern above, with one deliberate difference: no
-// CMD_PREPARE_CONFIG frame precedes them. GLM emits 0x17 before a *block* of DSP settings but
+// CMD_NET_SETTINGS frame precedes them. GLM emits 0x17 before a *block* of DSP settings but
 // routinely omits it for an individual write - in captures/glm_group_switch_capture.log
 // monitor 0x02 takes a delay and a level at 18:31:56.899 with its nearest 0x17 ninety seconds
-// away - so a bare frame lands, and spending a bus turn on a frame whose meaning is still
-// unresolved (see commands.h) buys nothing.
+// away - so a bare frame lands. The flag 17 01 sets (stored settings over DIP switches) is
+// still in force from the last group push or GLM session, and lapses only with a restart,
+// which is followed by a group push anyway.
 
 void GenSAMHub::set_monitor_level(uint8_t address, float db) {
   if (!executing_user_command_) {
@@ -1261,6 +1402,7 @@ void GenSAMHub::set_standby(bool standby) {
       user_commands_.clear();
       pending_group_ = -1;
       volume_tx_pending_ = mute_tx_pending_ = system_led_tx_pending_ = false;
+      iss_tx_pending_ = filter_bypass_tx_pending_ = false;  // Re-queued after the next wake
       power_off_pending_ = true;
       bus_silent_ = false;
     }

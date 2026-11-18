@@ -19,7 +19,7 @@
 ///        model-      -> Model designation (e.g., "7350A", "8330A")
 ///        ver-        -> Firmware revision string
 ///        hw-         -> Hardware board revision
-///    - Space-delimited string (e.g., reply to CMD_HARDWARE_QUERY 0x22):
+///    - Space-delimited string (e.g., reply to CMD_SOFTWARE_QUERY_SHORT 0x22):
 ///        "7350A 1 0000 0106 3733 "
 ///      Tokens: [Model, HardwareType, HardwareConfig, VersionCode, BuildNumber]
 ///      where VersionCode (e.g., 0106) encodes Major (01) and Minor (06) firmware revision.
@@ -30,10 +30,19 @@
 ///    - Internal amplifier / DSP temperature (degrees Celsius).
 ///    - Analog/Digital Input level (dBFS, negative signed integer).
 ///    - Driver Output level (dBFS, negative signed integer across active driver channels).
+///    - Modelled voice-coil temperatures per driver (tags 0x81-0x83), and on three-way models
+///      the two supply-rail monitors (tags 0x88/0x89), which report a percentage of the rail's
+///      span and are converted to volts with the PSU_* constants in const.h.
+///    - DSP processor load (tag 0x84), a 16-bit value in per mille (Genelec GLM bus decoding
+///      guide v3.0, sections 3.6 and 8). Each model's load sits in its own range, which is why
+///      the high byte alone also reads as a device class (01 subwoofer, 02 two-/three-way, 03
+///      transition or standby). Without signal it barely moves; it shifts briefly after a store,
+///      apply or wake-up.
 ///    The parser handles both fixed-offset payloads (standard RACE) and tagged TLV records.
 /// ===================================================================================
 
 #include "const.h"
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -120,6 +129,13 @@ struct GenSAMMonitorBinding {
   /// True for a fixed Home Assistant entity slot assigned to a monitor during discovery.
   bool discovery_slot{false};
   text_sensor::TextSensor *sam_name_sensor{nullptr}; ///< Runtime SAM setup name matched by hardware ID.
+
+  sensor::Sensor *tw_coil_temperature_sensor{nullptr}; ///< Tweeter coil temperature sensor (°C).
+  sensor::Sensor *md_coil_temperature_sensor{nullptr}; ///< Midrange coil temperature sensor (°C).
+  sensor::Sensor *bs_coil_temperature_sensor{nullptr}; ///< Woofer coil temperature sensor (°C).
+  sensor::Sensor *psu_main_voltage_sensor{nullptr};    ///< Main supply rail sensor (V).
+  sensor::Sensor *psu_low_voltage_sensor{nullptr};     ///< Low-voltage supply rail sensor (V).
+  sensor::Sensor *processor_load_sensor{nullptr};      ///< DSP processor load sensor (%).
 };
 
 /// @brief Represents a single Genelec SAM monitor or subwoofer discovered on the RS-485 bus.
@@ -135,6 +151,12 @@ struct GenSAMMonitor {
   int8_t temperature{0};            ///< Current internal DSP/amplifier temperature in °C.
   int8_t input_db{0};               ///< Input signal level in dBFS.
   int8_t output_db{0};              ///< Driver output level in dBFS.
+  float tw_coil_temperature{NAN};   ///< Modelled tweeter voice-coil temperature (°C, tag 0x81); NAN until reported.
+  float md_coil_temperature{NAN};   ///< Modelled midrange voice-coil temperature (°C, tag 0x82, three-way only).
+  float bs_coil_temperature{NAN};   ///< Modelled woofer voice-coil temperature (°C, tag 0x83).
+  float psu_main_voltage{NAN};      ///< Main DC supply rail (V, tag 0x88, three-way only).
+  float psu_low_voltage{NAN};       ///< Low-voltage supply rail (V, tag 0x89, three-way only).
+  float processor_load{NAN};        ///< DSP processor load (%, tag 0x84, firmware 1.12+).
   bool mute{false};                 ///< Channel mute state (CMD_BYPASS bit 0).
   bool system_leds_enabled{true};    ///< Front LED state, when system_leds_known is true.
   bool system_leds_known{false};     ///< True once a live or stored LED setting was observed.
@@ -165,7 +187,7 @@ struct GenSAMMonitor {
   std::string to_string() const;
 };
 
-/// @brief Parse ASCII device info reply from CMD_HARDWARE_QUERY (0x22) or CMD_SOFTWARE_QUERY (0x39).
+/// @brief Parse ASCII device info reply from CMD_SOFTWARE_QUERY_SHORT (0x22) or CMD_SOFTWARE_QUERY (0x39).
 /// @param data Pointer to raw unescaped payload buffer.
 /// @param len Payload length in bytes.
 /// @param[out] monitor Target monitor struct to populate with model, firmware, and hardware versions.
@@ -181,8 +203,8 @@ bool parse_barcode(const uint8_t *data, size_t len, GenSAMMonitor &monitor);
 
 /// @brief Parse status telemetry payload from CMD_REPORT_STATUS (0x09) or CMD_QUERY_STATUS (0x08).
 ///
-/// Supports modern tagged TLV streams (0x41 temp, 0x42 input, 0x43-0x46 channel outputs, 0x47 power state)
-/// as well as legacy fixed-offset RACE payloads.
+/// Supports modern tagged TLV streams (0x41 temp, 0x42 input, 0x43-0x46 channel outputs, 0x47 power state,
+/// 0x49 counter, 0x81-0x83 coil temperatures, 0x88/0x89 supply rails) as well as legacy fixed-offset RACE payloads.
 ///
 /// Tag 'G' (0x47) is the only field in a reply that reports power state, and only its documented
 /// values 0x01 (active) and 0x02 (standby) are accepted. A reply may also carry a 0x06/0x07 marker byte

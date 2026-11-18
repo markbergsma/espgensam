@@ -56,7 +56,7 @@ using esphome::gensam::BiquadCoeffs;
 using esphome::gensam::design_biquad;
 using esphome::gensam::Frame;
 using esphome::gensam::make_peq_band;
-using esphome::gensam::make_prepare_config;
+using esphome::gensam::make_use_stored_settings;
 using esphome::gensam::PeqType;
 using esphome::gensam::Uart9BitChar;
 
@@ -129,7 +129,7 @@ void test_captured_peq_frames() {
 }
 
 void test_captured_prepare_config() {
-  check_wire("0x02 prepare-for-config matches capture", make_prepare_config(0x02), "02' 17 01 1B 5A 7E");
+  check_wire("0x02 prepare-for-config matches capture", make_use_stored_settings(0x02), "02' 17 01 1B 5A 7E");
 }
 
 // --- Structure -------------------------------------------------------------------------

@@ -27,3 +27,5 @@ __pycache__/
 # Local packet captures for debugging
 captures/
 tmp/
+# Third-party reference documents whose redistribution rights are unknown
+references/

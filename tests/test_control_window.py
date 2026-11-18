@@ -91,7 +91,10 @@ struct BinarySensor {
 }
 struct GenSAMMonitorBinding {
   sensor::Sensor *temperature_sensor = nullptr, *input_level_sensor = nullptr,
-                 *output_level_sensor = nullptr;
+                 *output_level_sensor = nullptr, *tw_coil_temperature_sensor = nullptr,
+                 *md_coil_temperature_sensor = nullptr, *bs_coil_temperature_sensor = nullptr,
+                 *psu_main_voltage_sensor = nullptr, *psu_low_voltage_sensor = nullptr,
+                 *processor_load_sensor = nullptr;
   binary_sensor::BinarySensor *online_sensor = nullptr;
 };
 class MonitorRegistry {
@@ -164,6 +167,7 @@ class GenSAMHub {
   bool recovery_required_ = false;
   bool current_standby_ = false, initial_discovery_done_ = true;
   bool volume_tx_pending_ = false, mute_tx_pending_ = false, system_led_tx_pending_ = false;
+  bool iss_tx_pending_ = false, filter_bypass_tx_pending_ = false;
   float current_volume_db_ = -30, min_volume_db_ = -80, max_volume_db_ = 0;
   uint32_t control_window_ms_ = WINDOW_DEFAULT, last_user_command_ms_ = 0;
   uint32_t race_step_time_ = 0, last_poll_cycle_time_ = 0;
@@ -205,6 +209,8 @@ class GenSAMHub {
     mute_tx_pending_ = false; ++mute_frames; ++transmissions;
   }
   void transmit_system_leds_() { system_led_tx_pending_ = false; ++transmissions; }
+  void transmit_filter_bypass_() { filter_bypass_tx_pending_ = false; ++transmissions; }
+  void transmit_iss_settings_() { iss_tx_pending_ = false; ++transmissions; }
   void race_step_wakeup_(uint32_t) { ++race_steps; }
   void race_step_ping_(uint32_t) { ++race_steps; }
   void race_step_set_rid_(uint32_t) { ++race_steps; }
@@ -320,17 +326,24 @@ int main() {
          paused_timeout.mute_evaluations == 1 &&
          paused_timeout.standby_evaluations == 1);
 
-  sensor::Sensor temperature, input_level, output_level;
+  sensor::Sensor temperature, input_level, output_level, coil;
   binary_sensor::BinarySensor online;
   temperature.publish_state(42);
   input_level.publish_state(-30);
   output_level.publish_state(-20);
+  coil.publish_state(33);
   online.publish_state(true);
   MonitorRegistry registry;
-  registry.bindings_.push_back({&temperature, &input_level, &output_level, &online});
+  GenSAMMonitorBinding binding;
+  binding.temperature_sensor = &temperature;
+  binding.input_level_sensor = &input_level;
+  binding.output_level_sensor = &output_level;
+  binding.tw_coil_temperature_sensor = &coil;
+  binding.online_sensor = &online;
+  registry.bindings_.push_back(binding);
   registry.publish_stale_telemetry();
   assert(std::isnan(temperature.state) && std::isnan(input_level.state) &&
-         std::isnan(output_level.state));
+         std::isnan(output_level.state) && std::isnan(coil.state));
   assert(!online.has_state && online.invalidations == 1);
 
   GenSAMHub infinite;
@@ -351,6 +364,12 @@ int main() {
   busy.volume_tx_pending_ = true;
   tick(busy, 60000); assert(!busy.bus_silent_);
   busy.volume_tx_pending_ = false;
+  busy.iss_tx_pending_ = true;
+  tick(busy, 60000); assert(!busy.bus_silent_);
+  busy.iss_tx_pending_ = false;
+  busy.filter_bypass_tx_pending_ = true;
+  tick(busy, 60000); assert(!busy.bus_silent_);
+  busy.filter_bypass_tx_pending_ = false;
   busy.pending_group_ = 1;
   tick(busy, 60000); assert(!busy.bus_silent_);
   busy.pending_group_ = -1;

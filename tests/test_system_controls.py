@@ -37,6 +37,7 @@ class GenSAMHub {
   void set_monitor_mute_by_serial(const std::string &, bool) {}
   void set_calibration_bypass(bool) {}
   void set_monitor_calibration_bypass_by_serial(const std::string &, bool) {}
+  void set_phase_correction_bypass(bool) {}
 };
 }}
 """

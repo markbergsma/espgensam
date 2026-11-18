@@ -79,3 +79,22 @@ gensam:
     web_server:
       sorting_group_id: system_controls
       sorting_weight: 40
+
+  phase_correction_bypass:
+    name: "Bypass Phase Correction"
+    disabled_by_default: true
+    web_server:
+      sorting_group_id: system_controls
+      sorting_weight: 42
+
+  iss_sleep_delay:
+    name: "ISS Sleep Delay"
+    web_server:
+      sorting_group_id: system_controls
+      sorting_weight: 44
+
+  iss_sensitivity:
+    name: "ISS Sensitivity"
+    web_server:
+      sorting_group_id: system_controls
+      sorting_weight: 46

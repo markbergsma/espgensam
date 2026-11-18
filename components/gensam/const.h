@@ -45,21 +45,42 @@ static constexpr uint8_t CMD_QUERY_STATUS = 0x08;     ///< GLMv5 monitor telemet
 static constexpr uint8_t CMD_REPORT_STATUS = 0x09;    ///< GLMv5 monitor telemetry report
 static constexpr uint8_t CMD_VOLUME = 0x1F;           ///< Volume control (24-bit)
 static constexpr uint8_t CMD_BAR_CODE = 0x19;         ///< Serial number / barcode query
-static constexpr uint8_t CMD_FLASH_COMMIT = 0x15;     ///< Commit monitor settings to flash
-static constexpr uint8_t CMD_HARDWARE_QUERY = 0x22;   ///< Hardware ID query
+static constexpr uint8_t CMD_SERVICE = 0x15;          ///< Service prefix: store / restore user settings
+static constexpr uint8_t CMD_SOFTWARE_QUERY_SHORT = 0x22; ///< Short system info ("7350A 1 0000 0106 3733")
 static constexpr uint8_t CMD_BYPASS = 0x2B;           ///< Bypass / Mute / LED control
-static constexpr uint8_t CMD_SESSION_PREAMBLE = 0x2D; ///< GLM app connect only; see the block below
+static constexpr uint8_t CMD_SWITCH_BYPASS = 0x2D;    ///< Accepted, no effect, no reply; see the block below
 static constexpr uint8_t CMD_DSP = 0x10;              ///< DSP parameter update (PEQ, delay, level)
-static constexpr uint8_t CMD_PREPARE_CONFIG = 0x17;   ///< Prepare for a block of DSP settings
-static constexpr uint8_t CMD_SOFTWARE_QUERY = 0x39;   ///< Firmware version query
+static constexpr uint8_t CMD_NET_SETTINGS = 0x17;     ///< 17 01 = use stored settings, not DIP switches
+static constexpr uint8_t CMD_SOFTWARE_QUERY = 0x39;   ///< Long system info: model, firmware version
 static constexpr uint8_t CMD_WAKEUP = 0x3A;           ///< ISS settings and wakeup / standby control
 static constexpr uint8_t CMD_BASS_MANAGE_XO = 0x3B;   ///< Bass management: crossover in Hz, or CROSSOVER_FULL_BAND
-static constexpr uint8_t CMD_UNKNOWN_3C = 0x3C;       ///< Subwoofer only, always 00 00; see below
-static constexpr uint8_t CMD_INPUT_SYNC = 0x3D;       ///< Input-select sync; see the block below
+static constexpr uint8_t CMD_BASS_ANALOG_FILTER = 0x3C; ///< Analogue bass high-pass; see the block below
+static constexpr uint8_t CMD_BASS_BYPASS = 0x3D;      ///< Bass-management crossover bypass; see the block below
 static constexpr uint8_t CMD_SUB_LFE_LEVEL = 0x3E;    ///< Subwoofer LFE level; see the block below
 static constexpr uint8_t CMD_SELECT_AUDIO_SOURCE = 0x40; ///< Audio source selection & AES3 channel assignment
-static constexpr uint8_t CMD_UNKNOWN_42 = 0x42;       ///< Subwoofer only, always 00 00; see below
+static constexpr uint8_t CMD_DIGISUM_GAIN = 0x42;     ///< Subwoofer digital-sum gain; see the block below
+static constexpr uint8_t CMD_GROUP_DELAY = 0x43;      ///< Group-delay setting; not on 1.10-1.12 firmware
+static constexpr uint8_t CMD_BASS_EXTENSION_XO = 0x4B; ///< Bass-extension crossover; unit unconfirmed
+static constexpr uint8_t CMD_BYPASS_FILTERS = 0x53;   ///< Filter bypass; see FILTER_BYPASS_* below
 static constexpr uint8_t CMD_DISCOVERY = 0xFE;        ///< Monitor discovery ping
+
+// --- CMD_SERVICE (0x15) sub-commands -------------------------------------
+/// @name Service sub-commands
+///
+/// 0x15 is a prefix, not a command of its own: the byte after it selects the operation, and the
+/// second byte is its argument. Named after the firmware's own identifiers (Genelec GLM bus
+/// decoding guide v3.0, sections 6.4 and 6.6).
+///@{
+/// 15 33 [n]: write the working settings to stored profile n (0-3). GLM follows every ISS or
+/// standalone-setting edit with 15 33 00. Changing a speaker's stored profile outlives this
+/// component, so nothing here sends it; make_store_user_params() exists for tests and decoding.
+static constexpr uint8_t SERVICE_STORE_USER_PARS = 0x33;
+/// 15 34 [n]: load stored profile n. 0xFC-0xFF instead *erase* a profile and restart the
+/// speaker, so this must never be sent with an unchecked argument. Named only for decoding.
+static constexpr uint8_t SERVICE_RESTORE_USER_PARS = 0x34;
+/// Profile 0, the one a speaker loads at start-up.
+static constexpr uint8_t SERVICE_PROFILE_DEFAULT = 0x00;
+///@}
 
 // --- Opcodes GLM sends that this component does not -----------------------
 /// @name Observed but unsent opcodes
@@ -67,25 +88,31 @@ static constexpr uint8_t CMD_DISCOVERY = 0xFE;        ///< Monitor discovery pin
 /// These are named so that a reader of a bus capture is not left staring at raw bytes. Each is
 /// emitted by an OEM GLM adapter, each has a payload that never varies across the five captures
 /// in captures/, and none is transmitted here. docs/glm-group-apply.md has the full argument and
-/// the frame-by-frame position of each within a group push.
+/// the frame-by-frame position of each within a group push. The firmware names and meanings
+/// come from the Genelec GLM bus decoding guide v3.0 (sections 6.4 and 6.6); see
+/// docs/glm-bus-guide-reconciliation.md for how they line up with the captures.
 ///
 ///  - CMD_SIGNAL_GEN (0x05): the signal generator. GLM sends exactly one frame of it, per
 ///    speaker, at the head of every group push: the 13-byte "stop generator / restore" payload
 ///    04 00 00 00 FF FF EA 00 01 90 00 02 DA, identical in all 35 occurrences. **When a signal
 ///    generator feature is added here, the group push must send this frame the same way**, so
 ///    that a generator left running by an earlier operation cannot survive a group switch.
-///  - CMD_SESSION_PREAMBLE (0x2D): always FF 2D 00, and only when the GLM app connects, paired
-///    with a broadcast CMD_INPUT_SYNC. It is not part of a group push.
-///  - CMD_INPUT_SYNC (0x3D): always 00 00. In a full single-device configuration it sits
-///    immediately before CMD_SELECT_AUDIO_SOURCE, so it reads as an input-select preamble
-///    rather than a latch applied afterwards; in a group push GLM instead sweeps it across
-///    every speaker at the close.
-///  - CMD_UNKNOWN_3C (0x3C) and CMD_UNKNOWN_42 (0x42): always 00 00, and in every observed
-///    frame **only ever addressed to the subwoofer**. Their positions are fixed -- 0x3C
-///    follows the crossover, 0x42 follows CMD_SUB_LFE_LEVEL -- and that is all that is known.
-///    They are not the remaining LFE fields: 0x42 stayed 00 00 across a controlled change of
-///    LFE_Level, and 0x3C stayed 00 00 while LFE_CrossoverFrequency(Hz) was 120, which would
-///    encode as 00 78. See docs/glm-group-apply.md.
+///  - CMD_SWITCH_BYPASS (0x2D): always FF 2D 00, and only when the GLM app connects, paired
+///    with a broadcast CMD_BASS_BYPASS. The firmware implements it as an empty handler: it is
+///    accepted, does nothing and is not answered. It is not part of a group push.
+///  - CMD_BASS_BYPASS (0x3D): always 00 00. 3D 00 01 switches the speaker to its bypass
+///    crossover set and any other value restores the stored one, so the 00 00 GLM sends is a
+///    "bass management on" reassertion, not an input-select latch as it was once read. In a
+///    single-device configuration it sits immediately before CMD_SELECT_AUDIO_SOURCE; in a group
+///    push GLM sweeps it across every speaker at the close.
+///  - CMD_BASS_ANALOG_FILTER (0x3C) and CMD_DIGISUM_GAIN (0x42): always 00 00, and in every
+///    observed frame **only ever addressed to the subwoofer**. 0x3C switches the 85 Hz analogue
+///    bass high-pass (on 1.12.2 firmware it has no effect); 0x42 is the digital-sum gain, default
+///    0. Both are single bytes the firmware stores with the user settings. Neither is an LFE
+///    field: 0x42 stayed 00 00 across a controlled change of LFE_Level, and 0x3C stayed 00 00
+///    while LFE_CrossoverFrequency(Hz) was 120. See docs/glm-group-apply.md.
+///  - CMD_GROUP_DELAY (0x43) and CMD_BASS_EXTENSION_XO (0x4B): in the firmware's command table
+///    but never seen in a capture of ours.
 ///@}
 
 // --- Subwoofer LFE level (CMD_SUB_LFE_LEVEL) ------------------------------
@@ -153,10 +180,11 @@ static constexpr uint8_t VOLUME_PAYLOAD_SILENCE[3] = {0x00, 0x00, 0x02};
 ///    Level_Sensitivity:0 put -0.3 dB on the wire to every speaker, so the field is the **sum
 ///    of the device's own calibration trim and the group's offset**, and sam_import.py adds
 ///    the two for that reason.
-///    Sub-command 0x09 is emitted by GLM on every device with a constant 0x000000 payload;
-///    its meaning is unknown and this component does not send it. It is not a stray: all 28
-///    occurrences across the captures follow a 0x00 frame immediately, one for one, so the
-///    pair travels together.
+///    Sub-command 0x09 is emitted by GLM on every device with a constant 0x000000 payload,
+///    and this component does not send it. The firmware reads it as the level in 0.1 dB steps
+///    (the GLM bus decoding guide v3.0, section 11.1); what GLM means by zeroing it in every
+///    apply is not known. It is not a stray: all 28 occurrences across the captures follow a
+///    0x00 frame immediately, one for one, so the pair travels together.
 ///  - 0x02 carries a 4-byte big-endian time-of-flight delay as a sample count **at 48 kHz on
 ///    every device class**, which resolves the 4x ambiguity the specification flags for
 ///    subwoofers. On a subwoofer the value is the AutoPhase result expressed as a delay:
@@ -172,10 +200,9 @@ static constexpr uint8_t DSP_SUB_PEQ = 0x0E;    ///< Parametric EQ band coeffici
 /// DSP_SUB_LEVEL sub-command selecting the per-device level compensation.
 static constexpr uint8_t DSP_LEVEL_COMPENSATION = 0x00;
 
-/// DSP_SUB_LEVEL sub-command GLM pairs 1:1 with DSP_LEVEL_COMPENSATION, payload always 0x000000.
-/// Named only so the pairing is visible; never sent, and deliberately not decoded, since its
-/// constant payload would read as -130 dB and mute the speaker.
-static constexpr uint8_t DSP_LEVEL_UNKNOWN_09 = 0x09;
+/// DSP_SUB_LEVEL sub-command GLM pairs 1:1 with DSP_LEVEL_COMPENSATION, payload always 0x000000:
+/// the level in 0.1 dB steps. Never sent, and deliberately not decoded.
+static constexpr uint8_t DSP_LEVEL_TENTHS_DB = 0x09;
 
 /// Timebase of a DSP_SUB_DELAY sample count, independent of the device's PEQ design rate.
 static constexpr uint32_t DSP_DELAY_RATE_HZ = 48000;
@@ -202,8 +229,10 @@ static constexpr uint32_t PEQ_RATE_DEFAULT_HZ = 48000;
 /// Trailing type/flag byte of a CMD_DSP PEQ frame. Only 0x00 has ever been observed.
 static constexpr uint8_t PEQ_TYPE_FLAG_ACTIVE = 0x00;
 
-/// Payload byte accompanying CMD_PREPARE_CONFIG, always 0x01 in captured OEM traffic.
-static constexpr uint8_t PREPARE_CONFIG_PAYLOAD = 0x01;
+/// CMD_NET_SETTINGS payload GLM sends before every block of DSP settings. The firmware takes it
+/// as "use the stored settings and ignore the DIP switches" (17 00 resumes the switches); it is
+/// the same flag as the DIP word's "Stored" bit.
+static constexpr uint8_t NET_SETTINGS_USE_STORED = 0x01;
 
 // --- Bass management crossover parameters ----------------------------------
 static constexpr uint16_t DEFAULT_CROSSOVER_HZ = 85;  ///< Factory default bass management crossover frequency (Hz)
@@ -261,6 +290,8 @@ static constexpr uint8_t ACK_ERROR = 0x2E;            ///< Negative ACK
 ///  - It is not positional: 10 frames carry it leading, 5 trailing, 2 consist of nothing else.
 ///  - The independent HLM project documents 0x06 as a settings-write / persistence marker and
 ///    does not handle 0x07.
+///  - The GLM bus decoding guide v3.0 calls it a busy byte: it appears while the speaker is
+///    still working through a store, an apply or a wake, which fits every observation above.
 ///
 /// So it reads as a transient "just woke" / "settings written" annotation on a monitor that is
 /// already running. Earlier releases named 0x07 STATUS_STANDBY and forced monitor.standby true
@@ -301,6 +332,9 @@ static constexpr uint8_t BYPASS_LED_ENABLED_VALUE = 0x04;  ///< Observed 0x2B li
 static constexpr uint8_t BYPASS_LED_DISABLED_VALUE = 0x08; ///< Observed 0x2B live setting: LED disabled
 
 // --- CMD_WAKEUP (0x3A) control parameters ---------------------------------
+/// The first payload byte's low five bits select the sub-command and bit 7 makes it a read.
+static constexpr uint8_t WAKEUP_OP_ISS_SLEEP_DELAY = 0x01; ///< ISS sleep delay, BE32 minutes
+static constexpr uint8_t WAKEUP_OP_ISS_THRESHOLD = 0x02;   ///< ISS threshold, BE32 two's-complement dBu
 static constexpr uint8_t WAKEUP_OP_POWER = 0x03;           ///< Power sub-command byte
 static constexpr uint8_t WAKEUP_OP_ISS_LED = 0x06;    ///< ISS monitor LED enable sub-command
 static constexpr uint8_t ISS_LED_ENABLED = 0x00;      ///< 0x3A 06 value: LEDs on
@@ -309,6 +343,57 @@ static constexpr uint8_t WAKEUP_VAL_ON_1 = 0x7F;      ///< Power ON / Wakeup pha
 static constexpr uint8_t WAKEUP_VAL_ON_2 = 0x01;           ///< Power ON / Wakeup phase 2
 static constexpr uint8_t WAKEUP_VAL_STANDBY_1 = 0x02;      ///< Standby / Sleep phase 1 (prepare)
 static constexpr uint8_t WAKEUP_VAL_STANDBY_2 = 0x00;      ///< Standby / Sleep phase 2 (power off / sleep)
+
+// --- ISS sleep delay and sensitivity (CMD_WAKEUP 01 / 02) --------------------
+/// @name ISS settings
+///
+/// Intelligent Signal Sensing puts a speaker to sleep after its input has stayed below a
+/// threshold for the sleep delay. Encodings from the GLM bus decoding guide v3.0, section 11.2,
+/// which also gives verified example frames; tests/test_dsp_frame.cpp reproduces them.
+///
+///  - The delay is minutes as a big-endian 32-bit word, clamped by the firmware to 14400.
+///    ISS_SLEEP_DELAY_NEVER disables sleeping altogether.
+///  - The threshold is dBu as a big-endian 32-bit two's-complement word. GLM offers only the
+///    three sensitivity presets below; the firmware accepts -80..-35 dBu.
+///  - Every status query (0x08) resets the idle timer, which is one reason this component stops
+///    polling once the control window closes.
+///
+/// GLM follows each edit with SERVICE_STORE_USER_PARS. This component does not: the values are
+/// working settings only, and a speaker reloads its stored ones whenever it restarts, which
+/// includes every wake from sleep or standby. The hub re-sends them after each discovery.
+///@{
+static constexpr uint32_t ISS_SLEEP_DELAY_NEVER = 0xFFFFFFFF;
+static constexpr uint32_t ISS_SLEEP_DELAY_MAX_MIN = 14400;
+static constexpr int32_t ISS_THRESHOLD_LOW_DBU = -61;     ///< Low sensitivity
+static constexpr int32_t ISS_THRESHOLD_MEDIUM_DBU = -68;  ///< Medium sensitivity
+static constexpr int32_t ISS_THRESHOLD_HIGH_DBU = -75;    ///< High sensitivity
+///@}
+
+// --- Filter bypass (CMD_BYPASS_FILTERS 0x53) --------------------------------
+/// @name Filter bypass masks
+///
+/// 53 00 [mask] (guide v3.0, section 10.3). The masks are separate commands, not bits to
+/// combine: a speaker holds one bypass at a time, and FILTER_BYPASS_NONE clears it. Only the
+/// phase-correction mask is exposed. The other bypasses every remaining audio filter, which is
+/// a factory-test state rather than a listening one.
+///@{
+static constexpr uint8_t FILTER_BYPASS_NONE = 0x00;
+static constexpr uint8_t FILTER_BYPASS_PHASE_EQ = 0x01;   ///< Group-delay (phase-correction) FIR
+static constexpr uint8_t FILTER_BYPASS_OTHER = 0x02;      ///< All other audio filters; never sent
+///@}
+
+// --- Supply-rail telemetry (tags 0x88 / 0x89) -------------------------------
+/// @name Supply-rail conversion
+///
+/// Three-way models report two supply monitors as a percentage of each rail's span; the volts
+/// are base + percent / 100 * span (guide v3.0, appendix B.3). The 9301B and 9401A use a
+/// different low-rail formula, but neither is a monitor this component targets.
+///@{
+static constexpr float PSU_MAIN_BASE_V = 35.0f;
+static constexpr float PSU_MAIN_SPAN_V = 23.0f;
+static constexpr float PSU_LOW_BASE_V = 9.0f;
+static constexpr float PSU_LOW_SPAN_V = 21.0f;
+///@}
 
 }  // namespace gensam
 }  // namespace esphome

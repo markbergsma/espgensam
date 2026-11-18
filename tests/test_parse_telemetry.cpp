@@ -30,6 +30,7 @@
 #include "../components/gensam/monitor.h"
 
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <initializer_list>
 #include <vector>
@@ -167,6 +168,58 @@ void test_format_a_unshifted() {
   check(m.output_db == static_cast<int8_t>(0x9C), "format A: output read from absolute offset 12");
 }
 
+// --- Tag 0x49 (counter) -------------------------------------------------------------------------
+
+/// Tag 0x49 is the speaker's 1-byte telemetry counter (guide v3.0 section 8.1). It wraps through
+/// every value, so whenever it equals another tag the scan must still consume it as an operand.
+/// Here the counter is 0x41: read as a tag, it would take 0x84 (the next tag) as the temperature.
+void test_counter_operand_is_consumed() {
+  GenSAMMonitor m = parse({0x41, 0x14, 0x47, 0x01, 0x49, 0x41, 0x84, 0x02, 0xB3});
+  check(m.temperature == 20, "counter 0x41: temperature not overwritten by the counter operand");
+  check(m.standby_known && !m.standby, "counter 0x41: ACTIVE");
+}
+
+/// A counter equal to an output-meter tag must not inject a phantom level either.
+void test_counter_equal_to_meter_tag() {
+  GenSAMMonitor m = parse({0x41, 0x14, 0x43, 0x80, 0x45, 0x90, 0x49, 0x45, 0x47, 0x01});
+  check(m.output_db == static_cast<int8_t>(0x90), "counter 0x45: output_db is the real BS meter");
+  check(m.standby_known && !m.standby, "counter 0x45: following power tag still parsed");
+}
+
+// --- 2-byte records: coil temperatures and supply rails -----------------------------------------
+
+/// The worked example in the GLM bus decoding guide v3.0, section 8.2 (an 8320A): TW and BS coil
+/// temperatures both 00 21 = 33 degC. A two-way has no midrange, so 0x82 stays unreported.
+void test_coil_temperatures() {
+  GenSAMMonitor m = parse({0x41, 0x21, 0x81, 0x00, 0x21, 0x83, 0x00, 0x21, 0x42, 0x90, 0x43,
+                           0x80, 0x45, 0x80, 0x47, 0x01, 0x49, 0x24, 0x84, 0x02, 0xB3});
+  check(m.tw_coil_temperature == 33.0f, "coil: TW 0x81 = 33 C");
+  check(m.bs_coil_temperature == 33.0f, "coil: BS 0x83 = 33 C");
+  check(std::isnan(m.md_coil_temperature), "coil: MD unreported on a two-way stays NAN");
+  check(m.temperature == 33 && m.standby_known && !m.standby, "coil: 1-byte records still parse");
+}
+
+/// Processor load is the whole 16-bit word in per mille (guide sections 3.6 and 8): 02 B3 is the
+/// 8320A's typical 691, and 02 EA is the two-way reading in captures/active-boot-20261116-0252.log.
+void test_processor_load() {
+  GenSAMMonitor m = parse({0x41, 0x21, 0x84, 0x02, 0xB3});
+  check(std::fabs(m.processor_load - 69.1f) < 0.01f, "load: 0x84 02 B3 = 69.1 %");
+  m = parse({0x41, 0x2E, 0x47, 0x01, 0x49, 0xC2, 0x84, 0x02, 0xEA});
+  check(std::fabs(m.processor_load - 74.6f) < 0.01f, "load: 0x84 02 EA = 74.6 %");
+  check(m.standby_known && !m.standby, "load: preceding records still parse");
+  m = parse({0x41, 0x21, 0x81, 0x00, 0x21});
+  check(std::isnan(m.processor_load), "load: unreported 0x84 stays NAN");
+}
+
+/// Supply rails at their typical three-way readings, 70 % and 62 % (guide section 8.1).
+void test_supply_rails() {
+  GenSAMMonitor m = parse({0x41, 0x21, 0x82, 0x00, 0x24, 0x88, 0x00, 0x46, 0x89, 0x00, 0x3E});
+  check(m.md_coil_temperature == 36.0f, "rails: MD coil 0x82 = 36 C");
+  check(std::fabs(m.psu_main_voltage - 51.1f) < 0.01f, "rails: main 70 % = 51.1 V");
+  check(std::fabs(m.psu_low_voltage - 22.02f) < 0.01f, "rails: low 62 % = 22.02 V");
+  check(std::isnan(m.tw_coil_temperature), "rails: unreported TW coil stays NAN");
+}
+
 }  // namespace
 
 int main() {
@@ -182,6 +235,11 @@ int main() {
   test_tag_47_standby_truncated();
   test_tag_47_invalid_operand_ignored();
   test_format_a_unshifted();
+  test_counter_operand_is_consumed();
+  test_counter_equal_to_meter_tag();
+  test_coil_temperatures();
+  test_processor_load();
+  test_supply_rails();
 
   if (failures != 0) {
     std::printf("\n%d check(s) FAILED\n", failures);

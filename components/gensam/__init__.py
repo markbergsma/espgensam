@@ -17,7 +17,12 @@ from esphome.const import (
     CONF_LIGHT,
     CONF_BRIGHTNESS,
     UNIT_CELSIUS,
+    UNIT_VOLT,
+    UNIT_PERCENT,
+    ICON_CHIP,
+    DEVICE_CLASS_EMPTY,
     DEVICE_CLASS_TEMPERATURE,
+    DEVICE_CLASS_VOLTAGE,
     DEVICE_CLASS_CONNECTIVITY,
     DEVICE_CLASS_PROBLEM,
     DEVICE_CLASS_IDENTIFY,
@@ -86,12 +91,48 @@ CONF_FIRMWARE_VERSION = "firmware_version"
 CONF_HARDWARE_ID = "hardware_id"
 CONF_SAM_NAME_SENSOR = "sam_name"
 
+# Per-driver voice-coil temperatures and supply rails (telemetry tags 0x81-0x83, 0x88/0x89).
+# The coil figures are modelled by the speaker's DSP, not measured; a two-way never reports
+# the midrange, and only three-way models report the rails.
+CONF_TWEETER_COIL_TEMPERATURE = "tweeter_coil_temperature"
+CONF_MIDRANGE_COIL_TEMPERATURE = "midrange_coil_temperature"
+CONF_WOOFER_COIL_TEMPERATURE = "woofer_coil_temperature"
+CONF_PSU_MAIN_VOLTAGE = "psu_main_voltage"
+CONF_PSU_LOW_VOLTAGE = "psu_low_voltage"
+CONF_PROCESSOR_LOAD = "processor_load"
+
+# key -> (default name suffix, unit, device class, accuracy decimals). Order matters: it is the
+# order of the trailing sensor pointers in GenSAMMonitorBinding (monitor.h).
+EXTENDED_TELEMETRY_SENSORS = {
+    CONF_TWEETER_COIL_TEMPERATURE: ("Tweeter Coil Temperature", UNIT_CELSIUS, DEVICE_CLASS_TEMPERATURE, 0),
+    CONF_MIDRANGE_COIL_TEMPERATURE: ("Midrange Coil Temperature", UNIT_CELSIUS, DEVICE_CLASS_TEMPERATURE, 0),
+    CONF_WOOFER_COIL_TEMPERATURE: ("Woofer Coil Temperature", UNIT_CELSIUS, DEVICE_CLASS_TEMPERATURE, 0),
+    CONF_PSU_MAIN_VOLTAGE: ("Main Supply Voltage", UNIT_VOLT, DEVICE_CLASS_VOLTAGE, 1),
+    CONF_PSU_LOW_VOLTAGE: ("Low Supply Voltage", UNIT_VOLT, DEVICE_CLASS_VOLTAGE, 1),
+    CONF_PROCESSOR_LOAD: ("Processor Load", UNIT_PERCENT, DEVICE_CLASS_EMPTY, 1),
+}
+
+
+def _extended_telemetry_schema(key):
+    _, unit, device_class, decimals = EXTENDED_TELEMETRY_SENSORS[key]
+    return sensor.sensor_schema(
+        unit_of_measurement=unit,
+        icon=ICON_CHIP if key == CONF_PROCESSOR_LOAD else cv.UNDEFINED,
+        accuracy_decimals=decimals,
+        device_class=device_class,
+        state_class=STATE_CLASS_MEASUREMENT,
+        entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+    )
+
 CONF_REDISCOVER_BUTTON = "rediscover_button"
 CONF_BASS_MANAGEMENT_CROSSOVER_FREQUENCY = "bass_management_crossover_frequency"
 CONF_VOLUME_DB = "volume_db"
 CONF_SYSTEM_POWER = "system_power"
 CONF_SYSTEM_MUTE = "system_mute"
 CONF_SYSTEM_LEDS = "system_leds"
+CONF_ISS_SLEEP_DELAY = "iss_sleep_delay"
+CONF_ISS_SENSITIVITY = "iss_sensitivity"
+CONF_PHASE_CORRECTION_BYPASS = "phase_correction_bypass"
 CONF_INPUT = "input"
 CONF_INITIAL_INPUT = "initial_input"
 CONF_CALIBRATION_BYPASS = "calibration_bypass"
@@ -197,6 +238,11 @@ GenSAMVolumeNumber = gensam_ns.class_("GenSAMVolumeNumber", number.Number)
 GenSAMInputSelect = gensam_ns.class_("GenSAMInputSelect", select.Select)
 GenSAMGroupSelect = gensam_ns.class_("GenSAMGroupSelect", select.Select)
 GenSAMCrossoverSelect = gensam_ns.class_("GenSAMCrossoverSelect", select.Select)
+GenSAMIssSleepDelaySelect = gensam_ns.class_("GenSAMIssSleepDelaySelect", select.Select)
+GenSAMIssSensitivitySelect = gensam_ns.class_("GenSAMIssSensitivitySelect", select.Select)
+GenSAMPhaseCorrectionBypassSwitch = gensam_ns.class_(
+    "GenSAMPhaseCorrectionBypassSwitch", switch.Switch
+)
 GenSAMStatusLED = gensam_ns.class_("GenSAMStatusLED", cg.Component)
 StatusLEDMode = gensam_ns.enum("StatusLEDMode", is_class=True)
 STATUS_LED_MODES = {
@@ -217,6 +263,16 @@ INPUT_OPTIONS = [
 # crossover.h produces for every valid setting; tests/test_crossover.cpp spells the same list.
 CROSSOVER_OPTIONS = ["Full band"] + [
     f"{hz} Hz" for hz in range(MIN_CROSSOVER_HZ, MAX_CROSSOVER_HZ + 1, CROSSOVER_STEP_HZ)
+]
+
+# ISS select options, in order. Must match ISS_SLEEP_DELAY_OPTIONS and ISS_THRESHOLD_OPTIONS in
+# iss.h exactly: those are what the entities publish back.
+ISS_SLEEP_DELAY_OPTIONS = [
+    "Speaker default", "2 min", "10 min", "30 min", "60 min", "120 min", "180 min", "240 min",
+    "Never",
+]
+ISS_SENSITIVITY_OPTIONS = [
+    "Speaker default", "Low (-61 dBu)", "Medium (-68 dBu)", "High (-75 dBu)",
 ]
 
 
@@ -300,6 +356,13 @@ def _validate_monitor(conf):
             state_class=STATE_CLASS_MEASUREMENT,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         )(c)
+
+    for key, (suffix, *_rest) in EXTENDED_TELEMETRY_SENSORS.items():
+        if key not in conf:
+            c = {CONF_NAME: f"{prefix}{suffix}", CONF_DISABLED_BY_DEFAULT: True}
+            if dev_id:
+                c[CONF_DEVICE_ID] = dev_id
+            conf[key] = _extended_telemetry_schema(key)(c)
 
     if CONF_INPUT_LEVEL not in conf:
         c = {CONF_NAME: f"{prefix}Input Level"}
@@ -472,6 +535,10 @@ MONITOR_SCHEMA = cv.All(
                 state_class=STATE_CLASS_MEASUREMENT,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
+            **{
+                cv.Optional(key): _extended_telemetry_schema(key)
+                for key in EXTENDED_TELEMETRY_SENSORS
+            },
             cv.Optional(CONF_INPUT_LEVEL): sensor.sensor_schema(
                 unit_of_measurement="dBFS",
                 accuracy_decimals=0,
@@ -552,7 +619,7 @@ DISCOVERY_SLOT_SETTINGS_SCHEMA = web_server.WEBSERVER_SORTING_SCHEMA.extend({
 MONITOR_DIAGNOSTICS = (
     CONF_ONLINE, CONF_INPUT_LEVEL, CONF_OUTPUT_LEVEL, CONF_TEMPERATURE, CONF_MODEL,
     CONF_SERIAL_NUMBER_SENSOR, CONF_FIRMWARE_VERSION, CONF_HARDWARE_ID, CONF_IDENTIFY,
-    CONF_SAM_NAME_SENSOR,
+    CONF_SAM_NAME_SENSOR, *EXTENDED_TELEMETRY_SENSORS,
 )
 
 MONITOR_CONTROLS = (
@@ -910,6 +977,15 @@ def _validate_hub(config):
                 {"delta": 1.0},
                 {"heartbeat": "60s"},
             ])
+        # 1b. Coil temperatures, supply rails and processor load: same delta + heartbeat, at
+        # their resolution
+        for key, (_, _, _, decimals) in EXTENDED_TELEMETRY_SENSORS.items():
+            ext_c = mon_conf.get(key, {})
+            if CONF_FILTERS not in ext_c:
+                ext_c[CONF_FILTERS] = sensor.validate_filters([
+                    {"delta": 1.0 if decimals == 0 else 0.5},
+                    {"heartbeat": "60s"},
+                ])
         # 2. Input/Output levels: throttle average over averaging period
         if period and period.total_seconds > 0:
             in_c = mon_conf.get(CONF_INPUT_LEVEL, {})
@@ -1017,6 +1093,21 @@ _CONFIG_SCHEMA = cv.Schema(
         ),
         cv.Optional(CONF_SYSTEM_LEDS): switch.switch_schema(
             GenSAMSystemLEDSwitch, icon="mdi:led-on"
+        ),
+        cv.Optional(CONF_ISS_SLEEP_DELAY): select.select_schema(
+            GenSAMIssSleepDelaySelect,
+            icon="mdi:sleep",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        ),
+        cv.Optional(CONF_ISS_SENSITIVITY): select.select_schema(
+            GenSAMIssSensitivitySelect,
+            icon="mdi:waveform",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        ),
+        cv.Optional(CONF_PHASE_CORRECTION_BYPASS): switch.switch_schema(
+            GenSAMPhaseCorrectionBypassSwitch,
+            icon="mdi:sine-wave",
+            entity_category=ENTITY_CATEGORY_CONFIG,
         ),
         cv.Optional(CONF_STATUS_LED): cv.Schema(
             {
@@ -1212,6 +1303,25 @@ async def to_code(config):
         leds_sw = await switch.new_switch(config[CONF_SYSTEM_LEDS])
         cg.add(leds_sw.set_hub(var))
 
+    if CONF_ISS_SLEEP_DELAY in config:
+        iss_delay_sel = await select.new_select(
+            config[CONF_ISS_SLEEP_DELAY], options=ISS_SLEEP_DELAY_OPTIONS
+        )
+        cg.add(iss_delay_sel.set_hub(var))
+        cg.add(var.set_iss_sleep_delay_select(iss_delay_sel))
+
+    if CONF_ISS_SENSITIVITY in config:
+        iss_sens_sel = await select.new_select(
+            config[CONF_ISS_SENSITIVITY], options=ISS_SENSITIVITY_OPTIONS
+        )
+        cg.add(iss_sens_sel.set_hub(var))
+        cg.add(var.set_iss_threshold_select(iss_sens_sel))
+
+    if CONF_PHASE_CORRECTION_BYPASS in config:
+        phase_sw = await switch.new_switch(config[CONF_PHASE_CORRECTION_BYPASS])
+        cg.add(phase_sw.set_hub(var))
+        cg.add(var.set_phase_correction_bypass_switch(phase_sw))
+
     if CONF_STATUS_LED in config:
         led_conf = config[CONF_STATUS_LED]
         led_var = cg.new_Pvariable(led_conf[CONF_ID])
@@ -1237,6 +1347,12 @@ async def to_code(config):
 
             # 3. Output level sensor
             out_sens = await sensor.new_sensor(mon_conf[CONF_OUTPUT_LEVEL])
+
+            # 3b. Coil temperature, supply rail and processor load sensors
+            ext_sens = [
+                str(await sensor.new_sensor(mon_conf[key]))
+                for key in EXTENDED_TELEMETRY_SENSORS
+            ]
 
             # 4. Online status binary sensor
             online_sens = await binary_sensor.new_binary_sensor(mon_conf[CONF_ONLINE])
@@ -1337,7 +1453,8 @@ async def to_code(config):
                         f"{input_sel}, {src_c}, {ch_c}, "
                         f"{'true' if configured else 'false'}, {design_rate}U, "
                         f"{bypass_sw}, false, "
-                        f"{'true' if discovery_slot else 'false'}, {sam_name_sens}}}"
+                        f"{'true' if discovery_slot else 'false'}, {sam_name_sens}, "
+                        f"{', '.join(ext_sens)}}}"
                     )
                 )
             )

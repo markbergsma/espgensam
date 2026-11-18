@@ -64,10 +64,31 @@ Frame make_wakeup_step(uint8_t op, uint8_t val);
 /// @return CMD_WAKEUP frame carrying [0x06, 0x00] when enabled or [0x06, 0x01] when disabled.
 Frame make_iss_led_state(uint8_t addr, bool enabled);
 
-/// @brief Build a monitor flash-commit frame (CMD_FLASH_COMMIT 0x15).
+/// @brief Build an ISS sleep-delay frame (CMD_WAKEUP 0x3A, sub-command 0x01).
+/// @param addr Target address; a monitor or BROADCAST_ADDRESS.
+/// @param minutes Delay in minutes, clamped to ISS_SLEEP_DELAY_MAX_MIN, or ISS_SLEEP_DELAY_NEVER.
+/// @return CMD_WAKEUP frame carrying [0x01, minutes as big-endian 32-bit].
+Frame make_iss_sleep_delay(uint8_t addr, uint32_t minutes);
+
+/// @brief Build an ISS threshold frame (CMD_WAKEUP 0x3A, sub-command 0x02).
+/// @param addr Target address; a monitor or BROADCAST_ADDRESS.
+/// @param dbu Threshold in dBu, e.g. ISS_THRESHOLD_MEDIUM_DBU.
+/// @return CMD_WAKEUP frame carrying [0x02, dbu as big-endian 32-bit two's complement].
+Frame make_iss_threshold(uint8_t addr, int32_t dbu);
+
+/// @brief Build a store-working-settings frame (CMD_SERVICE 0x15, SERVICE_STORE_USER_PARS).
+///
+/// Writes the speaker's working settings into its stored start-up profile. Never sent by this
+/// component; see const.h.
 /// @param addr Target monitor address.
-/// @return CMD_FLASH_COMMIT frame carrying [0x33, 0x00].
-Frame make_flash_commit(uint8_t addr);
+/// @return CMD_SERVICE frame carrying [0x33, SERVICE_PROFILE_DEFAULT].
+Frame make_store_user_params(uint8_t addr);
+
+/// @brief Build a filter-bypass frame (CMD_BYPASS_FILTERS 0x53).
+/// @param addr Target monitor address.
+/// @param mask One FILTER_BYPASS_* value; the masks are not combinable.
+/// @return CMD_BYPASS_FILTERS frame carrying [0x00, mask].
+Frame make_filter_bypass(uint8_t addr, uint8_t mask);
 
 /// @brief Build the master volume broadcast (0xFF 0x1F) for a decibel level.
 /// @param db Target volume in dBFS; converted to the 24-bit fixed-point wire value.
@@ -137,16 +158,16 @@ Frame make_audio_source(uint8_t addr, uint8_t input_idx, uint8_t source, uint8_t
 /// @return CMD_SUB_LFE_LEVEL frame carrying the 2-byte record.
 Frame make_lfe_level(uint8_t addr, float level_db);
 
-/// @brief Build a "prepare for configuration" frame (CMD_PREPARE_CONFIG 0x17).
+/// @brief Build the "use stored settings" frame (CMD_NET_SETTINGS 0x17, payload 0x01).
 ///
 /// GLM sends this once per speaker immediately before a block of DSP settings, both during
-/// enumeration and when re-applying a group.  What the monitor does with it is not known -
-/// the protocol specification marks its meaning unresolved - but the exact frame
-/// (`02' 17 01 1B 5A 7E`) appears in this project's own bus captures, so emitting it
-/// reproduces observed OEM behaviour rather than inventing one.
+/// enumeration and when re-applying a group.  The firmware takes it as "use the stored
+/// settings and ignore the DIP switches" (GLM bus decoding guide v3.0, section 6.6), so the
+/// values about to arrive are not overridden by the rear-panel switches.  The exact frame
+/// (`02' 17 01 1B 5A 7E`) appears in this project's own bus captures.
 /// @param addr Target monitor bus address.
-/// @return CMD_PREPARE_CONFIG frame carrying its single {0x01} payload byte.
-Frame make_prepare_config(uint8_t addr);
+/// @return CMD_NET_SETTINGS frame carrying NET_SETTINGS_USE_STORED.
+Frame make_use_stored_settings(uint8_t addr);
 
 /// @brief Build one parametric EQ band frame (CMD_DSP 0x10, sub-command DSP_SUB_PEQ 0x0E).
 ///

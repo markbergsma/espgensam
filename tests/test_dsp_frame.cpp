@@ -1,5 +1,5 @@
 /// @file test_dsp_frame.cpp
-/// @brief Host-side tests for DSP, LFE, and ISS LED frame builders.
+/// @brief Host-side tests for DSP, LFE, ISS and filter-bypass frame builders.
 ///
 /// ===================================================================================
 /// RUNNING
@@ -137,10 +137,45 @@ void test_monitor_led_frames() {
             off.payload == std::vector<uint8_t>({0x06, 0x01}),
         "stored LED disable uses 0x3A 06 01");
 
-  const Frame commit = esphome::gensam::make_flash_commit(0x03);
-  check(commit.address == 0x03 && commit.command == esphome::gensam::CMD_FLASH_COMMIT &&
+  const Frame commit = esphome::gensam::make_store_user_params(0x03);
+  check(commit.address == 0x03 && commit.command == esphome::gensam::CMD_SERVICE &&
             commit.payload == std::vector<uint8_t>({0x33, 0x00}),
         "stored LED setting is committed with 0x15 33 00");
+}
+
+// --- ISS settings and filter bypass -----------------------------------------------------
+// Expected frames are the verified examples in the GLM bus decoding guide v3.0, sections 10.3
+// and 11.2, complete with CRC. ISS examples are broadcast; the bypass examples go to 0x03.
+
+void test_iss_and_bypass_frames() {
+  using esphome::gensam::BROADCAST_ADDRESS;
+  check_wire("ISS sleep delay 10 min matches guide",
+             esphome::gensam::make_iss_sleep_delay(BROADCAST_ADDRESS, 10),
+             "FF' 3A 01 00 00 00 0A F8 1B 7E");
+  check_wire("ISS sleep delay 60 min matches guide",
+             esphome::gensam::make_iss_sleep_delay(BROADCAST_ADDRESS, 60),
+             "FF' 3A 01 00 00 00 3C AE 8E 7E");
+  check_wire("ISS threshold -75 dBu (High) matches guide",
+             esphome::gensam::make_iss_threshold(BROADCAST_ADDRESS,
+                                                 esphome::gensam::ISS_THRESHOLD_HIGH_DBU),
+             "FF' 3A 02 FF FF FF B5 C7 C2 7E");
+  check_wire("ISS threshold -80 dBu matches guide",
+             esphome::gensam::make_iss_threshold(BROADCAST_ADDRESS, -80),
+             "FF' 3A 02 FF FF FF B0 97 67 7E");
+
+  const Frame never = esphome::gensam::make_iss_sleep_delay(0x02, esphome::gensam::ISS_SLEEP_DELAY_NEVER);
+  check(never.payload == std::vector<uint8_t>({0x01, 0xFF, 0xFF, 0xFF, 0xFF}),
+        "ISS sleep delay Never is FF FF FF FF, not clamped");
+  const Frame clamped = esphome::gensam::make_iss_sleep_delay(0x02, 20000);
+  check(clamped.payload == std::vector<uint8_t>({0x01, 0x00, 0x00, 0x38, 0x40}),
+        "ISS sleep delay clamps to the firmware's 14400 min");
+
+  check_wire("phase-correction bypass on matches guide",
+             esphome::gensam::make_filter_bypass(0x03, esphome::gensam::FILTER_BYPASS_PHASE_EQ),
+             "03' 53 00 01 73 9C 7E");
+  check_wire("filter bypass off matches guide",
+             esphome::gensam::make_filter_bypass(0x03, esphome::gensam::FILTER_BYPASS_NONE),
+             "03' 53 00 00 63 BD 7E");
 }
 
 // --- Level compensation -----------------------------------------------------------------
@@ -493,6 +528,7 @@ void test_lfe_level_encoding_details() {
 int main() {
   std::printf("DSP, LFE and ISS LED frame builders\n");
   test_monitor_led_frames();
+  test_iss_and_bypass_frames();
   test_captured_lfe_level_frames();
   test_captured_lfe_routing_frames();
   test_lfe_level_encoding_details();

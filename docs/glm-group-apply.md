@@ -65,7 +65,7 @@ From `glm_source_select_capture.log`, one 8330A being configured from scratch:
 
 ```
 0x03  05  04 00 00 00 FF FF EA 00 01 90 00 02 DA   stop generator
-0x03  17  01                                       prepare for configuration
+0x03  17  01                                       use stored settings, not DIP switches
 0x03  10  0E 05 ...                                PEQ band 5
 0x03  10  0E 06 ...                                PEQ band 6
 0x03  3B  00 5A                                    crossover, 90 Hz
@@ -179,12 +179,15 @@ which is exactly why `0x3E`, the one that does vary, turned out to be readable:
 | Opcode | Frames | Payload | Addressed to | Sent by us |
 |---|---|---|---|---|
 | `0x05` signal generator | 75 | `04 00 00 00 FF FF EA 00 01 90 00 02 DA`, always | every speaker | no |
-| `0x2D` session preamble | 12 | `00`, always | broadcast, at app connect only | no |
-| `0x3C` | 41 | `00 00`, always | the subwoofer only | no |
-| `0x3D` input sync | 105 | `00 00`, always | every speaker, and broadcast at app connect | no |
+| `0x2D` switch bypass (no effect) | 12 | `00`, always | broadcast, at app connect only | no |
+| `0x3C` analogue bass filter | 41 | `00 00`, always | the subwoofer only | no |
+| `0x3D` bass-management bypass | 105 | `00 00`, always | every speaker, and broadcast at app connect | no |
 | `0x3E` LFE level | 38 | `00 00`, `00 06`, `00 FC` | the subwoofer only | **yes**, with an LFE feed |
-| `0x42` | 25 | `00 00`, always | the subwoofer only | no |
-| `0x10 01 09` | 62 | `00 00 00`, always | every speaker | no |
+| `0x42` digital-sum gain | 25 | `00 00`, always | the subwoofer only | no |
+| `0x10 01 09` level in 0.1 dB | 62 | `00 00 00`, always | every speaker | no |
+
+Names follow the GLM bus decoding guide; see
+[`glm-bus-guide-reconciliation.md`](glm-bus-guide-reconciliation.md) §1.
 
 `0x10 01 09` is not a stray: there are exactly 62 `0x10 01 00` frames too, and each `09` follows
 an `00` immediately. The pair travels together.
@@ -352,8 +355,10 @@ Each of these is a choice, not an oversight.
 - **No LFE on a hand-picked input change.** Selecting an input from Home Assistant sends the
   subwoofer's input-1 frame with an empty channel: that path has no group behind it, so there
   is nothing to say what the LFE routing should be. A group push sets it properly.
-- **No flash commit.** Neither does GLM: there is no `0x15` anywhere in the group-switch
-  capture, so a group switch is a RAM-only operation on both sides.
+- **No flash commit.** Neither does GLM: there is no `0x15` store anywhere in the group-switch
+  capture, so a group switch is a RAM-only operation on both sides. The `17 01` that opens each
+  pass makes the speaker use the settings it is given rather than its DIP switches; it does
+  not store anything.
 - **Calibration bypass is a re-push of the group.** GLM's "Cal bypassed" resets the EQ, level
   calibration, time-of-flight delay and system delay (GLM 5 manual, FAQ 11.4). No capture has
   it and no setup field stores it. espgensam re-pushes the active group with all 20 PEQ slots

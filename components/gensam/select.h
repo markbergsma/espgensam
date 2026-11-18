@@ -1,7 +1,7 @@
 #pragma once
 
 /// @file select.h
-/// @brief ESPHome Select entities for per-monitor input routing and crossover, and group presets.
+/// @brief ESPHome Select entities for per-monitor input routing and crossover, group presets and ISS.
 ///
 /// ===================================================================================
 /// ARCHITECTURAL DESIGN RATIONALE
@@ -27,12 +27,12 @@
 ///    so no single system-wide source can describe it.  An earlier version of this component
 ///    had one global source select, which could not represent that setup; it was removed.
 ///
-///    "Automatic" (source 0x03) is deliberately absent.  The HLM protocol specification lists
-///    it, but it is a *standalone* setting - what a speaker does on its own, not live input
-///    selection - neither project has observed it on the wire, so its pair selector and
-///    channel bytes are unknown, and it would need a flash commit (0x15) to stick, which this
-///    component does not implement.  A snooped 0x03 is handled defensively in
-///    snoop_audio_source_().
+///    "Automatic" (source 0x03) is deliberately absent.  It is a *standalone* setting - what a
+///    speaker does on its own, not live input selection - and GLM writes it as part of a store
+///    (CMD_SERVICE 0x15 33), which this component does not send.  It has been seen only inside
+///    a GLM store (`40 00 03 02 01`/`02`, docs/glm-protocol-comparison.md section 9), and the
+///    meaning of its last two bytes there is not settled.  A snooped 0x03 is handled
+///    defensively in snoop_audio_source_().
 ///
 /// 2. Bass Management Crossover (GenSAMCrossoverSelect):
 ///    CMD_BASS_MANAGE_XO (0x3B) carries one big-endian 16-bit word: a crossover frequency in
@@ -71,6 +71,11 @@
 ///    0x40 and 0x3B frames from external GLM software are snooped, updating the owning
 ///    monitor's selects without bus contention.  That is not only cosmetic: the
 ///    re-transmission above would otherwise reassert the stale value.
+///
+/// 8. ISS Sleep Delay & Sensitivity (GenSAMIssSleepDelaySelect, GenSAMIssSensitivitySelect):
+///    System-wide, runtime-only overrides of the speakers' Intelligent Signal Sensing settings,
+///    offered as GLM's own menu plus "Speaker default". iss.h holds the options and explains why
+///    they are never stored in the speakers; hub.h section 7 covers when they are sent.
 /// ===================================================================================
 
 #include "esphome/core/component.h"
@@ -78,6 +83,7 @@
 #include "esphome/components/select/select.h"
 #include "hub.h"
 #include "const.h"
+#include "iss.h"
 
 #include <string>
 
@@ -163,6 +169,53 @@ class GenSAMCrossoverSelect : public select::Select {
 
   GenSAMHub *hub_{nullptr};
   std::string serial_or_id_{};
+};
+
+/// @brief Select entity that overrides the ISS sleep delay on every speaker.
+class GenSAMIssSleepDelaySelect : public select::Select {
+ public:
+  /// @brief Set the parent GenSAMHub instance.
+  /// @param hub Pointer to the GenSAMHub.
+  void set_hub(GenSAMHub *hub) { hub_ = hub; }
+
+ protected:
+  /// @brief Action executed when the user picks a delay in Home Assistant.
+  /// @param value One of the ISS_SLEEP_DELAY_OPTIONS strings.
+  void control(const std::string &value) override {
+    uint32_t minutes;
+    if (hub_ == nullptr || !iss_option_value(ISS_SLEEP_DELAY_OPTIONS, value.c_str(), minutes)) {
+      return;
+    }
+    hub_->set_iss_sleep_delay(minutes);
+    // Publish what the hub holds, so a rejected request leaves the old value showing.
+    const char *name = iss_option_name(ISS_SLEEP_DELAY_OPTIONS, hub_->get_iss_sleep_delay());
+    this->publish_state(name != nullptr ? name : ISS_STR_SPEAKER_DEFAULT);
+  }
+
+  GenSAMHub *hub_{nullptr};
+};
+
+/// @brief Select entity that overrides the ISS sensitivity (threshold) on every speaker.
+class GenSAMIssSensitivitySelect : public select::Select {
+ public:
+  /// @brief Set the parent GenSAMHub instance.
+  /// @param hub Pointer to the GenSAMHub.
+  void set_hub(GenSAMHub *hub) { hub_ = hub; }
+
+ protected:
+  /// @brief Action executed when the user picks a sensitivity in Home Assistant.
+  /// @param value One of the ISS_THRESHOLD_OPTIONS strings.
+  void control(const std::string &value) override {
+    int32_t dbu;
+    if (hub_ == nullptr || !iss_option_value(ISS_THRESHOLD_OPTIONS, value.c_str(), dbu)) {
+      return;
+    }
+    hub_->set_iss_threshold(dbu);
+    const char *name = iss_option_name(ISS_THRESHOLD_OPTIONS, hub_->get_iss_threshold());
+    this->publish_state(name != nullptr ? name : ISS_STR_SPEAKER_DEFAULT);
+  }
+
+  GenSAMHub *hub_{nullptr};
 };
 
 }  // namespace gensam

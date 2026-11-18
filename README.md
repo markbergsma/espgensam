@@ -60,7 +60,9 @@ Each discovery slot automatically gets its own Home Assistant device named `Moni
 needed. On the device web page (web server version 3) each monitor gets its own card, named
 after the monitor, holding all of its entities: mute, input, bypass, crossover, level and delay
 first, then online status, input level, output level, temperature, model, serial number,
-firmware version, hardware ID, identify and SAM name. Cards follow the System Controls and
+firmware version, hardware ID, identify and SAM name. Diagnostic tweeter, midrange and woofer
+coil temperatures, main and low supply voltages, and processor load are also created, disabled by default; each stays
+unknown on models that do not report it (supply rails come from three-way models only, processor load from firmware 1.12 onwards). Cards follow the System Controls and
 Group Preset sections in slot order. Entities on a sub-device use short names such as
 `Temperature`; ESPHome displays the device name alongside them. Switching an existing slot to
 these names may create new Home Assistant entities, so check dashboards and automations.
@@ -255,6 +257,19 @@ external GLM control takes priority.
 ISS sleep and standby reset monitor settings to the defaults stored on each monitor, or to no
 stored settings if no defaults have been saved. Session-only settings are lost. An ISS audio
 wake may not be detected by the hub, so the selected group may not be reapplied automatically.
+
+**ISS Sleep Delay** and **ISS Sensitivity** (System Controls) override the monitors' stored ISS
+settings: GLM's delays from 2 min to 4 h or Never, and Low/Medium/High (−61/−68/−75 dBu).
+They are runtime-only. They are never stored on the monitors, so a sleep or restart reverts them,
+and the hub re-sends them after each discovery and group push. An override therefore applies to
+the next sleep after each wake that the hub handles. *Speaker default* sends nothing. Polling
+holds the monitors awake, so ISS can only count down after the control window closes. It is not
+yet verified that monitors apply these values without a store; see
+[`docs/glm-bus-guide-reconciliation.md`](docs/glm-bus-guide-reconciliation.md) §3.
+
+**Bypass Phase Correction**, disabled by default, bypasses each monitor's phase-correction
+filter for comparison. Like Bypass Calibration it is off after a restart, and it is reapplied
+after discovery and group pushes. Not every SAM model is confirmed to honour it.
 
 Each monitor gets an **Input** select listing `Analog`, `AES3 Channel A (Left)`,
 `AES3 Channel B (Right)` and `AES3 Channel A+B (Sum)`. Routing is per speaker because that is

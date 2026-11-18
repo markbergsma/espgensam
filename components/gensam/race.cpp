@@ -307,7 +307,7 @@ bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
 
     case RaceState::QUERYING_DEVICES: {
       if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS || frame.payload.empty() ||
-          (frame.command != CMD_REPORT_STATUS && frame.command != CMD_HARDWARE_QUERY &&
+          (frame.command != CMD_REPORT_STATUS && frame.command != CMD_SOFTWARE_QUERY_SHORT &&
            frame.command != CMD_SOFTWARE_QUERY && frame.command != CMD_BAR_CODE)) {
         return false;
       }
@@ -630,6 +630,7 @@ void GenSAMHub::race_step_configuring_(uint32_t now) {
   }
 
   ESP_LOGI(TAG, "All discovered monitors configured. Entering live telemetry polling loop.");
+  this->queue_runtime_settings_();
   race_state_ = RaceState::POLLING_MONITORS;
   this->update_bus_status_();
   last_poll_cycle_time_ = now - poll_interval_ms_;      // Start polling immediately
@@ -728,6 +729,7 @@ void GenSAMHub::finish_group_apply_() {
     group_select_->publish_state(group->name);
   }
 
+  this->queue_runtime_settings_();
   race_state_ = RaceState::POLLING_MONITORS;
   this->update_bus_status_();
   last_poll_cycle_time_ = millis() - poll_interval_ms_;
@@ -761,7 +763,7 @@ bool GenSAMHub::send_group_step_(const GenSAMMonitor &mon, const GroupDevice &de
       return true;
 
     case GROUP_STEP_PREPARE:
-      this->send_frame(make_prepare_config(addr));
+      this->send_frame(make_use_stored_settings(addr));
       return true;
 
     case GROUP_STEP_DELAY:

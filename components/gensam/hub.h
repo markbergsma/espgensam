@@ -107,6 +107,23 @@
 ///    GLM taking the bus reverts published state to what was last transmitted (a queued write
 ///    must not reach the bus 15 s later over GLM's own setting), a sniffed GLM setting supersedes
 ///    it, and standby cancels pending volume (a volume broadcast re-establishes amplifier gain).
+///
+/// 7. Runtime-Only Speaker Settings (ISS & Phase-Correction Bypass):
+///    set_iss_sleep_delay(), set_iss_threshold() and set_phase_correction_bypass() use the same
+///    deferred path as the monitor LEDs, after them in priority. What they change does not
+///    survive a speaker restart, and this component never sends the CMD_SERVICE store that
+///    would make it survive (see iss.h). A speaker restarts on every wake from ISS sleep, so
+///    queue_runtime_settings_() queues them again each time the bus returns to polling after a
+///    discovery or group push. That works only while the hub is talking to the speakers, which
+///    it is at every wake; after the control window closes the bus is silent and nothing is
+///    re-sent until the next wake.
+///    - ISS overrides are broadcast, as GLM sends them, and persisted on this device in their
+///      own preference slot. "Speaker default" stops overriding and sends nothing.
+///    - The phase-correction bypass (CMD_BYPASS_FILTERS, FILTER_BYPASS_PHASE_EQ) goes unicast
+///      to each monitor and is not persisted, like the calibration bypass. Only the "on" state
+///      is re-sent; a restarted speaker is already unbypassed.
+///    - None of these frames are snooped. A GLM change is overwritten by an active override at
+///      the next discovery; with "Speaker default" or the bypass off, GLM's setting stands.
 /// ===================================================================================
 
 #include "esphome/core/component.h"
@@ -456,9 +473,47 @@ class GenSAMHub : public Component {
 
   /// @brief Request the monitor LED state for every discovered monitor.
   ///
-  /// The write and flash commit are deferred to a safe bus slot, like system mute/volume.
+  /// The live CMD_BYPASS write is deferred to a safe bus slot, like system mute/volume. Nothing
+  /// is stored in the monitors' flash.
   /// @param enabled True to enable LEDs, false to disable them.
   void set_system_leds_enabled(bool enabled);
+
+  /// @brief Request an ISS sleep-delay override for every monitor.
+  ///
+  /// Deferred like set_system_leds_enabled(), persisted on this device, and re-sent after every
+  /// discovery and group push because the speakers keep it only until their next restart.
+  /// See section 7 of the header comment.
+  /// @param minutes Delay in minutes, ISS_SLEEP_DELAY_NEVER, or ISS_SLEEP_DELAY_DEFAULT to stop
+  ///        overriding (nothing is sent; the speakers revert at their next restart).
+  void set_iss_sleep_delay(uint32_t minutes);
+
+  /// @brief Request an ISS sensitivity (threshold) override for every monitor.
+  ///
+  /// Handled exactly like set_iss_sleep_delay().
+  /// @param dbu Threshold in dBu, or ISS_THRESHOLD_DEFAULT to stop overriding.
+  void set_iss_threshold(int32_t dbu);
+
+  /// @brief Current ISS sleep-delay override, or ISS_SLEEP_DELAY_DEFAULT.
+  uint32_t get_iss_sleep_delay() const { return iss_sleep_delay_; }
+
+  /// @brief Current ISS threshold override, or ISS_THRESHOLD_DEFAULT.
+  int32_t get_iss_threshold() const { return iss_threshold_; }
+
+  /// @brief Request the phase-correction (group-delay FIR) bypass on every monitor.
+  ///
+  /// Sends CMD_BYPASS_FILTERS with FILTER_BYPASS_PHASE_EQ or FILTER_BYPASS_NONE, deferred like
+  /// the other system controls and re-sent after every discovery and group push while on. Not
+  /// persisted: every boot starts with phase correction active. See section 7 of the header.
+  /// @param bypass True to bypass the phase-correction filter, false to restore it.
+  void set_phase_correction_bypass(bool bypass);
+
+  /// @brief Whether phase correction is currently requested to be bypassed.
+  bool is_phase_correction_bypassed() const { return phase_correction_bypass_; }
+
+  /// @brief Register the selects and switch that mirror the ISS and phase-bypass settings.
+  void set_iss_sleep_delay_select(select::Select *sel) { iss_sleep_delay_select_ = sel; }
+  void set_iss_threshold_select(select::Select *sel) { iss_threshold_select_ = sel; }
+  void set_phase_correction_bypass_switch(switch_::Switch *sw) { phase_correction_bypass_switch_ = sw; }
 
   /// @brief Set mute state for an individual monitor by logical RS-485 bus address.
   /// @param address Logical bus address (0x02..0x7F).
@@ -654,6 +709,25 @@ class GenSAMHub : public Component {
 
   /// @brief Send the requested live monitor LED state to each discovered monitor.
   void transmit_system_leds_();
+
+  /// @brief Broadcast whichever ISS overrides are set; clears iss_tx_pending_.
+  void transmit_iss_settings_();
+
+  /// @brief Send the phase-correction bypass state to each discovered monitor.
+  ///
+  /// Clears filter_bypass_tx_pending_ only when every monitor received it.
+  void transmit_filter_bypass_();
+
+  /// @brief Queue the runtime-only settings again after a discovery or group push.
+  ///
+  /// Called where the bus returns to polling, since a monitor that restarted has lost them.
+  void queue_runtime_settings_();
+
+  /// @brief Load the ISS overrides from their own preference slot.
+  void restore_iss_state_();
+
+  /// @brief Persist the ISS overrides.
+  void save_iss_state_();
 
   /// @brief Broadcast current_volume_db_, satisfying any pending volume request.
   ///
@@ -878,6 +952,7 @@ class GenSAMHub : public Component {
   uint32_t group_generation_{0};
   int selected_group_{-1};
   ESPPreferenceObject control_preference_;
+  ESPPreferenceObject iss_preference_;  ///< Separate from control_preference_ so its layout can change alone.
   bool yield_to_glm_{true};
   uint32_t glm_inactivity_cooldown_ms_{30000};
   uint32_t poll_interval_ms_{1000};
@@ -952,6 +1027,8 @@ class GenSAMHub : public Component {
   bool volume_tx_pending_{false};   ///< current_volume_db_ has been accepted but not yet transmitted.
   bool mute_tx_pending_{false};     ///< current_mute_ has been accepted but not yet transmitted.
   bool system_led_tx_pending_{false};  ///< current_system_leds_enabled_ has been accepted but not sent.
+  bool iss_tx_pending_{false};         ///< An ISS override is waiting for a safe slot.
+  bool filter_bypass_tx_pending_{false};  ///< phase_correction_bypass_ is waiting for a safe slot.
   float last_tx_volume_db_{-30.0f}; ///< Volume last sent to the bus, restored if a request is dropped.
   uint32_t last_volume_tx_ms_{0};   ///< When transmit_volume_() last put a volume frame on the bus.
 
@@ -970,6 +1047,12 @@ class GenSAMHub : public Component {
   number::Number *volume_number_{nullptr};
   switch_::Switch *calibration_bypass_switch_{nullptr};
   bool calibration_bypass_{false};  ///< Hub-wide; never restored, so every boot starts calibrated.
+  uint32_t iss_sleep_delay_{0};       ///< ISS_SLEEP_DELAY_DEFAULT, or the override in minutes.
+  int32_t iss_threshold_{0};          ///< ISS_THRESHOLD_DEFAULT, or the override in dBu.
+  bool phase_correction_bypass_{false};  ///< Never restored, so every boot starts corrected.
+  select::Select *iss_sleep_delay_select_{nullptr};
+  select::Select *iss_threshold_select_{nullptr};
+  switch_::Switch *phase_correction_bypass_switch_{nullptr};
   std::vector<std::function<void(float, bool, bool)>> state_callbacks_;
   std::vector<std::function<void(bool)>> system_led_state_callbacks_;
   std::vector<std::function<void(const std::string &)>> bus_status_callbacks_;

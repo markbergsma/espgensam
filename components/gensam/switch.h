@@ -1,7 +1,8 @@
 #pragma once
 
 /// @file switch.h
-/// @brief ESPHome Switch entities for Genelec SAM system power, mute, monitor LEDs, and calibration bypass.
+/// @brief ESPHome Switch entities for Genelec SAM system power, mute, monitor LEDs, and calibration
+///        and phase-correction bypass.
 ///
 /// ===================================================================================
 /// ARCHITECTURAL DESIGN RATIONALE
@@ -49,6 +50,15 @@
 ///      configured. A GLM push made while bypassed replaces the defaults without this switch
 ///      knowing: PEQ frames are not snooped, though the level and delay snoop raises Group
 ///      Modified.
+///
+/// 6. Bypass Phase Correction (GenSAMPhaseCorrectionBypassSwitch):
+///    Bypasses the speakers' group-delay (phase-correction) FIR filter with CMD_BYPASS_FILTERS
+///    0x53 00 01, and restores it with 0x53 00 00 (GLM bus decoding guide v3.0, section 10.3).
+///    Unlike calibration bypass this is a real opcode, so nothing is re-pushed. The guide's
+///    other mask, 02, bypasses every remaining audio filter and is deliberately not offered.
+///    The guide's frames were captured on one speaker; whether every SAM model honours the
+///    command has not been verified on this bus.
+///    Not restored across reboots, for the same reason as calibration bypass.
 /// ===================================================================================
 
 #include "esphome/core/component.h"
@@ -186,6 +196,24 @@ class GenSAMMonitorCalibrationBypassSwitch : public switch_::Switch {
 
   GenSAMHub *hub_{nullptr};
   std::string serial_or_id_{};
+};
+
+/// @brief Switch entity that bypasses the phase-correction filter on every monitor.
+class GenSAMPhaseCorrectionBypassSwitch : public switch_::Switch {
+ public:
+  /// @brief Set the parent GenSAMHub instance.
+  void set_hub(GenSAMHub *hub) { hub_ = hub; }
+
+ protected:
+  /// @brief Action executed when user toggles the switch in Home Assistant.
+  /// @param state True to bypass phase correction, false to restore it.
+  void write_state(bool state) override {
+    if (hub_ != nullptr) {
+      hub_->set_phase_correction_bypass(state);
+    }
+  }
+
+  GenSAMHub *hub_{nullptr};
 };
 
 }  // namespace gensam

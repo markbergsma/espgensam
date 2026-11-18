@@ -14,6 +14,9 @@
 #include "esphome/components/text_sensor/text_sensor.h"
 
 #include <algorithm>
+#include <cmath>
+#include <initializer_list>
+#include <utility>
 #include <strings.h>
 
 static const char *const TAG = "gensam";
@@ -270,6 +273,20 @@ void MonitorRegistry::publish_telemetry(const GenSAMMonitor &mon) {
   if (mon.binding->output_level_sensor != nullptr) {
     mon.binding->output_level_sensor->publish_state(mon.output_db);
   }
+  // NAN until the speaker reports the record; a model that never does stays "unknown".
+  const std::pair<sensor::Sensor *, float> extended[] = {
+      {mon.binding->tw_coil_temperature_sensor, mon.tw_coil_temperature},
+      {mon.binding->md_coil_temperature_sensor, mon.md_coil_temperature},
+      {mon.binding->bs_coil_temperature_sensor, mon.bs_coil_temperature},
+      {mon.binding->psu_main_voltage_sensor, mon.psu_main_voltage},
+      {mon.binding->psu_low_voltage_sensor, mon.psu_low_voltage},
+      {mon.binding->processor_load_sensor, mon.processor_load},
+  };
+  for (const auto &entry : extended) {
+    if (entry.first != nullptr && !std::isnan(entry.second)) {
+      entry.first->publish_state(entry.second);
+    }
+  }
   this->publish_online(mon);
 }
 
@@ -284,6 +301,11 @@ void MonitorRegistry::publish_stale_telemetry() {
     if (binding.temperature_sensor != nullptr) binding.temperature_sensor->publish_state(NAN);
     if (binding.input_level_sensor != nullptr) binding.input_level_sensor->publish_state(NAN);
     if (binding.output_level_sensor != nullptr) binding.output_level_sensor->publish_state(NAN);
+    for (sensor::Sensor *s : {binding.tw_coil_temperature_sensor, binding.md_coil_temperature_sensor,
+                              binding.bs_coil_temperature_sensor, binding.psu_main_voltage_sensor,
+                              binding.psu_low_voltage_sensor, binding.processor_load_sensor}) {
+      if (s != nullptr) s->publish_state(NAN);
+    }
     if (binding.online_sensor != nullptr) binding.online_sensor->invalidate_state();
   }
 }

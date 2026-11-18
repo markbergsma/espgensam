@@ -128,6 +128,8 @@ frames with tag 81, no 46 (2-way)     → 84 02     (984 frames)
 
 Both classes report `47 01` (active) throughout. HLM only ever saw `02` because it only ever had two 8320A. Its `03` observation is presumably a genuine standby marker, so the field may encode something like driver/channel count with a distinct standby value — worth flagging upstream rather than asserting.
 
+**Resolved:** the GLM bus decoding guide defines `0x84` as a 16-bit processor load in per mille. The class correlation holds because each class's load falls in its own range. See reconciliation doc §2.2.
+
 HLM also has a length bug here: the spec says `84` carries **2** bytes, but `hlm/src/HLM/hub_app.c:441-443` consumes 1. The `else if (tag == 0xB0) idx += 2;` branch at `:461` is a patch over the resulting misalignment (`B0` is the second byte of `84 02 B0`, mistaken for a tag). espgensam's generic `(tag & 0xF0) == 0x80 → skip 2` rule handles the whole `0x8x` family correctly.
 
 ### 4.3 The `0x06` / `0x07` reply prefix — an earlier `STATUS_STANDBY` reading was wrong
@@ -231,14 +233,20 @@ commands and features:
 | `0x3A 01/02/06` | ISS sleep delay (minutes), ISS sensitivity (High/Med/Low), LED on/off |
 | `0x3D 00 00` | Input-select sync |
 | `0x2D` | Input select / config preamble (conf 50%) |
+
+The GLM bus decoding guide later renamed several of these opcodes: `0x15` is a service prefix
+(`15 33 n` stores the user settings), `0x17 01` selects stored settings over the DIP switches,
+`0x3D` is the bass-management bypass and `0x2D` has no effect. See
+[`glm-bus-guide-reconciliation.md`](glm-bus-guide-reconciliation.md) §1.
 | — | OEM per-speaker enumeration order; the 610 ms hub heartbeat and 2.6 s takeover rule; the standalone boot volume ramp |
 
 Since that comparison, espgensam has implemented group and per-monitor PEQ, level and delay
 commands and `0x17 01` before group DSP writes. It observes GLM's stored `0x3A 06` LED setting
 and updates its diagnostic switch, but does not write that setting or commit it to monitor
-flash. It still does not implement signal-generator control, monitor flash commits, ISS
-sleep-delay or sensitivity settings, or `0x2D` / `0x3D` input-selection preambles. The
-`0x15 33 00` frame builder exists but is not used to commit settings to monitor flash.
+flash. ISS sleep delay and sensitivity (`0x3A 01/02`) are now sent as runtime-only overrides,
+without a store (reconciliation doc §3). It still does not implement signal-generator control,
+monitor flash commits, or `0x2D` / `0x3D`. The `0x15 33 00` frame builder
+(`make_store_user_params()`) exists but is not used.
 
 The espgensam captures contain `0x05` with payload `[04 00 00 00 FF FF EA 00 01 90 00 02 DA]` —
 byte-for-byte HLM's documented "stop generator / restore" frame, 14 times.
@@ -250,7 +258,7 @@ byte-for-byte HLM's documented "stop generator / restore" frame, 14 times.
 | `0x3B` as crossover Hz | `[00 5A]` = 90 Hz, with min/max/step 50/120/5 |
 | `0x40` full model | AES3 sub-channel A/B/Sum, per-input indices, subwoofer second input |
 | Telemetry `0x46` | Subwoofer driver meter, confirmed from the 7350A. `0x44` (midrange) is anticipated in code but appears in no capture — untested |
-| `0x22` | Hardware-ID query opcode (accepted as a reply type) |
+| `0x22` | Short system-info query (accepted as a reply type; first labelled a hardware-ID query) |
 | `0x19` payload | Barcode query carries `{0x01}` — the only query with a payload |
 | Device-info formats | Both `c-1;model-7350A;ver-…;hw-…;build-…` and space-delimited `7350A 1 0000 0106 3733` |
 | Identity matching | Barcode/serial ↔ 3-byte hardware ID two-layer model, with substring matching for the optional `M` in `7350APM…` |
@@ -288,9 +296,9 @@ The two projects are close to complementary: espgensam is deeper on device topol
 **Protocol knowledge worth absorbing**
 
 4. ~~Add `0x03` = Automatic to the `0x40` source enum.~~ **Closed — not the right action.** Automatic is a *standalone* setting, offered by GLM only when configuring what a speaker does on its own, not in live input selection; `0x40` is accordingly titled "Standalone Config Block / Input Routing" in HLM v12 and is step 6 of the flash-store sequence, immediately before `0x15 33 00`. Neither project has observed `03` on the wire — both list the same six payload variants, all `01`/`02` — so HLM's entry is inferred from the GLM UI and the `pair_selector`/`aes3_channel` bytes are unknown. It also could not be made to stick without a flash commit, which espgensam does not implement. Belongs to a standalone-settings feature (`0x40` + `0x3A 01/02/06` + `0x15`), not the input select. Capturing a GLM standalone store would settle both the encoding and that whole sequence.
-5. Document the `0x84` first byte as a device-class field (`01` = subwoofer, `02` = two-way, `03` reported by HLM in standby) rather than leaving the whole `0x8x` family as "skip 2".
-6. Record the newly-identified opcodes from HLM in `const.h` comments even if unimplemented — `0x05` generator, `0x10` DSP (PEQ / delay / level boundaries), `0x15` flash commit, `0x17` prepare-config, `0x3A 01/02/06` ISS settings, `0x3D` input sync — so the snoop decoder can label them instead of logging raw bytes. **Partly done:** `0x10` with its `01`/`02`/`0E` sub-commands and `0x17` are named and documented in `const.h`. `0x05`, `0x15` and `0x3A 01/02/06` are still unnamed.
-7. Optional feature work, in rough order of value: ISS sleep delay / sensitivity via `3A 01/02`; startup and max level via `10 01`; PEQ snooping via `10 0E`; general flash-store sequencing. **Live monitor LED enable/disable via `2B 04/08` is implemented. The stored ISS LED setting via `3A 06` is observed and tracked, not written by the controller.** **PEQ, level and delay done** — see §7.1; the group preset feature transmits `17 01`, `10 02`, `10 01 00`, `10 0E` ×20, `3B` and `0x40` per speaker. Level (`10 01 00`) and delay (`10 02`) are also reachable per speaker outside a group, as Home Assistant number entities, sent without a preceding `17 01`: the captures show GLM omitting it for individual writes. The snoop decoder follows `10 01 00` and `10 02` back, so a change made in GLM is picked up rather than reverted at the next standby cycle; `10 01 09` is deliberately not decoded, since its constant `000000` payload would read as -130 dB and mute the speaker. Startup level (`10 01 05`), PEQ snooping, ISS sleep/sensitivity settings and general flash-store sequencing are not implemented. PEQ, level and crossover pushes are confirmed acoustically on an 8330A (`docs/glm-group-apply.md` §8).
+5. ~~Document the `0x84` first byte as a device-class field.~~ **Explained by the GLM bus decoding guide:** `0x84` is a 16-bit processor load in per mille, and each class's load falls in its own range, so the high byte alone reads `01` = subwoofer, `02` = two-/three-way, `03` = transition or standby. Exposed as the diagnostic `Processor Load` sensor (reconciliation doc §2.2).
+6. Record the newly-identified opcodes from HLM in `const.h` comments even if unimplemented — `0x05` generator, `0x10` DSP (PEQ / delay / level boundaries), `0x15` flash commit, `0x17` prepare-config, `0x3A 01/02/06` ISS settings, `0x3D` input sync — so the snoop decoder can label them instead of logging raw bytes. **Done:** `0x10` with its sub-commands, `0x15` (service), `0x17` (net settings), `0x3A 01/02`, `0x3C`, `0x3D`, `0x42`, `0x43`, `0x4B` and `0x53` are named in `const.h` after the GLM bus decoding guide (reconciliation doc §1). `0x05` is still unnamed.
+7. Optional feature work, in rough order of value: ISS sleep delay / sensitivity via `3A 01/02` (**now implemented as runtime-only overrides**, reconciliation doc §3); startup and max level via `10 01`; PEQ snooping via `10 0E`; general flash-store sequencing. **Live monitor LED enable/disable via `2B 04/08` is implemented. The stored ISS LED setting via `3A 06` is observed and tracked, not written by the controller.** **PEQ, level and delay done** — see §7.1; the group preset feature transmits `17 01`, `10 02`, `10 01 00`, `10 0E` ×20, `3B` and `0x40` per speaker. Level (`10 01 00`) and delay (`10 02`) are also reachable per speaker outside a group, as Home Assistant number entities, sent without a preceding `17 01`: the captures show GLM omitting it for individual writes. The snoop decoder follows `10 01 00` and `10 02` back, so a change made in GLM is picked up rather than reverted at the next standby cycle; `10 01 09` is deliberately not decoded, since its constant `000000` payload would read as -130 dB and mute the speaker. Startup level (`10 01 05`), PEQ snooping, ISS sleep/sensitivity settings and general flash-store sequencing are not implemented. PEQ, level and crossover pushes are confirmed acoustically on an 8330A (`docs/glm-group-apply.md` §8).
 8. ~~**Support `0x3B 00 01` as full band (§4.5).**~~ **Done.** Implemented on the mode-enum reading: `CROSSOVER_FULL_BAND = 0x0001` in `const.h`, anything else is Hz on the 50–120 / 5 Hz grid. The supporting evidence is now two independent sources rather than one: GLM's own setup file stores `CrossoverFrequency(Hz):1` and `Group_Crossover:1` for a sub-less group, alongside 80/85/90 for groups with a subwoofer. Group YAML spells it `crossover: full_band`, `sam_file:` / `sam2yaml.py` map GLM's `1` to it, and the per-monitor Home Assistant control became a select (`Full band`, `50 Hz` … `120 Hz`) because a number entity could only clamp `1` to 50 Hz. An AutoPhase angle in a full-band group yields no delay, since there is no crossover to realise it at. Measured on a sub-less 8330A: `3B 00 55` (85 Hz) high-passes it and `3B 00 01` leaves it full range (`docs/glm-group-apply.md` §8), which settles the sub-less half of the §8 experiment. The other half, `3B 00 01` sent to a system with the 7350A, is still untested.
 
 ### 7.1 Findings from the group-switch capture (2026-09-20)
@@ -479,7 +487,9 @@ This establishes `0x3A 01` as a four-byte big-endian timeout in minutes for the 
 32-bit big-endian values above. These are not simple High/Medium/Low enum indices.
 The physical units of the sensitivity numbers have not been independently established.
 The UI also offered sleep delays of 2 min, 1 h, 2 h, 3 h and 4 h; those choices were not
-stored during this test. No disabled-state encoding was established.
+stored during this test. No disabled-state encoding was established here; the GLM bus
+decoding guide later gave Never as `FF FF FF FF` and the same sensitivity values in dBu
+(reconciliation doc §3).
 
 Every store also carried `0x3A payload=[06 00]` with **LEDs On**, and input-selection
 frames `0x40 payload=[00 03 02 01]` / `[00 03 02 02]` with **Automatic** selected.

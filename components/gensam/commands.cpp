@@ -30,8 +30,30 @@ Frame make_iss_led_state(uint8_t addr, bool enabled) {
   return Frame(addr, CMD_WAKEUP, {WAKEUP_OP_ISS_LED, enabled ? ISS_LED_ENABLED : ISS_LED_DISABLED});
 }
 
-Frame make_flash_commit(uint8_t addr) {
-  return Frame(addr, CMD_FLASH_COMMIT, {0x33, 0x00});
+/// @brief Build a CMD_WAKEUP frame carrying a sub-command and a big-endian 32-bit word.
+static Frame make_wakeup_word(uint8_t addr, uint8_t op, uint32_t value) {
+  return Frame(addr, CMD_WAKEUP,
+               {op, static_cast<uint8_t>(value >> 24), static_cast<uint8_t>(value >> 16),
+                static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)});
+}
+
+Frame make_iss_sleep_delay(uint8_t addr, uint32_t minutes) {
+  if (minutes != ISS_SLEEP_DELAY_NEVER) {
+    minutes = std::min(minutes, ISS_SLEEP_DELAY_MAX_MIN);
+  }
+  return make_wakeup_word(addr, WAKEUP_OP_ISS_SLEEP_DELAY, minutes);
+}
+
+Frame make_iss_threshold(uint8_t addr, int32_t dbu) {
+  return make_wakeup_word(addr, WAKEUP_OP_ISS_THRESHOLD, static_cast<uint32_t>(dbu));
+}
+
+Frame make_store_user_params(uint8_t addr) {
+  return Frame(addr, CMD_SERVICE, {SERVICE_STORE_USER_PARS, SERVICE_PROFILE_DEFAULT});
+}
+
+Frame make_filter_bypass(uint8_t addr, uint8_t mask) {
+  return Frame(addr, CMD_BYPASS_FILTERS, {0x00, mask});
 }
 
 Frame make_broadcast_volume_db(float db) {
@@ -73,8 +95,8 @@ Frame make_crossover(uint8_t addr, uint16_t freq_hz) {
                {static_cast<uint8_t>((freq_hz >> 8) & 0xFF), static_cast<uint8_t>(freq_hz & 0xFF)});
 }
 
-Frame make_prepare_config(uint8_t addr) {
-  return Frame(addr, CMD_PREPARE_CONFIG, {PREPARE_CONFIG_PAYLOAD});
+Frame make_use_stored_settings(uint8_t addr) {
+  return Frame(addr, CMD_NET_SETTINGS, {NET_SETTINGS_USE_STORED});
 }
 
 /// @brief Append one IEEE-754 float32 to @p out in little-endian byte order.
