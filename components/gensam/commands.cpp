@@ -48,6 +48,20 @@ Frame make_iss_threshold(uint8_t addr, int32_t dbu) {
   return make_wakeup_word(addr, WAKEUP_OP_ISS_THRESHOLD, static_cast<uint32_t>(dbu));
 }
 
+Frame make_iss_read(uint8_t addr, uint8_t op) {
+  return Frame(addr, CMD_WAKEUP, {static_cast<uint8_t>(WAKEUP_READ_FLAG | op)});
+}
+
+bool parse_iss_word(const std::vector<uint8_t> &payload, int32_t &value) {
+  if (payload.size() != 4) {
+    return false;
+  }
+  value = static_cast<int32_t>((static_cast<uint32_t>(payload[0]) << 24) |
+                               (static_cast<uint32_t>(payload[1]) << 16) |
+                               (static_cast<uint32_t>(payload[2]) << 8) | payload[3]);
+  return true;
+}
+
 Frame make_store_user_params(uint8_t addr) {
   return Frame(addr, CMD_SERVICE, {SERVICE_STORE_USER_PARS, SERVICE_PROFILE_DEFAULT});
 }

@@ -8,7 +8,6 @@
 
 substitutions:
   discovery_slots: "16"
-  control_window: "60s"
 
 external_components:
   - source:
@@ -37,7 +36,6 @@ gensam:
   listen_only: ${listen_only}
   glm_inactivity_cooldown: 15s
   poll_interval: 1s
-  control_window: ${control_window}
   telemetry_averaging_period: 60s
   min_volume_db: ${min_volume_db}
   max_volume_db: ${max_volume_db}

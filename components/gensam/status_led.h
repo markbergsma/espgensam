@@ -22,6 +22,7 @@
 ///        * "Discovering" -> Blue (#0066FF): Active RACE discovery / device interrogation
 ///        * "Configuring" -> Cyan (#00CCFF): Device parameter setup (source/crossover)
 ///        * "Standby"     -> Very Dim Green: Amplifiers in low-power sleep, hub polling normally
+///        * "Sleeping"    -> Very Dim Green: Hub-managed ISS sleep; shown through the standby rule
 ///        * "Offline"     -> Dim White: Standalone idle, no monitors discovered
 ///
 ///    Bus status and amplifier power state are independent in the hub, and the LED is where they

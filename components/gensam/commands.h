@@ -76,6 +76,23 @@ Frame make_iss_sleep_delay(uint8_t addr, uint32_t minutes);
 /// @return CMD_WAKEUP frame carrying [0x02, dbu as big-endian 32-bit two's complement].
 Frame make_iss_threshold(uint8_t addr, int32_t dbu);
 
+/// @brief Build an ISS read (CMD_WAKEUP 0x3A with the read bit set on the sub-command).
+///
+/// The monitor answers with CMD_REPORT_STATUS to the host. The value is a big-endian 32-bit
+/// word for WAKEUP_OP_ISS_SLEEP_DELAY, WAKEUP_OP_ISS_THRESHOLD and WAKEUP_OP_ISS_LEVEL, and a
+/// single ISS_STATE_* byte for WAKEUP_OP_POWER. A read neither resets the ISS timer nor
+/// wakes a sleeping monitor, which is what makes it usable as the sleep-state probe.
+/// @param addr Target monitor address; it must hold a session (see make_set_rid()).
+/// @param op The sub-command to read, e.g. WAKEUP_OP_ISS_LEVEL.
+/// @return Unicast CMD_WAKEUP frame carrying [WAKEUP_READ_FLAG | op].
+Frame make_iss_read(uint8_t addr, uint8_t op);
+
+/// @brief Decode the 32-bit word of an ISS read reply.
+/// @param payload The reply payload.
+/// @param[out] value The big-endian word, as two's complement where the value is signed.
+/// @return True if @p payload is exactly four bytes.
+bool parse_iss_word(const std::vector<uint8_t> &payload, int32_t &value);
+
 /// @brief Build a store-working-settings frame (CMD_SERVICE 0x15, SERVICE_STORE_USER_PARS).
 ///
 /// Writes the speaker's working settings into its stored start-up profile. Never sent by this

@@ -10,7 +10,8 @@
 /// period without input above a threshold. CMD_WAKEUP carries both settings as a 32-bit
 /// big-endian word: sub-command 0x01 the delay in minutes (ISS_SLEEP_DELAY_NEVER disables
 /// sleep), 0x02 the threshold in dBu as a two's-complement integer (GLM bus decoding guide
-/// v3.0, section 11.2).
+/// v3.0, section 11.2). Setting the 0x80 flag on the sub-command reads a value back instead
+/// (make_iss_read); 0x04 is the read-only measured input level that hub-managed sleep samples.
 ///
 /// 1. Runtime only. GLM follows each write with CMD_SERVICE 0x33 (store working settings).
 ///    This component never sends that. Doing so would write the speaker's whole working state
@@ -18,13 +19,13 @@
 ///    speaker restarts on every wake from ISS sleep and returns to its stored values, so the
 ///    hub re-sends an override after each discovery and group push. The consequence is that
 ///    an override governs the *next* sleep after each wake, which is the one that matters.
-///    Whether a write takes effect without the store has not been verified on hardware.
+///    A 3A 01 delay write takes effect without the store (verified on 8351B firmware 1.24).
 ///
 /// 2. Select, not number. GLM offers a fixed menu - seven delays plus Never, three named
 ///    sensitivities - and the options here are that menu. Each select also has
-///    ISS_STR_SPEAKER_DEFAULT, which stops overriding. The speaker cannot be asked for its
-///    stored value, so choosing it sends nothing; the speaker returns to its own setting at
-///    its next restart. A value of 0 means "no override" in both conversions below: no menu
+///    ISS_STR_SPEAKER_DEFAULT, which stops overriding. Choosing it sends nothing; the speaker
+///    returns to its own setting at its next restart, and hub-managed sleep reads that setting
+///    back from each speaker instead of assuming one. A value of 0 means "no override" in both conversions below: no menu
 ///    entry uses a zero delay, and 0 dBu is far outside the usable −80…−35 dBu range.
 ///
 /// 3. Kept apart from const.h and select.h for the same reason as crossover.h: option strings

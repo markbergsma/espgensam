@@ -38,18 +38,19 @@
 ///    - STANDBY (Power OFF): Transmits {0x03, 0x02} twice (20 ms spacing), waits 80 ms, then
 ///      transmits {0x03, 0x00} twice (20 ms spacing).
 ///    - Active Boot: Normal controller mode wakes monitors during initial discovery, restoring
-///      remembered volume/group (startup_volume_db on first boot), then suspends all TX after
-///      control_window (60 s; 0 infinite). Volume/mute reopen a controls-only window: no probes,
-///      polling, wakeup or group reload, even if cached addresses have expired. Other controls
-///      use cached-address power-status probes; missing/asleep targets require full wake/discovery
-///      and may interrupt audio. Power On or group selection after a controls-only window forces
-///      discovery to restore potentially lost DSP settings. Native audio wake is not announced
-///      on the bus; silent-mode telemetry is stale. Listen-only never transmits, including boot.
-///      Discovery must wake monitors because a sleeping DSP cannot answer a RACE ping.
-///      Explicit Power Off cancels queued controls, waits for a safe slot, sends shutdown,
-///      and stays silent without discovery until another user command.
-///    - Address leases: Continuous keep-alives prevent native ISS. They are intentionally
-///      suspended with polling/volume on window expiry, so cached addresses may no longer work.
+///      remembered volume/group (startup_volume_db on first boot). It then polls indefinitely
+///      and manages ISS sleep itself (section 8). Listen-only never transmits, including boot.
+///      Discovery always begins with a wake, as GLM does.
+///    - User commands: volume and mute are held while the system is asleep, off or powering
+///      off, and go out after the next wake; they never wake it. Any other command wakes the
+///      system: cached-address power-status probes first, and missing/asleep targets require
+///      full wake/discovery, which may interrupt audio.
+///    - Explicit Power Off cancels queued controls, waits for a safe slot, sends shutdown, and
+///      keeps the bus silent (stale telemetry, no discovery) until a waking command.
+///    - GLM takeover: the hub yields the bus. Once GLM has been quiet for the cooldown it
+///      rediscovers and reapplies the selected group, unless the system was powered off.
+///    - Address leases: continuous keep-alives hold them. They lapse only across sleep,
+///      standby or a GLM takeover, and each of those ends in rediscovery.
 ///    - Volatile Address Reset across Standby Wakeup: When waking from standby, monitors reboot
 ///      their DSP and reset their volatile RACE address leases. When waking monitors from standby,
 ///      the Hub automatically initiates a fresh RACE rediscovery cycle: waking monitors, waiting 400 ms
@@ -114,9 +115,9 @@
 ///    survive a speaker restart, and this component never sends the CMD_SERVICE store that
 ///    would make it survive (see iss.h). A speaker restarts on every wake from ISS sleep, so
 ///    queue_runtime_settings_() queues them again each time the bus returns to polling after a
-///    discovery or group push. That works only while the hub is talking to the speakers, which
-///    it is at every wake; after the control window closes the bus is silent and nothing is
-///    re-sent until the next wake.
+///    discovery or group push. That works because the hub is talking to the speakers at every
+///    wake. A runtime 3A 01 write takes effect immediately without
+///    the store (verified on 8351B firmware 1.24).
 ///    - ISS overrides are broadcast, as GLM sends them, and persisted on this device in their
 ///      own preference slot. "Speaker default" stops overriding and sends nothing.
 ///    - The phase-correction bypass (CMD_BYPASS_FILTERS, FILTER_BYPASS_PHASE_EQ) goes unicast
@@ -124,6 +125,42 @@
 ///      is re-sent; a restarted speaker is already unbypassed.
 ///    - None of these frames are snooped. A GLM change is overwritten by an active override at
 ///      the next discovery; with "Speaker default" or the bypass off, GLM's setting stands.
+///
+/// 8. Hub-Managed ISS Sleep:
+///    A speaker's own ISS cannot work under continuous polling: every CMD_QUERY_STATUS resets
+///    its sleep timer. Instead of going quiet, the hub runs the same policy itself, with the
+///    same settings, and keeps the bus for telemetry and control. Measured on 8351B monitors
+///    (firmware 1.24, AES3 input); see docs/glm-bus-guide-reconciliation.md.
+///    - Sampling: while polling, each online monitor is asked for its ISS input level
+///      (3A 84, BE32 dBu) about every ISS_SAMPLE_INTERVAL_MS. With "Speaker default" the
+///      speaker's own delay (3A 81) and threshold (3A 82) are read first. Signal at or above
+///      the threshold on any monitor restarts the idle timer, as do discovery and any user
+///      command. The system delay is the longest of the monitors' delays; any "never" wins.
+///    - Entry: once the delay has passed, every online monitor has a fresh level sample, and
+///      nothing is pending, the hub broadcasts a single 3A 03 00 (the short-press sleep
+///      request; sent twice it toggles) and enters RaceState::SLEEPING. The system reports
+///      standby and the bus status "Sleeping".
+///    - Silence: in sleep a monitor still answers frames, and an ordinary CMD_QUERY_STATUS or
+///      keep-alive drags it back awake, so SLEEPING sends neither. Audio wakes a monitor
+///      without a word on the bus; it simply restarts without a session.
+///    - Probe: every SLEEP_PROBE_INTERVAL_MS one known monitor is re-addressed with
+///      CMD_SET_RID (its session lapses after ~2.6 s of silence) and asked 3A 83, which
+///      answers ISS_STATE_SLEEP while asleep and ISS_STATE_AWAKE once audio has woken it. Neither
+///      frame wakes it. ISS_STATE_AWAKE triggers a full wake and rediscovery, so the group
+///      and runtime settings are restored. The first probe waits SLEEP_FIRST_PROBE_MS.
+///    - Bounce: a speaker that had real audio within the last few minutes may wake itself
+///      ~12 s after the request, independent of the bus. The probe sees it as a wake and the
+///      idle timer restarts, so with short delays sleep can take an extra round.
+///    - User commands while sleeping: volume and mute are accepted and held until wake; any
+///      other command (Power On, group, input, identify, rediscover) wakes and rediscovers.
+///      Power Off replaces sleep with the hard standby of section 3.
+///    - Leaving sleep: the probe just gave a monitor a session ID, and discovery's own wake
+///      broadcasts would keep it alive, so that monitor would ignore the RACE ping and its
+///      address would be handed to another monitor. Every exit to discovery therefore waits
+///      SESSION_LAPSE_MS after the last frame sent in sleep (seen on hardware: two monitors
+///      ended up sharing one address).
+///    - A GLM takeover ends SLEEPING without a power off, so the rediscovery after the cooldown
+///      wakes the monitors (section 3).
 /// ===================================================================================
 
 #include "esphome/core/component.h"
@@ -174,6 +211,7 @@ enum class RaceState : uint8_t {
   CONFIGURING_DEVICES, ///< Transmitting device configuration (e.g. crossover frequency) to discovered monitors.
   APPLYING_GROUP,      ///< Pushing a group preset's DSP block to each monitor in turn.
   POLLING_MONITORS,    ///< Periodic round-robin polling of monitor status and telemetry.
+  SLEEPING,            ///< Hub-requested ISS sleep; only non-waking state probes are sent.
 };
 
 /// @brief Cursor over an in-progress group preset push.
@@ -356,11 +394,7 @@ class GenSAMHub : public Component {
   /// @param generation Flash-slot sequence; a new upload starts with its first group.
   void set_group_generation(uint32_t generation) { group_generation_ = generation; }
 
-  /// @brief Configure how long user actions keep bus control active; zero never expires.
-  /// @param milliseconds Duration since the most recent accepted user command.
-  void set_control_window(uint32_t milliseconds) { control_window_ms_ = milliseconds; }
-
-  /// @brief Whether telemetry is intentionally suspended and speaker power is unknown.
+  /// @brief Whether the bus is silent after an explicit power off; telemetry is then stale.
   bool is_bus_silent() const { return bus_silent_; }
 
   /// @brief Make a group preset the active one and push it to every monitor.
@@ -390,7 +424,7 @@ class GenSAMHub : public Component {
   /// @return Pointer to registered number entity or nullptr.
   number::Number *get_volume_number() const { return volume_number_; }
 
-  /// @brief Current bus operational status string ("Active", "GLM Active", "Discovering", "Configuring", "Offline").
+  /// @brief Current bus operational status string ("Active", "GLM Active", "Discovering", "Configuring", "Sleeping", "Offline").
   const std::string &get_bus_status() const { return last_bus_status_; }
 
   /// @brief Register a callback for when bus operational status changes.
@@ -773,6 +807,38 @@ class GenSAMHub : public Component {
   /// @brief IDLE: periodically retry discovery while no monitors are registered.
   void race_step_idle_(uint32_t now);
 
+  /// @brief SLEEPING: probe one monitor at a time for an audio wake; see section 8.
+  void race_step_sleeping_(uint32_t now);
+
+  /// @brief Resolve the hub-managed sleep delay from the override or the speakers' own.
+  /// @param[out] delay_ms The delay, valid when true is returned.
+  /// @return False while hub-managed sleep is off, set to never, or not yet known.
+  bool auto_sleep_delay_ms_(uint32_t &delay_ms) const;
+
+  /// @brief Resolve the ISS threshold a monitor's level is compared against.
+  /// @param mon The monitor.
+  /// @param[out] dbu The threshold, valid when true is returned.
+  /// @return False while the speaker's own threshold is needed but not yet read.
+  bool iss_threshold_for_(const GenSAMMonitor &mon, int32_t &dbu) const;
+
+  /// @brief Send the next due ISS read during polling, if any.
+  /// @return True if a read was sent and is now the outstanding query.
+  bool send_iss_read_(uint32_t now);
+
+  /// @brief Consume the reply to the outstanding ISS read.
+  /// @return True if @p frame was that reply.
+  bool handle_iss_reply_(const Frame &frame, uint32_t now);
+
+  /// @brief Whether every condition for hub-managed sleep holds in this polling slot.
+  bool sleep_due_(uint32_t now) const;
+
+  /// @brief Broadcast the sleep request and enter RaceState::SLEEPING.
+  void enter_sleep_(uint32_t now);
+
+  /// @brief Leave SLEEPING after a probe found a monitor awake: wake and rediscover all,
+  /// through the same session-lapse wait as a user wake.
+  void wake_from_sleep_(uint8_t address);
+
   /// @brief APPLYING_GROUP: transmit one frame of the active group's DSP block per call.
   void race_step_applying_group_(uint32_t now);
 
@@ -924,12 +990,13 @@ class GenSAMHub : public Component {
   /// @param command Deferred action; may call the same public setter once the session is ready.
   /// @return True if deferred or rejected; false only while executing a queued action.
   bool defer_user_command_(std::function<void()> command);
-  /// @brief Open a control window without reloading calibration on already-active monitors.
-  /// @param controls_only Resume after silence without probes, polling, wakeup or discovery.
+  /// @brief Accept a user command, waking the system first if it is asleep, off or silent.
+  /// @param hold_while_off Volume/mute: while asleep, off or powering off, leave the system as
+  ///        it is and let the pending write wait for the next wake.
   /// @return True if accepted; false when listen-only or yielding to GLM.
-  bool open_control_window_(bool controls_only = false);
-  /// @brief Service cached-address probes, queued commands and the silence deadline.
-  void service_control_window_(uint32_t now);
+  bool accept_user_command_(bool hold_while_off = false);
+  /// @brief Service a pending power off, cached-address probes and queued user commands.
+  void service_user_commands_(uint32_t now);
   /// @brief Wake/discover after cached-address recovery fails or reports standby.
   void discover_monitors_();
   /// @brief Save and restore user volume/group intent in ESP preferences, never speaker flash.
@@ -940,11 +1007,9 @@ class GenSAMHub : public Component {
   uint32_t baud_rate_{BAUDRATE};
   size_t rx_buffer_size_{512};
   bool listen_only_{false};
-  uint32_t control_window_ms_{60000};
   uint32_t last_user_command_ms_{0};
-  bool bus_silent_{false};
+  bool bus_silent_{false};  ///< Set by an explicit power off; cleared by the next waking command.
   bool resuming_{false};
-  bool controls_only_session_{false};  ///< Suppress automatic recovery after volume/mute-only resume.
   bool recovery_required_{false};  ///< An external master may have changed DSP state and addresses.
   bool power_off_pending_{false};
   bool executing_user_command_{false};
@@ -1007,6 +1072,15 @@ class GenSAMHub : public Component {
   std::vector<uint8_t> poll_addrs_;
   bool initial_discovery_done_{false};
   uint32_t boot_time_{0};
+
+  // Hub-managed ISS sleep; see section 8 of the header comment.
+  uint8_t iss_query_op_{0};          ///< Sub-command of the outstanding ISS read, or 0.
+  uint32_t last_signal_ms_{0};       ///< Last level at or above threshold, discovery or wake.
+  uint32_t sleep_entered_ms_{0};
+  uint32_t last_sleep_probe_ms_{0};
+  uint32_t last_sleep_tx_ms_{0};     ///< Last frame sent while SLEEPING; gates rediscovery.
+  uint8_t sleep_probe_phase_{0};     ///< 0 idle, 1 CMD_SET_RID sent, 2 3A 83 read sent.
+  size_t sleep_probe_index_{0};      ///< Round-robin cursor over the registry.
 
   // Passive snooping tracker
   uint8_t last_queried_addr_{0};

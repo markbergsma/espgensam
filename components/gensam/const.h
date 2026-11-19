@@ -339,7 +339,18 @@ static constexpr uint8_t BYPASS_LED_DISABLED_VALUE = 0x08; ///< Observed 0x2B li
 /// The first payload byte's low five bits select the sub-command and bit 7 makes it a read.
 static constexpr uint8_t WAKEUP_OP_ISS_SLEEP_DELAY = 0x01; ///< ISS sleep delay, BE32 minutes
 static constexpr uint8_t WAKEUP_OP_ISS_THRESHOLD = 0x02;   ///< ISS threshold, BE32 two's-complement dBu
-static constexpr uint8_t WAKEUP_OP_POWER = 0x03;           ///< Power sub-command byte
+static constexpr uint8_t WAKEUP_OP_POWER = 0x03;           ///< Power sub-command byte; read = ISS state
+static constexpr uint8_t WAKEUP_OP_ISS_LEVEL = 0x04;       ///< ISS input level, BE32 dBu; read only
+static constexpr uint8_t WAKEUP_READ_FLAG = 0x80;          ///< Bit 7 of the sub-command: read
+static constexpr uint8_t ISS_STATE_AWAKE = 0x01;           ///< 3A 83 reply: amplifiers up
+static constexpr uint8_t ISS_STATE_STANDBY = 0x02;         ///< 3A 83 reply: hard standby
+static constexpr uint8_t ISS_STATE_SLEEP = 0x03;           ///< 3A 83 reply: ISS sleep
+/// 3A 84 reply with no input at all: the word's floor, below every possible threshold.
+static constexpr int32_t ISS_LEVEL_SILENCE = INT32_MIN;
+/// A speaker drops its session ID 2600 ms after the last valid frame on the bus, broadcasts
+/// included, and only then answers RACE again. Waited out, with margin, before rediscovery
+/// can follow frames that assigned an ID.
+static constexpr uint32_t SESSION_LAPSE_MS = 3000;
 static constexpr uint8_t WAKEUP_OP_ISS_LED = 0x06;    ///< ISS monitor LED enable sub-command
 static constexpr uint8_t ISS_LED_ENABLED = 0x00;      ///< 0x3A 06 value: LEDs on
 static constexpr uint8_t ISS_LED_DISABLED = 0x01;     ///< 0x3A 06 value: LEDs off
@@ -359,8 +370,8 @@ static constexpr uint8_t WAKEUP_VAL_STANDBY_2 = 0x00;      ///< Standby / Sleep 
 ///    ISS_SLEEP_DELAY_NEVER disables sleeping altogether.
 ///  - The threshold is dBu as a big-endian 32-bit two's-complement word. GLM offers only the
 ///    three sensitivity presets below; the firmware accepts -80..-35 dBu.
-///  - Every status query (0x08) resets the idle timer, which is one reason this component stops
-///    polling once the control window closes.
+///  - Every status query (0x08) resets the idle timer, which is why the hub runs the sleep
+///    policy itself (hub.h section 8).
 ///
 /// GLM follows each edit with SERVICE_STORE_USER_PARS. This component does not: the values are
 /// working settings only, and a speaker reloads its stored ones whenever it restarts, which

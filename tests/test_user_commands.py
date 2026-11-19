@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Run production window/persistence methods with a fake clock, wire and preferences."""
+"""Run production user-command/persistence methods with a fake clock, wire and preferences."""
 
 from pathlib import Path
 import re
 import subprocess
-import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,23 +20,13 @@ def main():
     header = (ROOT / "components/gensam/hub.h").read_text()
     race = (ROOT / "components/gensam/race.cpp").read_text()
     registry = (ROOT / "components/gensam/registry.cpp").read_text()
-    if "--baseline" in sys.argv:
-        source = subprocess.check_output(
-            ["git", "show", "HEAD:components/gensam/hub.cpp"], cwd=ROOT, text=True
-        )
-        source = source.replace(
-            "bool GenSAMHub::open_control_window_()",
-            "bool GenSAMHub::open_control_window_(bool)",
-        )
-    assert "Control window expired; all TX suspended" in source, "No bounded bus-silence policy"
-    window_default = re.search(r"uint32_t control_window_ms_\{(\d+)\}", header)[1]
     stored = source[source.index("struct StoredControlState"):source.index("\n};", source.index("struct StoredControlState")) + 3]
     methods = "\n".join(method(source, signature) for signature in (
         "void GenSAMHub::restore_control_state_()",
         "void GenSAMHub::save_control_state_()",
-        "bool GenSAMHub::open_control_window_(",
+        "bool GenSAMHub::accept_user_command_(",
         "bool GenSAMHub::defer_user_command_(",
-        "void GenSAMHub::service_control_window_(",
+        "void GenSAMHub::service_user_commands_(",
         "void GenSAMHub::set_volume_db(",
         "void GenSAMHub::set_group_mute(",
         "void GenSAMHub::service_pending_writes_(",
@@ -67,13 +56,14 @@ int warnings = 0;
 const char *TAG = "test";
 enum class RaceState {
   IDLE, POLLING_MONITORS, APPLYING_GROUP, WAKEUP_SENT, RACE_PING_SENT,
-  RACE_SET_RID_SENT, QUERYING_DEVICES, CONFIGURING_DEVICES
+  RACE_SET_RID_SENT, QUERYING_DEVICES, CONFIGURING_DEVICES, SLEEPING
 };
 constexpr uint32_t BOOT_SETTLE_MS = 10000;
 constexpr uint32_t TIMEOUT_CHECK_INTERVAL_MS = 500;
 constexpr uint32_t MIN_STALE_TIMEOUT_MS = 5000;
 constexpr uint32_t STALE_POLL_CYCLES = 4;
 constexpr uint32_t PASSIVE_STALE_TIMEOUT_MS = 15000;
+constexpr uint32_t SESSION_LAPSE_MS = 3000;
 constexpr int CMD_QUERY_STATUS = 8, CMD_REPORT_STATUS = 9, HOST_ADDRESS = 1;
 namespace sensor {
 struct Sensor {
@@ -163,19 +153,19 @@ class GenSAMHub {
  public:
   bool listen_only_ = false, yield_to_glm_ = true, bus_silent_ = false;
   bool resuming_ = false, executing_user_command_ = false, power_off_pending_ = false;
-  bool controls_only_session_ = false, current_mute_ = false;
+  bool current_mute_ = false;
   bool recovery_required_ = false;
   bool current_standby_ = false, initial_discovery_done_ = true;
   bool volume_tx_pending_ = false, mute_tx_pending_ = false, system_led_tx_pending_ = false;
   bool iss_tx_pending_ = false, filter_bypass_tx_pending_ = false;
   float current_volume_db_ = -30, min_volume_db_ = -80, max_volume_db_ = 0;
-  uint32_t control_window_ms_ = WINDOW_DEFAULT, last_user_command_ms_ = 0;
+  uint32_t last_user_command_ms_ = 0;
   uint32_t race_step_time_ = 0, last_poll_cycle_time_ = 0;
   uint32_t boot_time_ = 0, last_poll_step_time_ = 0, last_volume_tx_ms_ = 0;
-  uint32_t volume_tx_interval_ms_ = 50;
+  uint32_t volume_tx_interval_ms_ = 50, last_sleep_tx_ms_ = 0;
   uint32_t last_timeout_check_ = 0, poll_interval_ms_ = 1000;
   uint32_t group_generation_ = 5;
-  uint8_t current_query_addr_ = 0, group_count_ = 2;
+  uint8_t current_query_addr_ = 0, group_count_ = 2, iss_query_op_ = 0, sleep_probe_phase_ = 0;
   size_t current_poll_index_ = 0;
   int selected_group_ = 0, default_group_ = 0, pending_group_ = -1;
   struct { bool active = false; } apply_;
@@ -192,7 +182,6 @@ class GenSAMHub {
   void discover_monitors_() {
     ++discoveries;
     resuming_ = false;
-    controls_only_session_ = false;
     current_query_addr_ = 0;
     race_state_ = RaceState::WAKEUP_SENT;
   }
@@ -219,6 +208,7 @@ class GenSAMHub {
   void race_step_applying_group_(uint32_t) { ++race_steps; }
   void race_step_polling_(uint32_t) { ++race_steps; }
   void race_step_idle_(uint32_t) { ++race_steps; }
+  void race_step_sleeping_(uint32_t) { ++race_steps; }
   void set_standby(bool value) {
     assert(executing_user_command_);
     current_standby_ = value;
@@ -226,9 +216,9 @@ class GenSAMHub {
   }
   void restore_control_state_();
   void save_control_state_();
-  bool open_control_window_(bool controls_only = false);
+  bool accept_user_command_(bool hold_while_off = false);
   bool defer_user_command_(std::function<void()> command);
-  void service_control_window_(uint32_t now);
+  void service_user_commands_(uint32_t now);
   void set_volume_db(float db);
   void set_group_mute(bool mute);
   void service_pending_writes_(uint32_t now);
@@ -237,11 +227,10 @@ class GenSAMHub {
   bool handle_active_reply_(const Frame &frame, uint32_t now);
 };
 '''
-    cpp = cpp.replace("WINDOW_DEFAULT", window_default)
     cpp += methods + reply + r'''
 void tick(GenSAMHub &hub, uint32_t now) {
   clock_ms = now;
-  hub.service_control_window_(now);
+  hub.service_user_commands_(now);
 }
 void probe_active(GenSAMHub &hub) {
   for (int i = 0; i < 2; ++i) {
@@ -252,58 +241,45 @@ void probe_active(GenSAMHub &hub) {
   tick(hub, clock_ms);
 }
 int main() {
+  // Polling is the resting state: nothing silences the bus on a timer.
   GenSAMHub hub;
-  assert(hub.control_window_ms_ == 60000);
-  tick(hub, 59999); assert(!hub.bus_silent_);
-  tick(hub, 60000); assert(hub.bus_silent_ && hub.registry_.stale == 1);
-  tick(hub, 70000); assert(hub.transmissions == 0);
-  clock_ms = 70000;
-  hub.set_volume_db(-42);
-  assert(!hub.resuming_ && !hub.bus_silent_ && hub.volume_tx_pending_);
-  tick(hub, 70301);
-  assert(hub.transmissions == 0 && hub.discoveries == 0);
-  assert(!hub.resuming_ && hub.discoveries == 0 && hub.current_volume_db_ == -42);
-  hub.volume_tx_pending_ = false;
-  tick(hub, 129999); assert(!hub.bus_silent_);
-  tick(hub, 130000); assert(hub.bus_silent_);
+  tick(hub, 60000);
+  tick(hub, 4000000000U);
+  assert(!hub.bus_silent_ && hub.registry_.stale == 0 && hub.transmissions == 0);
 
-  // No replies or valid cached addresses are needed, even across repeated windows.
+  // After Power Off, volume and mute are held for the next wake and never wake the system.
   for (bool mute_first : {false, true}) {
-    GenSAMHub controls;
-    controls.bus_silent_ = true;
-    controls.current_standby_ = true;
-    controls.recovery_required_ = true;
-    controls.pending_group_ = 1;  // A GLM takeover may have scheduled restoration.
-    if (mute_first) controls.registry_.items.clear();
+    GenSAMHub off;
+    off.bus_silent_ = true;
+    off.current_standby_ = true;
+    if (mute_first) off.registry_.items.clear();
     clock_ms = 200000;
-    if (mute_first) controls.set_group_mute(true);
-    else controls.set_volume_db(-45);
-    assert(controls.controls_only_session_ && !controls.resuming_);
-    assert(controls.transmissions == 0);  // Setters still never transmit.
-    controls.service_pending_writes_(clock_ms);
-    if (mute_first) controls.set_volume_db(-45);
-    else controls.set_group_mute(true);
-    controls.service_pending_writes_(clock_ms);
-    assert(controls.volume_frames == 1 && controls.mute_frames == 1);
+    if (mute_first) off.set_group_mute(true);
+    else off.set_volume_db(-45);
+    if (mute_first) off.set_volume_db(-45);
+    else off.set_group_mute(true);
+    assert(off.bus_silent_ && off.current_standby_ && !off.resuming_);
+    assert(off.volume_tx_pending_ && off.mute_tx_pending_);
+    assert(off.current_volume_db_ == -45 && off.current_mute_);
     for (uint32_t now : {200001U, 200301U, 210001U, 260000U}) {
-      tick(controls, now);
-      controls.update_race_state_machine_();
+      tick(off, now);
+      off.service_pending_writes_(now);
+      off.update_race_state_machine_();
     }
-    assert(controls.discoveries == 0 && controls.race_steps == 0);
-    assert(controls.transmissions == 2 && controls.bus_silent_);
-    controls.set_group_mute(false);
-    controls.service_pending_writes_(clock_ms);
-    assert(controls.controls_only_session_ && controls.mute_frames == 2);
-    controls.recovery_required_ = false;
-    assert(controls.open_control_window_());  // Explicit Power On/group restoration.
-    tick(controls, clock_ms);
-    assert(controls.discoveries == 1 && !controls.controls_only_session_);
+    assert(off.transmissions == 0 && off.discoveries == 0 && off.race_steps == 0);
+    assert(off.accept_user_command_());  // Power On or any other control wakes.
+    assert(!off.bus_silent_ && !off.current_standby_ && off.resuming_);
   }
+  GenSAMHub powering_off;
+  powering_off.power_off_pending_ = true;
+  powering_off.set_volume_db(-45);
+  powering_off.set_group_mute(true);
+  assert(powering_off.power_off_pending_ && !powering_off.resuming_);
 
   GenSAMHub active_controls;
   clock_ms = 100000;
   active_controls.set_group_mute(true);
-  assert(!active_controls.controls_only_session_ && !active_controls.resuming_);
+  assert(!active_controls.resuming_);
   active_controls.current_query_addr_ = 12;
   active_controls.service_pending_writes_(clock_ms);
   assert(active_controls.transmissions == 0);  // Still wait for an outstanding reply.
@@ -313,13 +289,13 @@ int main() {
   assert(active_controls.mute_frames == 1 && active_controls.race_steps == 1);
 
   GenSAMHub paused_timeout;
-  paused_timeout.controls_only_session_ = true;
+  paused_timeout.bus_silent_ = true;
   paused_timeout.registry_.items[12].last_seen_ms = 1;
   tick(paused_timeout, 5000);
   paused_timeout.check_monitor_timeouts_();
   assert(paused_timeout.registry_.timeout_checks == 0 &&
          paused_timeout.last_timeout_check_ == 0);
-  paused_timeout.controls_only_session_ = false;
+  paused_timeout.bus_silent_ = false;
   paused_timeout.check_monitor_timeouts_();
   assert(paused_timeout.registry_.timeout_checks == 1 &&
          paused_timeout.last_timeout_check_ == 5000 &&
@@ -346,38 +322,6 @@ int main() {
          std::isnan(output_level.state) && std::isnan(coil.state));
   assert(!online.has_state && online.invalidations == 1);
 
-  GenSAMHub infinite;
-  infinite.control_window_ms_ = 0;
-  tick(infinite, 4000000000U); assert(!infinite.bus_silent_);
-  GenSAMHub wrapped;
-  wrapped.last_user_command_ms_ = UINT32_MAX - 10000;
-  tick(wrapped, 49998); assert(!wrapped.bus_silent_);
-  tick(wrapped, 49999); assert(wrapped.bus_silent_);
-
-  GenSAMHub busy;
-  busy.current_query_addr_ = 12;
-  tick(busy, 60000); assert(!busy.bus_silent_);
-  busy.current_query_addr_ = 0;
-  busy.apply_.active = true;
-  tick(busy, 60000); assert(!busy.bus_silent_);
-  busy.apply_.active = false;
-  busy.volume_tx_pending_ = true;
-  tick(busy, 60000); assert(!busy.bus_silent_);
-  busy.volume_tx_pending_ = false;
-  busy.iss_tx_pending_ = true;
-  tick(busy, 60000); assert(!busy.bus_silent_);
-  busy.iss_tx_pending_ = false;
-  busy.filter_bypass_tx_pending_ = true;
-  tick(busy, 60000); assert(!busy.bus_silent_);
-  busy.filter_bypass_tx_pending_ = false;
-  busy.pending_group_ = 1;
-  tick(busy, 60000); assert(!busy.bus_silent_);
-  busy.pending_group_ = -1;
-  busy.registry_.items[12].identify_end_ms = 90000;
-  tick(busy, 60000); assert(!busy.bus_silent_);
-  busy.registry_.items[12].identify_end_ms = 0;
-  tick(busy, 60000); assert(busy.bus_silent_);
-
   GenSAMHub commands;
   commands.bus_silent_ = true;
   int applied = 0;
@@ -387,25 +331,62 @@ int main() {
   probe_active(commands);
   assert(applied == 1 && commands.discoveries == 0);
   assert(commands.last_user_command_ms_ == 100);  // Probes/background do not extend it.
-  tick(commands, 60100); assert(commands.bus_silent_);
+  tick(commands, 60100); assert(!commands.bus_silent_);
   commands.current_standby_ = true;
-  assert(commands.open_control_window_() && !commands.current_standby_);
+  assert(commands.accept_user_command_() && !commands.current_standby_);
 
   GenSAMHub asleep;
   asleep.bus_silent_ = true;
-  assert(asleep.open_control_window_());
+  assert(asleep.accept_user_command_());
   tick(asleep, clock_ms);
   Frame sleeping; sleeping.payload = {1};
   assert(asleep.handle_active_reply_(sleeping, clock_ms));
   assert(asleep.discoveries == 1);
   GenSAMHub missing;
   missing.bus_silent_ = true;
-  assert(missing.open_control_window_());
+  assert(missing.accept_user_command_());
   tick(missing, 10);
   Frame incomplete; incomplete.payload.clear();
   assert(missing.handle_active_reply_(incomplete, 10));
   tick(missing, 309); assert(missing.discoveries == 0);
   tick(missing, 310); assert(missing.discoveries == 1);
+
+  // Hub-managed sleep: volume/mute wait for the wake; anything else wakes and rediscovers,
+  // but only once the outstanding probe reply is in or has timed out.
+  GenSAMHub hub_sleep;
+  hub_sleep.race_state_ = RaceState::SLEEPING;
+  hub_sleep.current_standby_ = true;
+  clock_ms = 500000;
+  hub_sleep.set_volume_db(-40);
+  hub_sleep.set_group_mute(true);
+  assert(hub_sleep.race_state_ == RaceState::SLEEPING && hub_sleep.current_standby_);
+  assert(!hub_sleep.resuming_);
+  assert(hub_sleep.volume_tx_pending_ && hub_sleep.mute_tx_pending_);
+  hub_sleep.service_pending_writes_(clock_ms);
+  hub_sleep.update_race_state_machine_();
+  assert(hub_sleep.transmissions == 0 && hub_sleep.race_steps == 1);
+  hub_sleep.check_monitor_timeouts_();
+  assert(hub_sleep.registry_.timeout_checks == 0);
+  hub_sleep.current_query_addr_ = 12;  // A sleep probe is waiting for its reply.
+  hub_sleep.race_step_time_ = clock_ms;
+  hub_sleep.last_sleep_tx_ms_ = clock_ms;
+  assert(hub_sleep.accept_user_command_());
+  assert(hub_sleep.resuming_ && hub_sleep.recovery_required_ && !hub_sleep.current_standby_);
+  tick(hub_sleep, 500100); assert(hub_sleep.discoveries == 0);
+  assert(hub_sleep.handle_active_reply_(Frame{}, clock_ms) && hub_sleep.current_query_addr_ == 0);
+  // The probe gave that monitor a session ID; RACE must wait until it has lapsed.
+  tick(hub_sleep, 500101); assert(hub_sleep.discoveries == 0);
+  tick(hub_sleep, 502999); assert(hub_sleep.discoveries == 0);
+  tick(hub_sleep, 503000); assert(hub_sleep.discoveries == 1);
+  GenSAMHub lost_probe;
+  lost_probe.race_state_ = RaceState::SLEEPING;
+  lost_probe.current_standby_ = true;
+  lost_probe.current_query_addr_ = 12;
+  lost_probe.race_step_time_ = 0;
+  assert(lost_probe.accept_user_command_());
+  tick(lost_probe, 299); assert(lost_probe.discoveries == 0);
+  tick(lost_probe, 2999); assert(lost_probe.discoveries == 0);
+  tick(lost_probe, 3000); assert(lost_probe.discoveries == 1);
 
   GenSAMHub off;
   off.power_off_pending_ = true;
@@ -431,7 +412,7 @@ int main() {
   assert(!blocked.current_mute_ && warnings >= before + 3);
   blocked.arbiter_.active = false;
   blocked.listen_only_ = true;
-  assert(!blocked.open_control_window_());
+  assert(!blocked.accept_user_command_());
   GenSAMHub full;
   for (int i = 0; i < 32; ++i) assert(full.defer_user_command_([]() {}));
   assert(full.defer_user_command_([]() {}));
@@ -439,13 +420,13 @@ int main() {
   GenSAMHub externally_changed;
   externally_changed.bus_silent_ = true;
   externally_changed.recovery_required_ = true;
-  assert(externally_changed.open_control_window_());
+  assert(externally_changed.accept_user_command_());
   tick(externally_changed, 100);
   assert(externally_changed.discoveries == 1 && externally_changed.transmissions == 0);
   GenSAMHub empty;
   empty.registry_.items.clear();
   empty.bus_silent_ = true;
-  assert(empty.open_control_window_());
+  assert(empty.accept_user_command_());
   assert(empty.discoveries == 0);  // External caller never transmits.
   tick(empty, 100);
   assert(empty.discoveries == 1);
@@ -470,7 +451,7 @@ int main() {
   assert(warnings == save_warning + 1);
 }
 '''
-    with tempfile.TemporaryDirectory(prefix="gensam-window-") as directory:
+    with tempfile.TemporaryDirectory(prefix="gensam-commands-") as directory:
         root = Path(directory)
         (root / "test.cpp").write_text(cpp)
         subprocess.run(
@@ -479,7 +460,7 @@ int main() {
              str(root / "test.cpp"), "-o", str(root / "test")], check=True
         )
         subprocess.run([str(root / "test")], check=True)
-    print("Control-window, cached resume and preference regression checks passed")
+    print("User-command, cached resume and preference regression checks passed")
 
 
 if __name__ == "__main__":

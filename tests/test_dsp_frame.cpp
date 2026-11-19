@@ -62,14 +62,18 @@ using esphome::gensam::clamp_level_db;
 using esphome::gensam::delay_ms_to_samples;
 using esphome::gensam::delay_samples_to_ms;
 using esphome::gensam::Frame;
+using esphome::gensam::ISS_LEVEL_SILENCE;
 using esphome::gensam::make_audio_source;
 using esphome::gensam::make_delay;
+using esphome::gensam::make_iss_read;
 using esphome::gensam::make_lfe_level;
 using esphome::gensam::make_level;
 using esphome::gensam::make_query;
 using esphome::gensam::parse_dsp_delay;
 using esphome::gensam::parse_dsp_level;
+using esphome::gensam::parse_iss_word;
 using esphome::gensam::Uart9BitChar;
+using esphome::gensam::WAKEUP_OP_ISS_THRESHOLD;
 
 namespace {
 
@@ -539,6 +543,19 @@ void test_lfe_level_encoding_details() {
         "the pad byte is zero");
 }
 
+void test_iss_read_replies() {
+  // Verbatim from an 8351B: "02 3A 82" read the stored threshold back as FF FF FF B5, the
+  // -75 dBu set in GLM, and "3A 84" reads 80 00 00 00 when there is no signal at all.
+  check(make_iss_read(0x02, WAKEUP_OP_ISS_THRESHOLD).payload == std::vector<uint8_t>{0x82},
+        "an ISS read sets the read flag on the op byte");
+  int32_t value = 0;
+  check(parse_iss_word({0xFF, 0xFF, 0xFF, 0xB5}, value) && value == -75,
+        "the threshold reply is a signed big-endian word");
+  check(parse_iss_word({0x80, 0x00, 0x00, 0x00}, value) && value == ISS_LEVEL_SILENCE,
+        "the no-signal level reply is INT32_MIN");
+  check(!parse_iss_word({0x03}, value), "a one-byte state reply is not a word");
+}
+
 }  // namespace
 
 int main() {
@@ -562,6 +579,7 @@ int main() {
   test_level_decode_matches_the_captures();
   test_level_decode_rejects_the_unknown_sub_command();
   test_delay_decode();
+  test_iss_read_replies();
 
   if (failures != 0) {
     std::printf("\n%d check(s) FAILED\n", failures);

@@ -4,6 +4,7 @@
 
 #include "hub.h"
 #include "commands.h"
+#include "iss.h"
 
 #include "esphome/core/log.h"
 #include "esphome/components/select/select.h"
@@ -55,6 +56,32 @@ constexpr uint32_t DISCOVERY_RETRY_INTERVAL_MS = 10000;
 
 /// RS-485 transceiver direction turnaround allowance between back-to-back frames.
 constexpr uint32_t TURNAROUND_US = 300;
+
+/// How often each monitor's ISS level (or, first, its own ISS settings) is read while polling.
+constexpr uint32_t ISS_SAMPLE_INTERVAL_MS = 5000;
+
+/// A level sample older than this does not count towards deciding that the input is silent.
+constexpr uint32_t ISS_SAMPLE_MAX_AGE_MS = 20000;
+
+/// Wait after the sleep request before the first probe; the monitors' power state is still
+/// settling and an early bounce is detected just as well a little later.
+constexpr uint32_t SLEEP_FIRST_PROBE_MS = 20000;
+
+/// Spacing of the sleep probes; each one checks a single monitor.
+constexpr uint32_t SLEEP_PROBE_INTERVAL_MS = 5000;
+
+/// Time to wait for each half (address ACK, state reply) of a sleep probe.
+constexpr uint32_t SLEEP_PROBE_REPLY_TIMEOUT_MS = 300;
+
+/// A stored ISS delay at or above this many minutes means the speaker never sleeps.
+constexpr uint32_t ISS_STORED_DELAY_NEVER_MIN = 65535;
+
+/// Phases of one sleep probe, in sleep_probe_phase_.
+enum : uint8_t {
+  SLEEP_PROBE_IDLE = 0,
+  SLEEP_PROBE_ASSIGNING,
+  SLEEP_PROBE_READING,
+};
 
 /// Spacing between the volume broadcast and the keep-alive that follows it.
 constexpr uint32_t VOLUME_KEEPALIVE_GAP_US = 250;
@@ -156,7 +183,6 @@ void GenSAMHub::discover_monitors_() {
 
   initial_discovery_done_ = true;
   resuming_ = false;
-  controls_only_session_ = false;
   recovery_required_ = false;
   bus_silent_ = false;
 
@@ -172,6 +198,9 @@ void GenSAMHub::discover_monitors_() {
   current_query_addr_ = 0;
   current_query_cmd_ = 0;
   query_retries_ = 0;
+  iss_query_op_ = 0;
+  sleep_probe_phase_ = 0;
+  last_signal_ms_ = millis();
   current_racing_bytes_.clear();
   current_racing_id_ = 0;
   rid_retries_ = 0;
@@ -179,8 +208,9 @@ void GenSAMHub::discover_monitors_() {
   last_queried_cmd_ = 0;
   next_assign_addr_ = MONITOR_START_ADDR;
 
-  // A sleeping monitor cannot answer a RACE ping: its DSP is down and it is not listening on the
-  // bus at all. Discovery therefore always begins by waking, exactly as GLM does. When the system
+  // Discovery always begins by waking, exactly as GLM does. A monitor in ISS sleep does answer a
+  // RACE ping, but a discovered system is expected to play, and the wake is also what restores a
+  // monitor's DSP from hard standby. When the system
   // is meant to remain off, the amplifiers are silenced right behind the wakeup so nothing is
   // audible, and returned to standby by finish_temporary_wake_() once discovery completes.
   this->send_wakeup();
@@ -255,6 +285,12 @@ void GenSAMHub::broadcast_volume_and_keepalive_() {
 // --- Incoming replies to what the state machine sent --------------------------------
 
 bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
+  if (resuming_ && race_state_ == RaceState::SLEEPING) {
+    // The late reply to a sleep probe that a wake request overtook; it only held the slot.
+    if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS) return false;
+    current_query_addr_ = 0;
+    return true;
+  }
   if (resuming_) {
     if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS ||
         (frame.command != CMD_REPORT_STATUS && frame.command != CMD_QUERY_STATUS)) return false;
@@ -359,6 +395,9 @@ bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
     }
 
     case RaceState::POLLING_MONITORS: {
+      if (iss_query_op_ != 0) {
+        return this->handle_iss_reply_(frame, now);
+      }
       if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS ||
           (frame.command != CMD_REPORT_STATUS && frame.command != CMD_QUERY_STATUS)) {
         return false;
@@ -383,6 +422,39 @@ bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
       return true;
     }
 
+    case RaceState::SLEEPING: {
+      if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS ||
+          (frame.command != CMD_REPORT_STATUS && frame.command != CMD_ACK) ||
+          frame.payload.size() != 1) {
+        return false;
+      }
+      const uint8_t address = current_query_addr_;
+      if (sleep_probe_phase_ == SLEEP_PROBE_ASSIGNING) {
+        if (frame.payload[0] != address) {
+          return false;
+        }
+        delayMicroseconds(TURNAROUND_US);
+        this->send_frame(make_iss_read(address, WAKEUP_OP_POWER));
+        sleep_probe_phase_ = SLEEP_PROBE_READING;
+        race_step_time_ = now;
+        last_sleep_tx_ms_ = now;
+        return true;
+      }
+      if (sleep_probe_phase_ != SLEEP_PROBE_READING) {
+        return false;
+      }
+      sleep_probe_phase_ = SLEEP_PROBE_IDLE;
+      current_query_addr_ = 0;
+      sleep_probe_index_++;
+      if (frame.payload[0] == ISS_STATE_AWAKE) {
+        this->wake_from_sleep_(address);
+      } else {
+        ESP_LOGD(TAG, "Sleep probe: monitor 0x%02X ISS state %u", address,
+                 (unsigned) frame.payload[0]);
+      }
+      return true;
+    }
+
     default:
       return false;
   }
@@ -391,7 +463,7 @@ bool GenSAMHub::handle_active_reply_(const Frame &frame, uint32_t now) {
 // --- State machine ------------------------------------------------------------------
 
 void GenSAMHub::update_race_state_machine_() {
-  if (resuming_ || controls_only_session_) return;
+  if (resuming_) return;
   if (power_off_pending_ && !apply_.active && current_query_addr_ == 0) return;
   if (!can_transmit()) {
     return;
@@ -434,6 +506,9 @@ void GenSAMHub::update_race_state_machine_() {
       break;
     case RaceState::IDLE:
       this->race_step_idle_(now);
+      break;
+    case RaceState::SLEEPING:
+      this->race_step_sleeping_(now);
       break;
     default:
       break;
@@ -938,11 +1013,21 @@ void GenSAMHub::race_step_polling_(uint32_t now) {
 
   if (current_query_addr_ != 0 && now - race_step_time_ > POLL_REPLY_TIMEOUT_MS) {
     current_query_addr_ = 0;
+    iss_query_op_ = 0;
     last_poll_step_time_ = now;
   }
 
   if (current_query_addr_ != 0 || (now - last_poll_step_time_ < POLL_STEP_INTERVAL_MS) ||
       (now - last_poll_cycle_time_ < poll_interval_ms_)) {
+    return;
+  }
+
+  if (this->sleep_due_(now)) {
+    this->enter_sleep_(now);
+    return;
+  }
+
+  if (this->send_iss_read_(now)) {
     return;
   }
 
@@ -959,6 +1044,7 @@ void GenSAMHub::race_step_polling_(uint32_t now) {
 
   if (current_poll_index_ < poll_addrs_.size()) {
     current_query_addr_ = poll_addrs_[current_poll_index_++];
+    iss_query_op_ = 0;
     race_step_time_ = now;
     last_poll_step_time_ = now;
     this->send_frame(make_query(current_query_addr_, CMD_QUERY_STATUS));
@@ -986,6 +1072,229 @@ void GenSAMHub::race_step_idle_(uint32_t now) {
     last_discovery_retry_time_ = now;
     this->discover_monitors_();
   }
+}
+
+// --- Hub-managed ISS sleep ----------------------------------------------------------
+
+bool GenSAMHub::auto_sleep_delay_ms_(uint32_t &delay_ms) const {
+  uint32_t minutes = 0;
+  if (iss_sleep_delay_ != ISS_SLEEP_DELAY_DEFAULT) {
+    if (iss_sleep_delay_ == ISS_SLEEP_DELAY_NEVER) {
+      return false;
+    }
+    minutes = iss_sleep_delay_;
+  } else {
+    bool any = false;
+    for (const auto &kv : registry_.monitors()) {
+      const GenSAMMonitor &mon = kv.second;
+      if (!mon.online) {
+        continue;
+      }
+      if (!mon.iss_stored_delay_known) {
+        return false;
+      }
+      if (mon.iss_stored_delay_min == 0 ||
+          mon.iss_stored_delay_min >= ISS_STORED_DELAY_NEVER_MIN) {
+        return false;
+      }
+      minutes = std::max(minutes, mon.iss_stored_delay_min);
+      any = true;
+    }
+    if (!any) {
+      return false;
+    }
+  }
+  delay_ms = std::min(minutes, ISS_SLEEP_DELAY_MAX_MIN) * 60000U;
+  return true;
+}
+
+bool GenSAMHub::iss_threshold_for_(const GenSAMMonitor &mon, int32_t &dbu) const {
+  if (iss_threshold_ != ISS_THRESHOLD_DEFAULT) {
+    dbu = iss_threshold_;
+    return true;
+  }
+  if (!mon.iss_stored_threshold_known) {
+    return false;
+  }
+  dbu = mon.iss_stored_threshold_dbu;
+  return true;
+}
+
+bool GenSAMHub::send_iss_read_(uint32_t now) {
+  for (auto &kv : registry_.monitors()) {
+    GenSAMMonitor &mon = kv.second;
+    if (!mon.online || (mon.iss_read_sent && now - mon.iss_last_read_ms < ISS_SAMPLE_INTERVAL_MS)) {
+      continue;
+    }
+    uint8_t op = WAKEUP_OP_ISS_LEVEL;
+    if (iss_sleep_delay_ == ISS_SLEEP_DELAY_DEFAULT && !mon.iss_stored_delay_known) {
+      op = WAKEUP_OP_ISS_SLEEP_DELAY;
+    } else if (iss_threshold_ == ISS_THRESHOLD_DEFAULT && !mon.iss_stored_threshold_known) {
+      op = WAKEUP_OP_ISS_THRESHOLD;
+    }
+    mon.iss_read_sent = true;
+    mon.iss_last_read_ms = now;
+    current_query_addr_ = mon.address;
+    iss_query_op_ = op;
+    race_step_time_ = now;
+    last_poll_step_time_ = now;
+    this->send_frame(make_iss_read(mon.address, op));
+    return true;
+  }
+  return false;
+}
+
+bool GenSAMHub::handle_iss_reply_(const Frame &frame, uint32_t now) {
+  int32_t value = 0;
+  if (current_query_addr_ == 0 || frame.address != HOST_ADDRESS ||
+      frame.command != CMD_REPORT_STATUS || !parse_iss_word(frame.payload, value)) {
+    return false;
+  }
+  GenSAMMonitor *mon = registry_.find(current_query_addr_);
+  const uint8_t op = iss_query_op_;
+  current_query_addr_ = 0;
+  iss_query_op_ = 0;
+  last_poll_step_time_ = now;
+  if (mon == nullptr) {
+    return true;
+  }
+  this->mark_monitor_seen_(*mon);
+  switch (op) {
+    case WAKEUP_OP_ISS_SLEEP_DELAY:
+      mon->iss_stored_delay_min = static_cast<uint32_t>(value);
+      mon->iss_stored_delay_known = true;
+      ESP_LOGI(TAG, "[0x%02X %s] ISS sleep delay: %u min", mon->address, mon->model.c_str(),
+               (unsigned) mon->iss_stored_delay_min);
+      break;
+    case WAKEUP_OP_ISS_THRESHOLD:
+      mon->iss_stored_threshold_dbu = value;
+      mon->iss_stored_threshold_known = true;
+      ESP_LOGI(TAG, "[0x%02X %s] ISS threshold: %d dBu", mon->address, mon->model.c_str(),
+               (int) value);
+      break;
+    case WAKEUP_OP_ISS_LEVEL: {
+      mon->iss_level_dbu = value;
+      mon->iss_level_known = true;
+      mon->iss_level_ms = now;
+      int32_t threshold = 0;
+      const bool signal = this->iss_threshold_for_(*mon, threshold) && value >= threshold;
+      if (signal) {
+        last_signal_ms_ = now;
+      }
+      if (value == ISS_LEVEL_SILENCE) {
+        ESP_LOGD(TAG, "[0x%02X %s] ISS level: no signal", mon->address, mon->model.c_str());
+      } else {
+        ESP_LOGD(TAG, "[0x%02X %s] ISS level: %d dBu%s", mon->address, mon->model.c_str(),
+                 (int) value, signal ? " (signal)" : "");
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  return true;
+}
+
+bool GenSAMHub::sleep_due_(uint32_t now) const {
+  if (current_standby_ || restore_standby_after_discovery_ || power_off_pending_ ||
+      pending_group_ >= 0 || apply_.active || !user_commands_.empty() || volume_tx_pending_ ||
+      mute_tx_pending_ || system_led_tx_pending_ || iss_tx_pending_ || filter_bypass_tx_pending_) {
+    return false;
+  }
+  uint32_t delay_ms = 0;
+  if (!this->auto_sleep_delay_ms_(delay_ms)) {
+    return false;
+  }
+  if (now - last_signal_ms_ < delay_ms || now - last_user_command_ms_ < delay_ms) {
+    return false;
+  }
+  // Every online monitor must have recently reported a level below its threshold; a monitor
+  // that is not answering the level read could be the one that is playing.
+  bool any = false;
+  for (const auto &kv : registry_.monitors()) {
+    const GenSAMMonitor &mon = kv.second;
+    if (!mon.online) {
+      continue;
+    }
+    int32_t threshold = 0;
+    if (mon.identify_end_ms != 0 || !mon.iss_level_known ||
+        now - mon.iss_level_ms > ISS_SAMPLE_MAX_AGE_MS ||
+        !this->iss_threshold_for_(mon, threshold) || mon.iss_level_dbu >= threshold) {
+      return false;
+    }
+    any = true;
+  }
+  return any;
+}
+
+void GenSAMHub::enter_sleep_(uint32_t now) {
+  uint32_t delay_ms = 0;
+  this->auto_sleep_delay_ms_(delay_ms);
+  ESP_LOGI(TAG, "No input signal for %u min; putting monitors to sleep",
+           (unsigned) (delay_ms / 60000U));
+  // Once only: a second short press would toggle the monitors straight back awake.
+  this->send_frame(make_wakeup_step(WAKEUP_OP_POWER, WAKEUP_VAL_STANDBY_2));
+  race_state_ = RaceState::SLEEPING;
+  sleep_entered_ms_ = now;
+  last_sleep_probe_ms_ = now;
+  last_sleep_tx_ms_ = now;
+  sleep_probe_phase_ = SLEEP_PROBE_IDLE;
+  current_query_addr_ = 0;
+  iss_query_op_ = 0;
+  current_poll_index_ = 0;
+  current_standby_ = true;
+  registry_.publish_stale_telemetry();
+  this->notify_state_callbacks_();
+  this->update_bus_status_();
+}
+
+void GenSAMHub::race_step_sleeping_(uint32_t now) {
+  if (sleep_probe_phase_ != SLEEP_PROBE_IDLE) {
+    if (now - race_step_time_ > SLEEP_PROBE_REPLY_TIMEOUT_MS) {
+      // A lost frame is not evidence either way; the next probe asks again.
+      ESP_LOGD(TAG, "Sleep probe: no reply from monitor 0x%02X", current_query_addr_);
+      sleep_probe_phase_ = SLEEP_PROBE_IDLE;
+      current_query_addr_ = 0;
+      sleep_probe_index_++;
+    }
+    return;
+  }
+  if (now - sleep_entered_ms_ < SLEEP_FIRST_PROBE_MS ||
+      now - last_sleep_probe_ms_ < SLEEP_PROBE_INTERVAL_MS) {
+    return;
+  }
+  std::vector<const GenSAMMonitor *> targets;
+  for (const auto &kv : registry_.monitors()) {
+    if (kv.second.unique_id != 0) {
+      targets.push_back(&kv.second);
+    }
+  }
+  if (targets.empty()) {
+    return;
+  }
+  const GenSAMMonitor &mon = *targets[sleep_probe_index_ % targets.size()];
+  const std::vector<uint8_t> uid = {static_cast<uint8_t>(mon.unique_id >> 16),
+                                    static_cast<uint8_t>(mon.unique_id >> 8),
+                                    static_cast<uint8_t>(mon.unique_id)};
+  last_sleep_probe_ms_ = now;
+  last_sleep_tx_ms_ = now;
+  race_step_time_ = now;
+  current_query_addr_ = mon.address;
+  sleep_probe_phase_ = SLEEP_PROBE_ASSIGNING;
+  this->send_frame(make_set_rid(uid, mon.address));
+}
+
+void GenSAMHub::wake_from_sleep_(uint8_t address) {
+  ESP_LOGI(TAG, "Monitor 0x%02X woke from ISS sleep (input signal); waking all and rediscovering",
+           address);
+  // Rediscovered through the user-wake path, which waits for the probe's session to lapse.
+  // current_standby_ is cleared first: discovery would otherwise shut the system back down.
+  current_standby_ = false;
+  recovery_required_ = true;
+  resuming_ = true;
+  current_query_addr_ = 0;
+  this->notify_state_callbacks_();
+  this->update_bus_status_();
 }
 
 }  // namespace gensam

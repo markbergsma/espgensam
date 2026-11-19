@@ -36,7 +36,6 @@ listen_only: "false"
 min_volume_db: "-80.0"
 max_volume_db: "-30.0"
 startup_volume_db: "-50.0"
-control_window: "60s"
 discovery_slots: "2"
 log_level: "INFO"
 ```
@@ -233,42 +232,49 @@ red/off status indication. The switch remains unknown until each discovered moni
 is observed or commanded; if the monitors disagree, it reports off (not all LEDs are enabled).
 Group presets and calibration controls are available separately.
 
-In controller mode, boot wakes the monitors, restores the remembered volume and selected
-group, and then suspends **all** transmissions after the control window (`60s` by default).
-Set the `control_window` substitution to `0s` to keep polling indefinitely. On first boot,
+In controller mode, boot wakes the monitors and restores the remembered volume and selected
+group. The hub then keeps polling and puts the monitors to sleep itself (see *Hub-managed
+sleep* below). On first boot,
 `startup_volume_db` is used; restored volume is clamped to the configured bounds.
 Choose safe bounds before deploying. Preferences are saved through ESPHome's wear-managed
 flash mechanism; an abrupt loss of power before its flush can lose recent changes.
 
-Accepted user controls reopen/reset the window. After silence, system volume and mute send
-only their control frames: no status probes, polling, wake/discovery or group reload, even
-when a cached address no longer answers. Delivery is not confirmed, and sleeping monitors
-may not respond. This avoids interrupting playing audio to recover an expired address.
-Other controls probe cached monitors first; standby or a missing response triggers wake,
-rediscovery and restoration of the selected group, which can interrupt audio. After a
-volume/mute-only window, explicitly use System Power on or select a group to force discovery
-and restore settings lost during sleep. Group/input changes may intentionally interrupt audio.
+System volume and mute never wake the monitors: while they sleep or are powered off, a change
+is held and applied after the next wake. Other controls wake the system if needed. They probe
+cached monitors first; standby or a missing response triggers wake, rediscovery and
+restoration of the selected group, which can interrupt audio. Group/input changes may
+intentionally interrupt audio.
 
-`Bus Silent` means telemetry is stale and actual speaker power is unknown, not necessarily off.
-Measured telemetry and monitor online indicators become unknown while monitoring is paused;
-online status returns when a monitor is next observed. Native ISS/audio wake has no known bus notification.
-Silence permits native ISS but does not force it: input signals and AES/EBU clock may keep
-speakers awake. Explicit System Power off sends shutdown and then stays silent; subsequent
-controls other than system volume/mute can wake again. Listen-only mode never transmits, and
-external GLM control takes priority.
+**Hub-managed sleep**. Continuous polling resets the monitors' own ISS
+timer, so the hub applies the same policy itself. While polling it samples each monitor's ISS
+input level every few seconds. After the ISS Sleep Delay with no monitor at or above its ISS
+threshold and no user control, it sends one sleep request. The bus status becomes `Sleeping`
+and System Power reports off. While asleep the hub sends no polls, which would wake the
+monitors, and instead probes one monitor's sleep state every few seconds. When audio wakes a
+monitor, the hub wakes the system, rediscovers it and reapplies the selected group, so an audio
+wake is detected within seconds. Volume and mute changes during sleep are held until the next
+wake; any other control wakes the system. A monitor that played audio in the last few minutes
+may wake itself shortly after the request; the hub then simply waits another delay.
+
+Explicit System Power off sends shutdown and then keeps the bus silent: the status is
+`Bus Silent`, telemetry and monitor online indicators become unknown, and the hub does not
+watch for an audio wake. Any control other than system volume/mute powers it back on. Listen-only mode never
+transmits. External GLM control takes priority; once GLM has been quiet for
+`glm_inactivity_cooldown`, the hub rediscovers the monitors and reapplies the selected group,
+unless the system was powered off.
 
 ISS sleep and standby reset monitor settings to the defaults stored on each monitor, or to no
-stored settings if no defaults have been saved. Session-only settings are lost. An ISS audio
-wake may not be detected by the hub, so the selected group may not be reapplied automatically.
+stored settings if no defaults have been saved. Session-only settings are lost; the hub
+reapplies the selected group after every wake it handles.
 
 **ISS Sleep Delay** and **ISS Sensitivity** (System Controls) override the monitors' stored ISS
 settings: GLM's delays from 2 min to 4 h or Never, and Low/Medium/High (−61/−68/−75 dBu).
 They are runtime-only. They are never stored on the monitors, so a sleep or restart reverts them,
 and the hub re-sends them after each discovery and group push. An override therefore applies to
-the next sleep after each wake that the hub handles. *Speaker default* sends nothing. Polling
-holds the monitors awake, so ISS can only count down after the control window closes. It is not
-yet verified that monitors apply these values without a store; see
-[`docs/glm-bus-guide-reconciliation.md`](docs/glm-bus-guide-reconciliation.md) §3.
+the next sleep after each wake that the hub handles. *Speaker default* sends nothing and uses
+the delay and threshold stored on each monitor; the longest stored delay wins, and Never on any
+monitor disables sleep. Hub-managed sleep uses the same settings.
+See [`docs/glm-bus-guide-reconciliation.md`](docs/glm-bus-guide-reconciliation.md) §3.
 
 **Bypass Phase Correction**, disabled by default, bypasses each monitor's phase-correction
 filter for comparison. Like Bypass Calibration it is off after a restart, and it is reapplied

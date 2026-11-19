@@ -186,7 +186,7 @@ void GenSAMHub::set_active_group(uint8_t index) {
              (unsigned) group_count_);
     return;
   }
-  if (!executing_user_command_ && !this->open_control_window_()) {
+  if (!executing_user_command_ && !this->accept_user_command_()) {
     return;
   }
   selected_group_ = index;
@@ -282,31 +282,36 @@ void GenSAMHub::save_iss_state_() {
   }
 }
 
-bool GenSAMHub::open_control_window_(bool controls_only) {
+bool GenSAMHub::accept_user_command_(bool hold_while_off) {
   if (listen_only_ || (yield_to_glm_ && arbiter_.is_active())) {
     ESP_LOGW(TAG, "User command rejected: listen-only or external GLM controls the bus");
     return false;
   }
   last_user_command_ms_ = millis();
+  const bool sleeping = race_state_ == RaceState::SLEEPING && !bus_silent_;
+  if (hold_while_off && (sleeping || bus_silent_ || current_standby_ || power_off_pending_)) {
+    return true;  // Held until the monitors wake; see section 3 of hub.h.
+  }
   if (power_off_pending_) {
     ESP_LOGI(TAG, "New user command supersedes pending power off");
     power_off_pending_ = false;
   }
-  if (bus_silent_ || current_standby_ || (controls_only_session_ && !controls_only)) {
-    if (controls_only_session_ && !controls_only) {
-      recovery_required_ = true;
-    }
+  if (sleeping) {
+    ESP_LOGI(TAG, "User command while monitors sleep; waking and rediscovering");
+    recovery_required_ = true;
+  }
+  if (sleeping || bus_silent_ || current_standby_) {
     bus_silent_ = false;
     current_standby_ = false;
-    controls_only_session_ = controls_only;
-    resuming_ = !controls_only;
+    resuming_ = true;
     poll_addrs_ = registry_.addresses();
     current_poll_index_ = 0;
-    current_query_addr_ = 0;
-    race_step_time_ = millis();
-    if (controls_only) {
-      race_state_ = RaceState::IDLE;
-      ESP_LOGI(TAG, "Resuming volume/mute only; no wakeup, discovery or group reload");
+    iss_query_op_ = 0;
+    sleep_probe_phase_ = 0;
+    // An outstanding sleep probe keeps its slot, so discovery waits out the reply.
+    if (!sleeping || current_query_addr_ == 0) {
+      current_query_addr_ = 0;
+      race_step_time_ = millis();
     }
     this->update_bus_status_();
   }
@@ -321,13 +326,13 @@ bool GenSAMHub::defer_user_command_(std::function<void()> command) {
     ESP_LOGW(TAG, "User command queue full; command rejected");
     return true;
   }
-  if (this->open_control_window_()) {
+  if (this->accept_user_command_()) {
     user_commands_.push_back(std::move(command));
   }
   return true;
 }
 
-void GenSAMHub::service_control_window_(uint32_t now) {
+void GenSAMHub::service_user_commands_(uint32_t now) {
   if (!can_transmit()) {
     return;
   }
@@ -345,6 +350,13 @@ void GenSAMHub::service_control_window_(uint32_t now) {
   }
   if (resuming_) {
     if (recovery_required_ || poll_addrs_.empty()) {
+      if (current_query_addr_ != 0 && now - race_step_time_ < 300) {
+        return;
+      }
+      // A probed monitor keeps its session until the bus has been quiet; see hub.h section 8.
+      if (race_state_ == RaceState::SLEEPING && now - last_sleep_tx_ms_ < SESSION_LAPSE_MS) {
+        return;
+      }
       this->discover_monitors_();
       return;
     }
@@ -377,19 +389,6 @@ void GenSAMHub::service_control_window_(uint32_t now) {
     executing_user_command_ = true;
     command();
     executing_user_command_ = false;
-    return;
-  }
-  const bool identifying = std::any_of(registry_.monitors().begin(), registry_.monitors().end(),
-      [](const auto &entry) { return entry.second.identify_end_ms != 0; });
-  if (!identifying && user_commands_.empty() &&
-      control_window_ms_ != 0 && now - last_user_command_ms_ >= control_window_ms_ &&
-      initial_discovery_done_ && (pending_group_ < 0 || controls_only_session_) && !volume_tx_pending_ &&
-      !mute_tx_pending_ && !system_led_tx_pending_ && !iss_tx_pending_ &&
-      !filter_bypass_tx_pending_) {
-    bus_silent_ = true;
-    registry_.publish_stale_telemetry();
-    ESP_LOGI(TAG, "Control window expired; all TX suspended for native ISS");
-    this->update_bus_status_();
   }
 }
 
@@ -406,7 +405,6 @@ void GenSAMHub::dump_config() {
   ESP_LOGCONFIG(TAG, "GenSAM Hub:");
   ESP_LOGCONFIG(TAG, "  TX Pin: GPIO%d", rs485_.tx_pin);
   ESP_LOGCONFIG(TAG, "  RX Pin: GPIO%d", rs485_.rx_pin);
-  ESP_LOGCONFIG(TAG, "  Control window: %u ms (0 = infinite)", (unsigned)control_window_ms_);
   ESP_LOGCONFIG(TAG, "  Volume Bounds: [%.1f dB, %.1f dB] (Startup: %.1f dB)",
                 min_volume_db_, max_volume_db_, startup_volume_db_);
   if (volume_number_ != nullptr) {
@@ -489,7 +487,7 @@ bool GenSAMHub::send_frame(const Frame &frame) {
   }
 
   if (listen_only_ || bus_silent_) {
-    ESP_LOGW(TAG, "Cannot send frame: listen-only or control window is silent");
+    ESP_LOGW(TAG, "Cannot send frame: listen-only or bus silent after power off");
     return false;
   }
 
@@ -614,9 +612,14 @@ void GenSAMHub::process_rx_() {
           recovery_required_ = true;
           apply_ = GroupApplyState{};
           pending_group_ = selected_group_;
-          bus_silent_ = true;
-          registry_.publish_stale_telemetry();
           current_query_addr_ = 0;
+          iss_query_op_ = 0;
+          sleep_probe_phase_ = 0;
+          if (race_state_ == RaceState::SLEEPING) {
+            // Not a power off: rediscovery after the cooldown must wake, not restore standby.
+            race_state_ = RaceState::IDLE;
+            current_standby_ = false;
+          }
         }
         this->update_bus_status_();
       }
@@ -641,12 +644,10 @@ void GenSAMHub::check_glm_cooldown_() {
 
   ESP_LOGI(TAG, "No GLM master/adapter traffic observed for %u seconds. Resuming active bus control.",
            (unsigned)(glm_inactivity_cooldown_ms_ / 1000));
-  // Trigger fresh wakeup and discovery when resuming active master control
+  // Rediscover and reapply the selected group, unless the user powered the system off.
   if (!listen_only_ && !bus_silent_) {
     this->discover_monitors_();
   }
-
-  // A silent window never reclaims the bus automatically after GLM disconnects.
   this->update_bus_status_();
 }
 
@@ -657,7 +658,7 @@ void GenSAMHub::mark_monitor_seen_(GenSAMMonitor &mon) {
 }
 
 void GenSAMHub::check_monitor_timeouts_() {
-  if (bus_silent_ || resuming_ || controls_only_session_) {
+  if (bus_silent_ || resuming_ || race_state_ == RaceState::SLEEPING) {
     return;
   }
   uint32_t now = millis();
@@ -750,6 +751,9 @@ void GenSAMHub::update_bus_status_() {
       case RaceState::POLLING_MONITORS:
         status = "Active";
         break;
+      case RaceState::SLEEPING:
+        status = "Sleeping";
+        break;
       case RaceState::IDLE:
       default:
         status = registry_.any_online() ? "Active" : "Offline";
@@ -771,7 +775,7 @@ void GenSAMHub::set_volume_db(float db) {
     ESP_LOGW(TAG, "Invalid volume request rejected");
     return;
   }
-  if (!this->open_control_window_(true)) return;
+  if (!this->accept_user_command_(true)) return;
   current_volume_db_ = std::clamp(db, min_volume_db_, max_volume_db_);
   volume_tx_pending_ = true;
   this->save_control_state_();
@@ -780,8 +784,8 @@ void GenSAMHub::set_volume_db(float db) {
 }
 
 void GenSAMHub::set_group_mute(bool mute) {
-  if (!this->open_control_window_(true)) return;
-  if (!can_transmit()) {
+  if (!this->accept_user_command_(true)) return;
+  if (!bus_silent_ && !can_transmit()) {  // A silent bus holds it until the next wake.
     ESP_LOGW(TAG, "Cannot send mute command: Bus is not available for TX");
     return;
   }
@@ -794,7 +798,7 @@ void GenSAMHub::set_group_mute(bool mute) {
 }
 
 void GenSAMHub::set_system_leds_enabled(bool enabled) {
-  if (!this->open_control_window_()) return;
+  if (!this->accept_user_command_()) return;
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot set monitor LEDs: Bus is not available for TX");
     return;
@@ -806,7 +810,7 @@ void GenSAMHub::set_system_leds_enabled(bool enabled) {
 }
 
 void GenSAMHub::set_iss_sleep_delay(uint32_t minutes) {
-  if (!this->open_control_window_()) return;
+  if (!this->accept_user_command_()) return;
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot set ISS sleep delay: Bus is not available for TX");
     return;
@@ -820,7 +824,7 @@ void GenSAMHub::set_iss_sleep_delay(uint32_t minutes) {
 }
 
 void GenSAMHub::set_iss_threshold(int32_t dbu) {
-  if (!this->open_control_window_()) return;
+  if (!this->accept_user_command_()) return;
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot set ISS sensitivity: Bus is not available for TX");
     return;
@@ -833,7 +837,7 @@ void GenSAMHub::set_iss_threshold(int32_t dbu) {
 }
 
 void GenSAMHub::set_phase_correction_bypass(bool bypass) {
-  if (!this->open_control_window_()) return;
+  if (!this->accept_user_command_()) return;
   if (!can_transmit()) {
     ESP_LOGW(TAG, "Cannot set phase-correction bypass: Bus is not available for TX");
     if (phase_correction_bypass_switch_ != nullptr) {
@@ -1526,7 +1530,7 @@ void GenSAMHub::log_stats_() {
 void GenSAMHub::loop() {
   this->process_rx_();
   this->check_glm_cooldown_();
-  this->service_control_window_(millis());
+  this->service_user_commands_(millis());
   // After RX, so a reply that has just landed has cleared current_query_addr_; before the state
   // machine, so the frame is on the wire before it picks its next step.
   this->service_pending_writes_(millis());

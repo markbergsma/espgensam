@@ -168,6 +168,15 @@ struct GenSAMMonitor {
   bool standby{true};                ///< Amplifier standby state; only meaningful when standby_known is true.
   bool standby_known{false};        ///< True once the monitor has actually reported its power state.
   bool online{false};               ///< Whether the monitor is currently responsive to bus traffic.
+  int32_t iss_level_dbu{ISS_LEVEL_SILENCE};  ///< Last 3A 84 input level read; ISS_LEVEL_SILENCE = none.
+  bool iss_level_known{false};       ///< True once a 3A 84 reply has been received.
+  uint32_t iss_level_ms{0};          ///< millis() of the 3A 84 reply in iss_level_dbu.
+  uint32_t iss_stored_delay_min{0};  ///< Speaker's own ISS sleep delay (3A 81), when known.
+  int32_t iss_stored_threshold_dbu{0};  ///< Speaker's own ISS threshold (3A 82), when known.
+  bool iss_stored_delay_known{false};
+  bool iss_stored_threshold_known{false};
+  bool iss_read_sent{false};         ///< True once any ISS read has been sent to this monitor.
+  uint32_t iss_last_read_ms{0};      ///< millis() of the last ISS read sent to this monitor.
   uint32_t last_seen_ms{0};         ///< Timestamp (millis) of last valid frame received from this monitor.
   uint32_t last_poll_ms{0};         ///< Timestamp (millis) when the last query frame was sent to this monitor.
 

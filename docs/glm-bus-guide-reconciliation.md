@@ -138,11 +138,34 @@ next restart.
 Two more points affect sleep timing:
 
 - **Polling holds the speakers awake.** Every `08` status query resets the speaker's ISS idle
-  timer (guide §11.2), which matches the comparison doc §9 isolation trial. The control window
-  must close before ISS can count down, and it already does.
-- **Not yet verified on hardware.** It is not confirmed that a speaker applies `3A 01`/`3A 02`
-  without the store. If it does not, these selects have no effect, and the only alternative
-  would be to send the store.
+  timer (guide §11.2), which matches the comparison doc §9 isolation trial. The speakers' own
+  ISS therefore never runs under the hub, which manages sleep itself (§3.1).
+- **Verified on hardware.** A runtime `3A 01` delay write takes effect without the store
+  (8351B, firmware 1.24).
+
+### 3.1 Hub-managed sleep (8351B hardware findings)
+
+These were measured on two 8351B monitors (firmware 1.24.07, AES3 input) and are the basis
+of the hub's own sleep policy (`hub.h` section 8):
+
+- **Reads.** Setting `0x80` on the `3A` sub-command reads the value back as a unicast reply
+  `01 09 [payload]`. `3A 81` returns the stored delay (0 or ≥ 65535 means Never). `3A 82`
+  returns the threshold (`FF FF FF B5` = −75 dBu). `3A 84` returns the measured input level
+  in dBu: `80 00 00 00` with no signal, about −90 while asleep. `3A 83` returns a single
+  state byte: `01` awake, `03` asleep (`02` per the manual, not seen).
+- **Sleep request.** One broadcast `3A 03 00` puts the speakers to sleep. Sending it twice
+  toggles them back awake.
+- **Polling wakes a sleeping speaker.** A sleeping speaker still answers frames, but an `08`
+  status query or keep-alive wakes it (`47 04` for about 10 s, then a restart).
+  `F0 02 [UID] [RID]` (set RID) and `3A 83` do not, so the hub uses that pair as its probe.
+  A session lapses about 2.6 s after the last frame, so each probe re-assigns the RID first.
+  The lapse timer restarts on any valid frame, broadcasts included, so discovery must not
+  start until a probed speaker's session has lapsed: discovery's own wake broadcasts kept it
+  alive, it ignored the RACE ping, and its address was handed to the other speaker.
+- **Audio wake is silent on the bus.** The speaker restarts without a session and announces
+  nothing. The probe is the only way to notice it.
+- **Bounce.** A speaker that had real audio within the previous few minutes may wake itself
+  about 12 s after the sleep request, with no bus traffic involved.
 
 ## 4. Phase-correction bypass (`0x53`)
 
@@ -177,7 +200,8 @@ All of them pass, which independently confirms the CRC and the escaping for thes
 
 ## 6. Still open
 
-- Whether ISS writes take effect without `15 33 00` (§3).
+- Whether `3A 02` threshold writes take effect without `15 33 00` (§3); `3A 01` does.
+- Whether other SAM models answer the `3A 8x` reads and the sleep probe the same way (§3.1).
 - Whether every SAM model honours `53 00 01`. The guide's frames come from one speaker.
 - The supply-rail value encoding on a real three-way (§2.2).
 - `0x3C`, `0x3E` and `0x42` are documented as single stored bytes. espgensam's observations of
