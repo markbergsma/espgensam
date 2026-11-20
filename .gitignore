@@ -29,6 +29,5 @@ captures/
 tmp/
 # Third-party reference documents whose redistribution rights are unknown
 references/
-docs/Genelec_GLM_bus_interface_manual_v1.2_EN.md
 
 .playwright-mcp/
